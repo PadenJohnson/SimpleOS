@@ -1,4 +1,4 @@
-//! The Solon desktop: top bar, app icons, and a single movable app window.
+//! The Solon desktop: app windows (several at once), and a taskbar with the Applications menu.
 //! There are deliberately no login, account or download features.
 
 use alloc::format;
@@ -61,25 +61,17 @@ impl App {
     }
 }
 
-const BAR_H: i32 = 32;
-const CELL_W: i32 = 112;
-const CELL_H: i32 = 112;
-const ICON: i32 = 64;
+/// Height of the taskbar along the bottom.
+const BAR_H: i32 = 44;
 const TITLE_H: i32 = 36;
-const WIN_LEFT: i32 = 152; // windows open to the right of the icon column
 const DOUBLE_CLICK_TICKS: u64 = 50; // 0.5 s at 100 Hz
 
 const TEXT: u32 = rgb(240, 242, 245);
 const TEXT_DIM: u32 = rgb(170, 180, 190);
 const WIN_BG: u32 = rgb(250, 250, 252);
 
-struct Icon {
-    app: App,
-    x: i32,
-    y: i32,
-    /// Height of its clickable cell (icons squeeze together on short screens).
-    h: i32,
-}
+/// Every app, in the order the Applications menu shows them.
+const APPS: [App; 8] = [App::Photos, App::Documents, App::Files, App::Import, App::Printers, App::Videos, App::Disks, App::Settings];
 
 struct Window {
     app: App,
@@ -87,6 +79,9 @@ struct Window {
     y: i32,
     w: i32,
     h: i32,
+    minimized: bool,
+    /// Where it was before being maximized.
+    restore: Option<Rect>,
 }
 
 impl Window {
@@ -99,6 +94,12 @@ impl Window {
     fn close_box(&self) -> Rect {
         Rect::new(self.x + self.w - TITLE_H, self.y, TITLE_H, TITLE_H)
     }
+    fn max_box(&self) -> Rect {
+        Rect::new(self.x + self.w - 2 * TITLE_H, self.y, TITLE_H, TITLE_H)
+    }
+    fn min_box(&self) -> Rect {
+        Rect::new(self.x + self.w - 3 * TITLE_H, self.y, TITLE_H, TITLE_H)
+    }
     /// The area the app draws into.
     fn body(&self) -> Rect {
         Rect::new(self.x, self.y + TITLE_H + 1, self.w, self.h - TITLE_H - 1)
@@ -108,12 +109,17 @@ impl Window {
 pub struct Desktop {
     w: i32,
     h: i32,
-    icons: Vec<Icon>,
-    selected: Option<usize>,
-    window: Option<Window>,
-    drag: Option<(i32, i32)>,
+    /// Open windows, bottom to top (the last one not minimized has the focus).
+    windows: Vec<Window>,
+    /// Apps in the order they were opened (the taskbar buttons).
+    order: Vec<App>,
+    /// Moving a window: (app, offset of the pointer from its corner).
+    drag: Option<(App, i32, i32)>,
     clock: (u8, u8),
-    last_click: Option<(usize, u64)>,
+    /// Last click on a title bar (double-click maximizes).
+    last_title: Option<(App, u64)>,
+    /// The Applications menu is open (and which item the keyboard is on).
+    apps_menu: Option<usize>,
     photos: Photos,
     import: Import,
     usb: Usb,
@@ -218,27 +224,17 @@ impl Desktop {
         true
     }
 
-    fn layout_icons(w: i32, h: i32) -> Vec<Icon> {
-        let _ = w;
-        let apps = [App::Photos, App::Videos, App::Documents, App::Printers, App::Import, App::Files, App::Disks, App::Settings];
-        // Leave room under the last icon for its name.
-        let top = BAR_H + 12;
-        let step = ((h - top - 100) / (apps.len() as i32 - 1)).min(CELL_H);
-        apps.iter().enumerate().map(|(i, &app)| Icon { app, x: 24, y: top + i as i32 * step, h: step }).collect()
-    }
-
     /// `w`, `h`: the (possibly scaled-down) desktop size; `screen`: the physical screen size.
     pub fn new(w: usize, h: usize, photos: Photos, usb: Usb, storage: Storage, settings: Settings, screen: (usize, usize)) -> Self {
-        let icons = Self::layout_icons(w as i32, h as i32);
         let mut d = Self {
             w: w as i32,
             h: h as i32,
-            icons,
-            selected: None,
-            window: None,
+            windows: Vec::new(),
+            order: Vec::new(),
             drag: None,
             clock: (0, 0),
-            last_click: None,
+            last_title: None,
+            apps_menu: None,
             photos,
             import: Import::new(),
             drive_ids: usb.drives.iter().map(|d| d.id).chain(usb.phones.iter().map(|p| p.id)).collect(),
@@ -293,10 +289,7 @@ impl Desktop {
     pub fn resize(&mut self, w: usize, h: usize) {
         self.w = w as i32;
         self.h = h as i32;
-        self.icons = Self::layout_icons(self.w, self.h);
-        if let Some(app) = self.window.as_ref().map(|win| win.app) {
-            self.open(app); // re-fit the window
-        }
+        self.fit_windows();
     }
 
     fn apply_settings(&mut self, n: Settings) {
@@ -315,11 +308,11 @@ impl Desktop {
     }
 
     fn power_button(&self) -> Rect {
-        Rect::new(self.w - 44, 0, 44, BAR_H)
+        Rect::new(self.w - 48, self.h - BAR_H, 48, BAR_H)
     }
 
     fn power_item(&self, i: i32) -> Rect {
-        Rect::new(self.w - 236, BAR_H + 10 + i * 46, 220, 42)
+        Rect::new(self.w - 236, self.h - BAR_H - 10 - 3 * 46 + i * 46, 220, 42)
     }
 
     fn confirm_box(&self) -> Rect {
@@ -623,10 +616,10 @@ impl Desktop {
             self.drive_ids = ids;
             self.import.drives_changed(&self.usb);
             self.files.drives_changed(&mut self.storage, &mut self.usb);
-            if matches!(&self.window, Some(w) if w.app == App::Disks) {
+            if self.is_open(App::Disks) {
                 self.disks.refresh(&mut self.storage, &mut self.usb);
             }
-            if matches!(&self.window, Some(w) if w.app == App::Documents) && !self.docs.editing() {
+            if self.is_open(App::Documents) && !self.docs.editing() {
                 self.docs.refresh(&mut self.storage, &mut self.usb);
             }
             let usb = &self.usb;
@@ -1123,81 +1116,91 @@ impl Desktop {
         }
     }
 
-    fn icon_rect(i: &Icon) -> Rect {
-        Rect::new(i.x, i.y, CELL_W, i.h - 8)
+    // ---- windows ----------------------------------------------------------------------
+
+    /// The area above the taskbar.
+    fn work(&self) -> Rect {
+        Rect::new(0, 0, self.w, self.h - BAR_H)
     }
 
-    pub fn draw(&mut self, c: &mut Canvas) {
-        let (w, h) = (self.w, self.h);
+    fn is_open(&self, app: App) -> bool {
+        self.windows.iter().any(|w| w.app == app)
+    }
 
-        if self.screen_off {
-            c.fill_rect(0, 0, w, h, 0);
+    fn index_of(&self, app: App) -> Option<usize> {
+        self.windows.iter().position(|w| w.app == app)
+    }
+
+    /// The window with the keyboard focus: the top one that isn't minimized.
+    fn focused(&self) -> Option<usize> {
+        self.windows.iter().rposition(|w| !w.minimized)
+    }
+
+    fn focused_app(&self) -> Option<App> {
+        self.focused().map(|i| self.windows[i].app)
+    }
+
+    /// Bring a window to the top (showing it again if it was minimized).
+    fn raise(&mut self, app: App) {
+        if let Some(i) = self.index_of(app) {
+            let mut w = self.windows.remove(i);
+            w.minimized = false;
+            self.windows.push(w);
+        }
+    }
+
+    fn set_maximized(&mut self, app: App, max: bool) {
+        let work = self.work();
+        let Some(i) = self.index_of(app) else { return };
+        let w = &mut self.windows[i];
+        match (max, w.restore) {
+            (true, None) => {
+                w.restore = Some(w.rect());
+                (w.x, w.y, w.w, w.h) = (work.x, work.y, work.w, work.h);
+            }
+            (false, Some(r)) => {
+                w.restore = None;
+                (w.x, w.y, w.w, w.h) = (r.x, r.y, r.w, r.h);
+            }
+            _ => {}
+        }
+    }
+
+    /// Keep windows on screen after the desktop size changes.
+    fn fit_windows(&mut self) {
+        let work = self.work();
+        for w in &mut self.windows {
+            if w.restore.is_some() {
+                (w.x, w.y, w.w, w.h) = (work.x, work.y, work.w, work.h);
+                continue;
+            }
+            w.w = w.w.min(work.w);
+            w.h = w.h.min(work.h);
+            w.x = w.x.clamp(0, (work.w - w.w).max(0));
+            w.y = w.y.clamp(0, (work.h - w.h).max(0));
+        }
+    }
+
+    /// Open an app's window, or bring it forward if it's already open.
+    fn open(&mut self, app: App) {
+        self.apps_menu = None;
+        if self.is_open(app) {
+            self.raise(app);
+            kprintln!("solon: switch to {}", app.name());
             return;
         }
-
-        // Background
-        let (_, top, bottom) = settings::BACKGROUNDS[self.settings.background];
-        c.gradient_v(0, 0, w, h, top, bottom);
-        c.text_centered(w / 2, h - 44, "Solon", Size::Large, true, crate::gfx::mix(top, rgb(160, 180, 200), 80));
-
-        // Top bar
-        c.fill_rect_alpha(0, 0, w, BAR_H, 0, 140);
-        c.text(16, 6, "Solon", Size::Medium, true, TEXT);
-        let clock = self.settings.clock_text(self.clock.0, self.clock.1);
-        let cw = text_width(&clock, Size::Medium, true);
-        let right = self.power_button().x - 8;
-        c.text(right - cw, 6, &clock, Size::Medium, true, TEXT);
-        let mut status = String::from("Offline");
-        if self.settings.show_date {
-            status = format!("{}   |   {}", settings::date_text(self.date.0, self.date.1, self.date.2), status);
+        let work = self.work();
+        let n = self.windows.len() as i32;
+        let w = (work.w * 82 / 100).clamp(560.min(work.w), work.w);
+        let h = (work.h * 86 / 100).clamp(360.min(work.h), work.h);
+        let x = ((work.w - w) / 2 + (n % 6) * 28 - 70).clamp(0, (work.w - w).max(0));
+        let y = ((work.h - h) / 2 + (n % 6) * 28 - 50).clamp(0, (work.h - h).max(0));
+        self.windows.push(Window { app, x, y, w, h, minimized: false, restore: None });
+        self.order.push(app);
+        // The editors want all the room they can get.
+        if matches!(app, App::Photos | App::Documents) {
+            self.set_maximized(app, true);
         }
-        let sw = text_width(&status, Size::Small, false);
-        c.text(right - cw - 18 - sw, 8, &status, Size::Small, false, TEXT_DIM);
-        if let Some((msg, _)) = &self.toast {
-            let tw = text_width(msg, Size::Small, true) + 32;
-            c.round_rect(w / 2 - tw / 2, 4, tw, 24, 12, rgb(243, 156, 18));
-            c.text_centered(w / 2, 8, msg, Size::Small, true, rgb(30, 30, 30));
-        }
-
-        // Icons
-        for (n, icon) in self.icons.iter().enumerate() {
-            if self.selected == Some(n) {
-                let r = Self::icon_rect(icon);
-                c.round_rect_alpha(r.x, r.y, r.w, r.h, 10, rgb(255, 255, 255), 50);
-            }
-            icons::draw(c, icon.app, icon.x + (CELL_W - ICON) / 2, icon.y + 8);
-            c.text_centered(icon.x + CELL_W / 2, icon.y + ICON + 16, icon.app.name(), Size::Small, false, TEXT);
-        }
-
-        if let Some(win) = &self.window {
-            let title = if win.app == App::Documents { self.docs.title() } else { None };
-            draw_frame(c, win, title.as_deref().unwrap_or(win.app.name()));
-            let body = win.body();
-            c.set_clip(body);
-            match win.app {
-                App::Photos => self.photos.draw(c, body),
-                App::Import => self.import.draw(c, body, &self.usb, &self.storage_view),
-                App::Settings => self.settings_app.draw(c, body, &self.settings, self.screen, self.storage.library.is_some()),
-                App::Files => self.files.draw(c, body, &self.storage, &self.usb),
-                App::Disks => self.disks.draw(c, body, &self.storage),
-                App::Documents => self.docs.draw(c, body),
-                app => draw_placeholder(c, app, body),
-            }
-            c.reset_clip();
-        }
-        if self.install_notice {
-            self.draw_install_notice(c);
-        }
-        self.draw_power(c);
-        if self.show_log {
-            self.draw_log(c);
-        }
-    }
-
-    fn open(&mut self, app: App) {
-        let ww = (self.w - WIN_LEFT - 16).max(560);
-        let wh = (self.h - BAR_H - 28).max(360);
-        self.window = Some(Window { app, x: WIN_LEFT, y: BAR_H + 12, w: ww, h: wh });
         kprintln!("solon: open {}", app.name());
         if app == App::Settings {
             self.settings_app.reload_time();
@@ -1213,11 +1216,237 @@ impl Desktop {
         }
     }
 
-    fn close(&mut self) {
-        if let Some(win) = self.window.take() {
-            kprintln!("solon: close {}", win.app.name());
+    fn close_app(&mut self, app: App) {
+        self.windows.retain(|w| w.app != app);
+        self.order.retain(|a| *a != app);
+        if matches!(self.drag, Some((a, ..)) if a == app) {
+            self.drag = None;
         }
-        self.drag = None;
+        self.capture = false;
+        kprintln!("solon: close {}", app.name());
+    }
+
+    // ---- taskbar and Applications menu -------------------------------------------------
+
+    fn apps_button(&self) -> Rect {
+        Rect::new(6, self.h - BAR_H + 5, 150, BAR_H - 10)
+    }
+
+    /// Taskbar buttons for open windows (in opening order), squeezed to fit.
+    fn task_buttons(&self) -> Vec<(App, Rect)> {
+        let start = self.apps_button().x + self.apps_button().w + 10;
+        let end = self.power_button().x - 230;
+        let n = self.order.len().max(1) as i32;
+        let w = ((end - start) / n - 6).clamp(44, 190);
+        self.order.iter().enumerate().map(|(i, &a)| (a, Rect::new(start + i as i32 * (w + 6), self.h - BAR_H + 5, w, BAR_H - 10))).collect()
+    }
+
+    /// Columns in the Applications menu: 2, or 4 when the screen is too short for that.
+    fn menu_cols(&self) -> usize {
+        if 64 + 4 * 100 + BAR_H + 24 > self.h { 4 } else { 2 }
+    }
+
+    fn menu_box(&self) -> Rect {
+        let cols = self.menu_cols() as i32;
+        let rows = APPS.len().div_ceil(cols as usize) as i32;
+        Rect::new(6, self.h - BAR_H - 12 - (64 + rows * 100), cols * 170 + 32, 64 + rows * 100)
+    }
+
+    fn menu_item(&self, i: usize) -> Rect {
+        let b = self.menu_box();
+        let cols = self.menu_cols();
+        Rect::new(b.x + 16 + (i % cols) as i32 * 170, b.y + 52 + (i / cols) as i32 * 100, 166, 96)
+    }
+
+    fn draw_taskbar(&self, c: &mut Canvas) {
+        let (w, h) = (self.w, self.h);
+        let y = h - BAR_H;
+        c.fill_rect_alpha(0, y, w, BAR_H, rgb(12, 16, 22), 215);
+        c.fill_rect_alpha(0, y, w, 1, rgb(255, 255, 255), 30);
+        // Applications button: a 3x3 grid of dots.
+        let a = self.apps_button();
+        let open = self.apps_menu.is_some();
+        c.round_rect_alpha(a.x, a.y, a.w, a.h, 8, rgb(255, 255, 255), if open { 70 } else { 30 });
+        for r in 0..3 {
+            for k in 0..3 {
+                c.round_rect(a.x + 12 + k * 7, a.y + 9 + r * 7, 5, 5, 1, TEXT);
+            }
+        }
+        c.text(a.x + 44, a.y + 8, "Applications", Size::Small, true, TEXT);
+        // Open windows.
+        let focus = self.focused_app();
+        for (app, b) in self.task_buttons() {
+            let minimized = self.windows.iter().any(|w| w.app == app && w.minimized);
+            let alpha = if focus == Some(app) { 70 } else if minimized { 12 } else { 30 };
+            c.round_rect_alpha(b.x, b.y, b.w, b.h, 8, rgb(255, 255, 255), alpha);
+            if focus == Some(app) {
+                c.fill_rect(b.x + 10, b.y + b.h - 3, b.w - 20, 3, icons::tile_color(app));
+            }
+            c.round_rect(b.x + 8, b.y + 8, 18, 18, 5, icons::tile_color(app));
+            if b.w > 70 {
+                let name = crate::photos::ellipsize(app.name(), b.w - 40, Size::Small, false);
+                c.text(b.x + 34, b.y + 8, &name, Size::Small, false, if minimized { TEXT_DIM } else { TEXT });
+            }
+        }
+        // Clock, date, power.
+        let clock = self.settings.clock_text(self.clock.0, self.clock.1);
+        let cw = text_width(&clock, Size::Medium, true);
+        let right = self.power_button().x - 10;
+        c.text(right - cw, y + 11, &clock, Size::Medium, true, TEXT);
+        if self.settings.show_date {
+            let d = settings::date_text(self.date.0, self.date.1, self.date.2);
+            let dw = text_width(&d, Size::Small, false);
+            c.text(right - cw - 16 - dw, y + 13, &d, Size::Small, false, TEXT_DIM);
+        }
+    }
+
+    fn draw_apps_menu(&self, c: &mut Canvas) {
+        let Some(sel) = self.apps_menu else { return };
+        let b = self.menu_box();
+        c.round_rect_alpha(b.x + 3, b.y + 6, b.w, b.h, 14, 0, 100);
+        c.round_rect(b.x, b.y, b.w, b.h, 14, rgb(246, 247, 250));
+        c.text(b.x + 20, b.y + 16, "Applications", Size::Medium, true, rgb(40, 44, 52));
+        for (i, &app) in APPS.iter().enumerate() {
+            let r = self.menu_item(i);
+            if i == sel {
+                c.round_rect(r.x, r.y, r.w, r.h, 10, rgb(222, 232, 246));
+            }
+            icons::draw(c, app, r.x + (r.w - 64) / 2, r.y + 2);
+            c.text_centered(r.x + r.w / 2, r.y + 72, app.name(), Size::Small, true, rgb(40, 44, 52));
+        }
+    }
+
+    // ---- drawing ------------------------------------------------------------------------
+
+    pub fn draw(&mut self, c: &mut Canvas) {
+        let (w, h) = (self.w, self.h);
+
+        if self.screen_off {
+            c.fill_rect(0, 0, w, h, 0);
+            return;
+        }
+
+        // Background
+        let (_, top, bottom) = settings::BACKGROUNDS[self.settings.background];
+        c.gradient_v(0, 0, w, h, top, bottom);
+        c.text_centered(w / 2, (h - BAR_H) / 2 - 16, "Solon", Size::Large, true, crate::gfx::mix(top, rgb(160, 180, 200), 80));
+        if self.windows.is_empty() {
+            c.text_centered(w / 2, (h - BAR_H) / 2 + 30, "Press Applications (bottom left) to start", Size::Small, false, crate::gfx::mix(top, rgb(200, 210, 220), 140));
+        }
+
+        // Windows, bottom to top.
+        let focus = self.focused();
+        for i in 0..self.windows.len() {
+            let win = &self.windows[i];
+            if win.minimized {
+                continue;
+            }
+            let title = if win.app == App::Documents { self.docs.title() } else { None };
+            draw_frame(c, win, title.as_deref().unwrap_or(win.app.name()), focus == Some(i));
+            let body = win.body();
+            let app = win.app;
+            c.set_clip(body);
+            match app {
+                App::Photos => self.photos.draw(c, body),
+                App::Import => self.import.draw(c, body, &self.usb, &self.storage_view),
+                App::Settings => self.settings_app.draw(c, body, &self.settings, self.screen, self.storage.library.is_some()),
+                App::Files => self.files.draw(c, body, &self.storage, &self.usb),
+                App::Disks => self.disks.draw(c, body, &self.storage),
+                App::Documents => self.docs.draw(c, body),
+                app => draw_placeholder(c, app, body),
+            }
+            c.reset_clip();
+        }
+
+        self.draw_taskbar(c);
+        if let Some((msg, _)) = &self.toast {
+            let tw = text_width(msg, Size::Small, true) + 32;
+            let y = h - BAR_H - 40;
+            c.round_rect_alpha(w / 2 - tw / 2 + 2, y + 3, tw, 28, 14, 0, 80);
+            c.round_rect(w / 2 - tw / 2, y, tw, 28, 14, rgb(243, 156, 18));
+            c.text_centered(w / 2, y + 6, msg, Size::Small, true, rgb(30, 30, 30));
+        }
+        self.draw_apps_menu(c);
+        if self.install_notice {
+            self.draw_install_notice(c);
+        }
+        self.draw_power(c);
+        if self.show_log {
+            self.draw_log(c);
+        }
+    }
+
+    // ---- input --------------------------------------------------------------------------
+
+    fn app_wheel(&mut self, app: App, wheel: i8, body: Rect) -> bool {
+        match app {
+            App::Photos => self.photos.on_wheel(wheel, body),
+            App::Import => self.import.on_wheel(wheel, body, &self.usb),
+            App::Files => self.files.on_wheel(wheel, body),
+            App::Disks => self.disks.on_wheel(wheel, body),
+            App::Documents => self.docs.on_wheel(wheel, body),
+            _ => false,
+        }
+    }
+
+    fn app_press(&mut self, app: App, x: i32, y: i32, body: Rect, now: u64) -> bool {
+        let mut redraw = false;
+        match app {
+            App::Photos => {
+                redraw |= self.photos.on_press(x, y, body, now);
+                self.capture = true;
+                redraw |= self.photo_action();
+            }
+            App::Import => {
+                let a = self.import.on_press(x, y, body, now, &mut self.usb, &self.storage_view);
+                redraw |= self.apply(a);
+            }
+            App::Files => {
+                let a = self.files.on_press(x, y, body, now, &mut self.storage, &mut self.usb);
+                redraw |= self.files_action(a, now);
+            }
+            App::Disks => {
+                let a = self.disks.on_press(x, y, body, &self.storage, &self.usb);
+                redraw |= self.disk_action(a, now);
+            }
+            App::Documents => {
+                let a = self.docs.on_press(x, y, body, now, &mut self.storage, &mut self.usb);
+                self.capture = true;
+                redraw |= self.docs_action(a, now);
+            }
+            App::Settings => {
+                let screen = self.screen;
+                match self.settings_app.on_press(x, y, body, &self.settings, screen) {
+                    SettingsAction::None => {}
+                    SettingsAction::Redraw => redraw = true,
+                    SettingsAction::Change(n) => {
+                        self.apply_settings(n);
+                        redraw = true;
+                    }
+                    SettingsAction::SetClock { y, mo, d, h, mi } => {
+                        crate::rtc::set(y, mo, d, h, mi);
+                        self.date = (y, mo, d);
+                        self.clock = (h, mi);
+                        self.toast = Some((String::from("Clock set"), now + 3 * HZ));
+                        redraw = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        redraw
+    }
+
+    /// A key for an app. None = the app didn't want it.
+    fn app_key(&mut self, app: App, sc: u8, body: Rect) -> Option<bool> {
+        match app {
+            App::Photos => self.photos.on_key(sc, body).map(|r| r | self.photo_action()),
+            App::Import => self.import.on_key(sc, body, &mut self.usb, &self.storage_view).map(|a| self.apply(a)),
+            App::Files => self.files.on_key(sc, body, &mut self.storage, &mut self.usb).map(|a| self.files_action(a, Self::now())),
+            App::Disks => self.disks.on_key(sc).map(|a| self.disk_action(a, Self::now())),
+            App::Documents => self.docs.on_key(sc, body, &mut self.storage, &mut self.usb).map(|a| self.docs_action(a, Self::now())),
+            _ => None,
+        }
     }
 
     /// Returns true if the screen needs redrawing.
@@ -1233,45 +1462,39 @@ impl Desktop {
             return true;
         }
 
-        if wheel != 0 {
-            if let Some(win) = &self.window {
-                if win.rect().contains(x, y) {
-                    match win.app {
-                        App::Photos => redraw |= self.photos.on_wheel(wheel, win.body()),
-                        App::Import => redraw |= self.import.on_wheel(wheel, win.body(), &self.usb),
-                        App::Files => redraw |= self.files.on_wheel(wheel, win.body()),
-                        App::Disks => redraw |= self.disks.on_wheel(wheel, win.body()),
-                        App::Documents => redraw |= self.docs.on_wheel(wheel, win.body()),
-                        _ => {}
-                    }
-                }
+        // The wheel scrolls whichever window is under the pointer.
+        if wheel != 0 && self.apps_menu.is_none() {
+            if let Some(i) = self.windows.iter().rposition(|w| !w.minimized && w.rect().contains(x, y)) {
+                let (app, body) = (self.windows[i].app, self.windows[i].body());
+                redraw |= self.app_wheel(app, wheel, body);
             }
         }
 
-        // A press inside the Photos window keeps getting moves until release (editor drags).
+        // A press inside Photos/Documents keeps getting moves until release (editor drags).
         if self.capture {
-            if let Some(win) = &self.window {
-                let body = win.body();
-                let docs = win.app == App::Documents;
+            if let Some(i) = self.focused() {
+                let (app, body) = (self.windows[i].app, self.windows[i].body());
                 if released {
                     self.capture = false;
-                    return redraw | if docs { self.docs.on_release() } else { self.photos.on_release() };
+                    return redraw | if app == App::Documents { self.docs.on_release() } else { self.photos.on_release() };
                 }
                 if buttons & 1 != 0 {
-                    return redraw | if docs { self.docs.on_drag(x, y, body) } else { self.photos.on_drag(x, y, body) };
+                    return redraw | if app == App::Documents { self.docs.on_drag(x, y, body) } else { self.photos.on_drag(x, y, body) };
                 }
             }
             self.capture = false;
         }
 
-        if let Some((ox, oy)) = self.drag {
+        if let Some((app, ox, oy)) = self.drag {
             if released {
                 self.drag = None;
                 return redraw;
             }
-            if let Some(win) = &mut self.window {
-                win.x = (x - ox).clamp(-win.w + 80, self.w - 80);
-                win.y = (y - oy).clamp(BAR_H, self.h - TITLE_H);
+            let work = self.work();
+            if let Some(i) = self.index_of(app) {
+                let win = &mut self.windows[i];
+                win.x = (x - ox).clamp(-win.w + 120, work.w - 120);
+                win.y = (y - oy).clamp(0, work.h - TITLE_H);
                 return true;
             }
         }
@@ -1288,83 +1511,82 @@ impl Desktop {
             return true;
         }
         if let Some(r) = self.power_click(x, y) {
+            self.apps_menu = None;
             return r;
         }
 
-        if let Some(win) = &self.window {
-            if win.close_box().contains(x, y) {
-                self.close();
+        // Applications menu and taskbar.
+        if self.apps_menu.is_some() {
+            if let Some(i) = (0..APPS.len()).find(|&i| self.menu_item(i).contains(x, y)) {
+                self.open(APPS[i]);
                 return true;
             }
-            if win.title_bar().contains(x, y) {
-                self.drag = Some((x - win.x, y - win.y));
-                return redraw;
+            let on_menu = self.menu_box().contains(x, y);
+            let on_button = self.apps_button().contains(x, y);
+            self.apps_menu = None;
+            if on_menu || on_button {
+                return true;
             }
-            if win.body().contains(x, y) {
-                let body = win.body();
-                match win.app {
-                    App::Photos => {
-                        redraw |= self.photos.on_press(x, y, body, now);
-                        self.capture = true;
-                        redraw |= self.photo_action();
-                    }
-                    App::Import => {
-                        let a = self.import.on_press(x, y, body, now, &mut self.usb, &self.storage_view);
-                        redraw |= self.apply(a);
-                    }
-                    App::Files => {
-                        let a = self.files.on_press(x, y, body, now, &mut self.storage, &mut self.usb);
-                        redraw |= self.files_action(a, now);
-                    }
-                    App::Disks => {
-                        let a = self.disks.on_press(x, y, body, &self.storage, &self.usb);
-                        redraw |= self.disk_action(a, now);
-                    }
-                    App::Documents => {
-                        let a = self.docs.on_press(x, y, body, now, &mut self.storage, &mut self.usb);
-                        self.capture = true;
-                        redraw |= self.docs_action(a, now);
-                    }
-                    App::Settings => {
-                        let screen = self.screen;
-                        match self.settings_app.on_press(x, y, body, &self.settings, screen) {
-                            SettingsAction::None => {}
-                            SettingsAction::Redraw => redraw = true,
-                            SettingsAction::Change(n) => {
-                                self.apply_settings(n);
-                                redraw = true;
-                            }
-                            SettingsAction::SetClock { y, mo, d, h, mi } => {
-                                crate::rtc::set(y, mo, d, h, mi);
-                                self.date = (y, mo, d);
-                                self.clock = (h, mi);
-                                self.toast = Some((String::from("Clock set"), now + 3 * HZ));
-                                redraw = true;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-                return redraw;
-            }
-            if win.rect().contains(x, y) {
-                return redraw;
-            }
+            redraw = true;
+        } else if self.apps_button().contains(x, y) {
+            self.apps_menu = Some(0);
+            return true;
         }
-
-        let hit = self.icons.iter().position(|i| Self::icon_rect(i).contains(x, y));
-        if let Some(n) = hit {
-            let double = matches!(self.last_click, Some((m, t)) if m == n && now - t <= DOUBLE_CLICK_TICKS);
-            self.last_click = Some((n, now));
-            self.selected = Some(n);
-            if double {
-                self.open(self.icons[n].app);
-                self.last_click = None;
+        if y >= self.h - BAR_H {
+            if let Some((app, _)) = self.task_buttons().into_iter().find(|(_, b)| b.contains(x, y)) {
+                if self.focused_app() == Some(app) {
+                    if let Some(i) = self.index_of(app) {
+                        self.windows[i].minimized = true;
+                        self.capture = false;
+                    }
+                } else {
+                    self.raise(app);
+                }
             }
             return true;
         }
-        self.last_click = None;
-        redraw | self.selected.take().is_some()
+
+        // Windows, top first.
+        let Some(i) = self.windows.iter().rposition(|w| !w.minimized && w.rect().contains(x, y)) else { return redraw };
+        let app = self.windows[i].app;
+        if self.focused_app() != Some(app) {
+            self.raise(app);
+            redraw = true;
+        }
+        let i = self.index_of(app).unwrap();
+        let win = &self.windows[i];
+        if win.close_box().contains(x, y) {
+            self.close_app(app);
+            return true;
+        }
+        if win.max_box().contains(x, y) {
+            let max = win.restore.is_none();
+            self.set_maximized(app, max);
+            return true;
+        }
+        if win.min_box().contains(x, y) {
+            self.windows[i].minimized = true;
+            return true;
+        }
+        if win.title_bar().contains(x, y) {
+            let double = matches!(self.last_title, Some((a, t)) if a == app && now - t <= DOUBLE_CLICK_TICKS);
+            self.last_title = Some((app, now));
+            if double {
+                let max = win.restore.is_none();
+                self.set_maximized(app, max);
+                self.last_title = None;
+                return true;
+            }
+            if win.restore.is_none() {
+                self.drag = Some((app, x - win.x, y - win.y));
+            }
+            return redraw;
+        }
+        let body = win.body();
+        if body.contains(x, y) {
+            redraw |= self.app_press(app, x, y, body, now);
+        }
+        redraw
     }
 
     /// Scancode set 1. Returns true if the screen needs redrawing.
@@ -1423,67 +1645,38 @@ impl Desktop {
             }
             return false;
         }
-        if let Some(win) = &self.window {
-            let body = win.body();
-            match win.app {
-                App::Photos => {
-                    if let Some(redraw) = self.photos.on_key(sc, body) {
-                        return redraw | self.photo_action();
-                    }
-                }
-                App::Import => {
-                    if let Some(a) = self.import.on_key(sc, body, &mut self.usb, &self.storage_view) {
-                        return self.apply(a);
-                    }
-                }
-                App::Files => {
-                    if let Some(a) = self.files.on_key(sc, body, &mut self.storage, &mut self.usb) {
-                        return self.files_action(a, Self::now());
-                    }
-                }
-                App::Disks => {
-                    if let Some(a) = self.disks.on_key(sc) {
-                        return self.disk_action(a, Self::now());
-                    }
-                }
-                App::Documents => {
-                    if let Some(a) = self.docs.on_key(sc, body, &mut self.storage, &mut self.usb) {
-                        return self.docs_action(a, Self::now());
-                    }
-                }
-                _ => {}
+        // Applications menu: arrows move, Enter opens, Esc closes.
+        if let Some(sel) = self.apps_menu {
+            let n = APPS.len();
+            match sc {
+                0x01 => self.apps_menu = None,
+                0x1C => self.open(APPS[sel]),
+                0x4B => self.apps_menu = Some((sel + n - 1) % n),
+                0x4D => self.apps_menu = Some((sel + 1) % n),
+                0x48 => self.apps_menu = Some((sel + n - self.menu_cols()) % n),
+                0x50 => self.apps_menu = Some((sel + self.menu_cols()) % n),
+                _ => return false,
+            }
+            return true;
+        }
+        if let Some(i) = self.focused() {
+            let (app, body) = (self.windows[i].app, self.windows[i].body());
+            if let Some(r) = self.app_key(app, sc, body) {
+                return r;
             }
             if sc == 0x01 {
                 // Esc closes the window
-                self.close();
+                self.close_app(app);
                 return true;
             }
             return false;
         }
-
-        match sc {
-            0x1C => {
-                // Enter: open selected icon
-                if let Some(n) = self.selected {
-                    self.open(self.icons[n].app);
-                    true
-                } else {
-                    false
-                }
-            }
-            0x48 | 0x50 => {
-                // Up / Down: move selection
-                let n = self.icons.len();
-                self.selected = Some(match (self.selected, sc) {
-                    (None, 0x48) => n - 1,
-                    (None, _) => 0,
-                    (Some(cur), 0x48) => (cur + n - 1) % n,
-                    (Some(cur), _) => (cur + 1) % n,
-                });
-                true
-            }
-            _ => false,
+        // Nothing open: Enter or Space opens the Applications menu.
+        if sc == 0x1C || sc == 0x39 {
+            self.apps_menu = Some(0);
+            return true;
         }
+        false
     }
 
     pub fn set_clock(&mut self, h: u8, m: u8) -> bool {
@@ -1493,19 +1686,38 @@ impl Desktop {
     }
 }
 
-fn draw_frame(c: &mut Canvas, win: &Window, title: &str) {
+fn draw_frame(c: &mut Canvas, win: &Window, title: &str, focused: bool) {
     let (x, y, w, h) = (win.x, win.y, win.w, win.h);
-    c.round_rect_alpha(x + 4, y + 8, w, h, 10, 0, 90); // shadow
-    c.round_rect(x, y, w, h, 10, WIN_BG);
-    c.round_rect(x, y, w, TITLE_H + 12, 10, rgb(232, 235, 240));
+    let round = if win.restore.is_some() { 0 } else { 10 };
+    if round > 0 {
+        c.round_rect_alpha(x + 4, y + 8, w, h, 10, 0, if focused { 100 } else { 60 }); // shadow
+    }
+    c.round_rect(x, y, w, h, round, WIN_BG);
+    let bar = if focused { rgb(226, 232, 242) } else { rgb(238, 240, 243) };
+    c.round_rect(x, y, w, TITLE_H + 12, round, bar);
     c.fill_rect(x, y + TITLE_H, w, 12, WIN_BG);
     c.fill_rect(x, y + TITLE_H, w, 1, rgb(210, 214, 220));
 
     // Title with a small app-coloured dot
     c.circle(x + 20, y + TITLE_H / 2, 6, icons::tile_color(win.app));
-    let title = crate::photos::ellipsize(title, w - 90, Size::Medium, true);
-    c.text(x + 34, y + 8, &title, Size::Medium, true, rgb(40, 44, 52));
+    let title = crate::photos::ellipsize(title, w - 3 * TITLE_H - 50, Size::Medium, true);
+    c.text(x + 34, y + 8, &title, Size::Medium, true, if focused { rgb(30, 34, 42) } else { rgb(120, 126, 136) });
 
+    let ink = rgb(70, 76, 86);
+    // Minimize: a line.
+    let m = win.min_box();
+    c.fill_rect(m.x + m.w / 2 - 7, m.y + m.h / 2 + 4, 14, 2, ink);
+    // Maximize / restore: a square (two when maximized).
+    let b = win.max_box();
+    let (bx, by) = (b.x + b.w / 2 - 7, b.y + b.h / 2 - 6);
+    if win.restore.is_some() {
+        c.outline_rect(bx + 3, by - 2, 11, 10, ink);
+        c.fill_rect(bx, by + 2, 11, 10, bar);
+        c.outline_rect(bx, by + 2, 11, 10, ink);
+    } else {
+        c.outline_rect(bx, by, 14, 12, ink);
+        c.fill_rect(bx, by, 14, 2, ink);
+    }
     // Close button
     let b = win.close_box();
     let (cx, cy) = (b.x + b.w / 2, b.y + b.h / 2);
