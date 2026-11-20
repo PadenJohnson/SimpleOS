@@ -133,7 +133,7 @@ impl AhciPort {
             model: String::new(),
         };
         if d.command(ATA_IDENTIFY, 0, 0, 512, false).is_err() {
-            kprintln!("ahci: IDENTIFY failed");
+            kprintln!("ahci: a port answered but isn't a disk (skipped)");
             return None;
         }
         let id: Vec<u16> = d.buf.bytes()[..512].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();

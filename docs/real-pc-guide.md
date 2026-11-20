@@ -133,3 +133,20 @@ Once Solon works well from the stick, it can live on the computer's own disk ins
 If the PC still starts the old system or the stick, open its boot menu at power-on (often
 F12, F9, F8 or Esc) and pick the internal disk, or put it first in the firmware's boot order.
 Disks with 4K sectors aren't supported by the installer yet.
+
+## Updating an installed Solon
+
+No reinstall needed: build or get the new version, then either write `dist\solon.img` to a
+USB stick, or copy the `dist\solon-usb` folder's contents (the `boot` folder is what matters)
+onto any FAT32 or exFAT USB drive. On the installed PC, plug it in, open **Disks** and press
+**Update from USB** on the internal disk. Solon shows both versions (with their dates) and
+whether the USB one is newer, then replaces only the system; photos, documents and settings
+stay. Restart to use the new version. (A new version that changes the bootloader itself
+would need a reinstall; normal updates don't.)
+
+## If the install button is missing
+
+The **Install Solon here** button only appears when Solon can see the USB stick it started
+from. If Disks says it "started from a USB stick it can't reach", try another USB port
+(a blue USB 3 port is best), restart, and check again. If no port works, press **F12** and take
+a picture of the screen.
