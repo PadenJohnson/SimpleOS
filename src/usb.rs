@@ -11,6 +11,7 @@ use crate::interrupts::{sleep_ms, HZ, TICKS};
 use crate::memory::Dma;
 use crate::msc::MassStorage;
 use crate::usbprint::UsbPrinter;
+use crate::phone::Phone;
 use crate::pci;
 use crate::ps2;
 use crate::xhci::{dma_buf, EpConfig, EpType, Speed, UsbError, Xhci, CC_SHORT, CC_SUCCESS};
@@ -76,6 +77,8 @@ pub struct Usb {
     hids: Vec<Hid>,
     pub drives: Vec<Drive>,
     pub printers: Vec<UsbPrinter>,
+    /// Phones and cameras (MTP / PTP). Read only.
+    pub phones: Vec<Phone>,
     next_id: u32,
     next_hub_poll: u64,
     boot_disk: Option<[u8; 16]>,
@@ -133,6 +136,8 @@ struct Iface {
     class: u8,
     sub: u8,
     proto: u8,
+    /// Interface name string index.
+    istr: u8,
     /// (address, attributes, max packet, interval, max burst)
     eps: Vec<(u8, u8, u16, u8, u8)>,
 }
@@ -152,7 +157,7 @@ fn parse_config(d: &[u8]) -> Vec<Iface> {
                 // Only alternate setting 0, except printers (IPP over USB often lives in an alternate).
                 skip_alt = b[3] != 0 && b[5] != 7;
                 if !skip_alt {
-                    out.push(Iface { num: b[2], alt: b[3], class: b[5], sub: b[6], proto: b[7], eps: Vec::new() });
+                    out.push(Iface { num: b[2], alt: b[3], class: b[5], sub: b[6], proto: b[7], istr: b[8], eps: Vec::new() });
                 }
             }
             5 if len >= 7 && !skip_alt => {
@@ -250,6 +255,7 @@ impl Usb {
             hids: Vec::new(),
             drives: Vec::new(),
             printers: Vec::new(),
+            phones: Vec::new(),
             next_id: 1,
             next_hub_poll: 0,
             boot_disk,
@@ -447,7 +453,25 @@ impl Usb {
         }
         let mut hid_plans = Vec::new();
         let mut msc_plan = None;
+        // Phones and cameras: PTP (still image class 6/1/1: iPhones, cameras, many Android
+        // phones), or Android's MTP as a vendor interface named "MTP".
+        let mut phone_plan = None;
         for f in &ifaces {
+            let bulk_in = f.eps.iter().find(|e| e.0 & 0x80 != 0 && e.1 & 3 == 2);
+            let bulk_out = f.eps.iter().find(|e| e.0 & 0x80 == 0 && e.1 & 3 == 2);
+            let (Some(i), Some(o)) = (bulk_in, bulk_out) else { continue };
+            let ptp = f.class == 6 && f.sub == 1 && f.proto == 1;
+            let mtp = f.class == 0xFF && f.istr != 0 && string_descriptor(&mut self.hcs[ci], slot, f.istr).trim().eq_ignore_ascii_case("MTP");
+            if (ptp || mtp) && phone_plan.is_none() {
+                eps.push(EpConfig { dci: (i.0 & 0xF) * 2 + 1, kind: EpType::BulkIn, max_packet: i.2, interval: 0, max_burst: i.4 });
+                eps.push(EpConfig { dci: (o.0 & 0xF) * 2, kind: EpType::BulkOut, max_packet: o.2, interval: 0, max_burst: o.4 });
+                phone_plan = Some((f.num, i.0, o.0));
+            }
+        }
+        for f in &ifaces {
+            if phone_plan.is_some_and(|(n, _, _)| n == f.num) {
+                continue;
+            }
             if f.class == 3 && f.sub == 1 && (f.proto == 1 || f.proto == 2) {
                 if let Some(&(addr, _, mps, interval, burst)) = f.eps.iter().find(|e| e.0 & 0x80 != 0 && e.1 & 3 == 3) {
                     let dci = (addr & 0xF) * 2 + 1;
@@ -500,6 +524,17 @@ impl Usb {
                 if p.usable() { "" } else { " (no language Solon speaks yet)" }
             );
             self.printers.push(p);
+            return Ok(true);
+        }
+
+        if let Some((iface, ein, eout)) = phone_plan {
+            let _ = iface;
+            let id = self.next_id;
+            self.next_id += 1;
+            let mut p = Phone::usb(id, ci, slot, ein, eout, &product, vid);
+            p.start(&mut self.hcs);
+            kprintln!("usb:   phone \"{}\": {} storage area(s){}", p.name, p.storages.len(), p.problem.map(|m| alloc::format!(" ({})", m)).unwrap_or_default());
+            self.phones.push(p);
             return Ok(true);
         }
 
@@ -598,8 +633,11 @@ impl Usb {
         let printers_before = self.printers.len();
         self.printers.retain(|p| !(p.ctrl == ci && gone.contains(&p.slot)));
         let printer_gone = self.printers.len() != printers_before;
+        let phones_before = self.phones.len();
+        self.phones.retain(|p| !p.ctrl_slot().is_some_and(|(c, s)| c == ci && gone.contains(&s)));
+        let phone_gone = self.phones.len() != phones_before;
         self.drives.retain(|d| !(d.ctrl == ci && gone.contains(&d.slot)));
-        self.drives.len() != before || printer_gone
+        self.drives.len() != before || printer_gone || phone_gone
     }
 
     fn poll_hid(&mut self) {
@@ -629,6 +667,9 @@ impl Usb {
     // ---- file access for the apps -------------------------------------------------
 
     pub fn list(&mut self, drive: u32, vol: usize, dir: &DirEntry) -> Result<Vec<DirEntry>, FsError> {
+        if let Some(p) = self.phones.iter_mut().find(|p| p.id == drive) {
+            return p.list(&mut self.hcs, vol, dir);
+        }
         let Usb { hcs, drives, .. } = self;
         let d = drives.iter_mut().find(|d| d.id == drive).ok_or(FsError::Io)?;
         let v = d.volumes.get_mut(vol).ok_or(FsError::Io)?;
@@ -637,11 +678,15 @@ impl Usb {
     }
 
     pub fn read_file(&mut self, drive: u32, vol: usize, file: &DirEntry) -> Result<Vec<u8>, FsError> {
-        let Usb { hcs, drives, .. } = self;
-        let d = drives.iter_mut().find(|d| d.id == drive).ok_or(FsError::Io)?;
-        let v = d.volumes.get_mut(vol).ok_or(FsError::Io)?;
-        let mut disk = Disk { hc: &mut hcs[d.ctrl], ms: &mut d.ms };
-        let data = v.read_file(&mut disk, file)?;
+        let data = if let Some(p) = self.phones.iter_mut().find(|p| p.id == drive) {
+            p.read_file(&mut self.hcs, file)?
+        } else {
+            let Usb { hcs, drives, .. } = self;
+            let d = drives.iter_mut().find(|d| d.id == drive).ok_or(FsError::Io)?;
+            let v = d.volumes.get_mut(vol).ok_or(FsError::Io)?;
+            let mut disk = Disk { hc: &mut hcs[d.ctrl], ms: &mut d.ms };
+            v.read_file(&mut disk, file)?
+        };
         // Checksum in the log lets tests verify every byte came through intact.
         let mut h: u32 = 0x811C_9DC5;
         for &b in &data {
@@ -729,7 +774,7 @@ impl Usb {
     }
 
     pub fn has_drive(&self, drive: u32) -> bool {
-        self.drives.iter().any(|d| d.id == drive)
+        self.drives.iter().any(|d| d.id == drive) || self.phones.iter().any(|p| p.id == drive)
     }
 }
 
@@ -779,4 +824,72 @@ fn string_descriptor(hc: &mut Xhci, slot: u8, index: u8) -> String {
     let units: Vec<u16> = b[2..len].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
     let s = fs::utf16_name(&units);
     String::from(s.trim())
+}
+
+/// Something on USB the apps can browse: a drive's volume or a phone's storage.
+pub struct UsbSource {
+    pub drive: u32,
+    pub vol: usize,
+    /// Short name (volume label, or "Pixel 7" / "Pixel 7: SD card").
+    pub label: String,
+    pub phone: bool,
+}
+
+impl Usb {
+    /// Every browsable volume and phone storage (not Solon's own stick).
+    pub fn sources(&self) -> Vec<UsbSource> {
+        let mut v = Vec::new();
+        for d in self.drives.iter().filter(|d| !d.is_boot) {
+            for (i, vol) in d.volumes.iter().enumerate() {
+                let label = if vol.label.is_empty() { d.name.clone() } else { vol.label.clone() };
+                v.push(UsbSource { drive: d.id, vol: i, label, phone: false });
+            }
+        }
+        for p in &self.phones {
+            for (i, s) in p.storages.iter().enumerate() {
+                let label = if p.storages.len() == 1 { p.name.clone() } else { alloc::format!("{}: {}", p.name, s.label) };
+                v.push(UsbSource { drive: p.id, vol: i, label, phone: true });
+            }
+        }
+        v
+    }
+
+    /// The top folder of a source.
+    pub fn source_root(&self, drive: u32, vol: usize) -> Option<DirEntry> {
+        if let Some(p) = self.phones.iter().find(|p| p.id == drive) {
+            return p.root(vol);
+        }
+        self.drives.iter().find(|d| d.id == drive)?.volumes.get(vol).map(|v| v.root())
+    }
+
+    pub fn is_phone(&self, drive: u32) -> bool {
+        self.phones.iter().any(|p| p.id == drive)
+    }
+
+    /// Part of a file on a phone (big files are copied a piece at a time).
+    pub fn read_part(&mut self, drive: u32, file: &DirEntry, offset: u64, len: usize) -> Result<Vec<u8>, FsError> {
+        let p = self.phones.iter_mut().find(|p| p.id == drive).ok_or(FsError::Io)?;
+        p.read_part(&mut self.hcs, file, offset, len)
+    }
+
+    /// Ask phones that weren't sharing files again (after the user unlocked them).
+    /// Returns true if something changed.
+    pub fn retry_phones(&mut self) -> bool {
+        let mut changed = false;
+        let Usb { hcs, phones, .. } = self;
+        for p in phones.iter_mut().filter(|p| p.storages.is_empty()) {
+            changed |= p.retry(hcs);
+        }
+        changed
+    }
+
+    /// The pretend phone (boot option "testphone").
+    pub fn add_test_phone(&mut self) {
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut p = Phone::test(id);
+        p.start(&mut self.hcs);
+        kprintln!("usb: test phone \"{}\": {} storage area(s)", p.name, p.storages.len());
+        self.phones.push(p);
+    }
 }

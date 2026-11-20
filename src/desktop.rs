@@ -144,6 +144,8 @@ pub struct Desktop {
     docs: DocsApp,
     /// Spreadsheet pages waiting to be printed (on the next tick, after the notice shows).
     pending_sheet_print: Option<(Vec<Canvas>, Layout, PrinterInfo)>,
+    /// A phone import to start on the next tick (after the "looking" notice shows).
+    pending_phone_import: Option<(String, u32, usize)>,
     request: Option<PowerRequest>,
 }
 
@@ -168,6 +170,19 @@ struct ImportJob {
     saved: usize,
     skipped: usize,
     failed: usize,
+    /// From a phone: its serial (to remember what was imported) and the big file in progress.
+    serial: Option<String>,
+    stream: Option<(crate::fs::exfat::Pending, DirEntry, u64)>,
+    keys: Vec<String>,
+    /// Phone items left out because they were imported before.
+    seen_before: usize,
+}
+
+const PHONE_INDEX: &str = "PhoneImports.txt";
+
+/// How an imported phone file is remembered.
+fn phone_key(serial: &Option<String>, f: &DirEntry) -> String {
+    format!("{}	{}	{}", serial.as_deref().unwrap_or(""), f.name, f.size)
 }
 
 impl Desktop {
@@ -220,7 +235,7 @@ impl Desktop {
             last_click: None,
             photos,
             import: Import::new(),
-            drive_ids: usb.drives.iter().map(|d| d.id).collect(),
+            drive_ids: usb.drives.iter().map(|d| d.id).chain(usb.phones.iter().map(|p| p.id)).collect(),
             usb,
             toast: None,
             storage,
@@ -242,6 +257,7 @@ impl Desktop {
             copy: None,
             docs: DocsApp::new(),
             pending_sheet_print: None,
+            pending_phone_import: None,
             request: None,
         };
         d.refresh_storage_view();
@@ -395,10 +411,52 @@ impl Desktop {
 
     fn step_import(&mut self, now: u64) -> bool {
         let Some(job) = &mut self.job else { return false };
-        if job.done < job.files.len() {
+        // A big file from a phone being copied a piece at a time.
+        if let Some((pending, src, off)) = job.stream.take() {
+            let r = self.usb.read_part(job.drive, &src, off, crate::phone::PIECE).and_then(|part| {
+                if part.is_empty() {
+                    return Err(FsError::Io);
+                }
+                self.storage.write_part(&mut self.usb, &pending, off, &part)?;
+                Ok(off + part.len() as u64)
+            });
+            match r {
+                Ok(next) if next < pending.len => job.stream = Some((pending, src, next)),
+                Ok(_) => match self.storage.finish_file(&mut self.usb, pending) {
+                    Ok(e) => {
+                        kprintln!("solon: import \"{}\" done ({} bytes, in pieces)", e.name, e.size);
+                        job.existing.push((e.name, e.size));
+                        job.saved += 1;
+                        job.keys.push(phone_key(&job.serial, &src));
+                        job.done += 1;
+                    }
+                    Err(e) => {
+                        kprintln!("solon: import {} failed: {:?}", src.name, e);
+                        job.failed += 1;
+                        job.done += 1;
+                    }
+                },
+                Err(e) => {
+                    kprintln!("solon: import {} failed: {:?}", src.name, e);
+                    let _ = self.storage.abort_file(&mut self.usb, pending);
+                    job.failed += 1;
+                    job.done += 1;
+                }
+            }
+        } else if job.done < job.files.len() {
             let f = job.files[job.done].clone();
-            let r = match unique_name(&job.existing, &f.name, f.size) {
+            let name = unique_name(&job.existing, &f.name, f.size);
+            let big = job.serial.is_some() && f.size > crate::phone::PIECE as u64;
+            let r = match name {
                 None => Ok(SaveResult::AlreadyThere),
+                Some(name) if big => match self.storage.begin_file(&mut self.usb, &job.dest, &name, f.size) {
+                    Ok(p) => {
+                        kprintln!("solon: import \"{}\" ({} bytes) in pieces", name, f.size);
+                        job.stream = Some((p, f.clone(), 0));
+                        return true; // the pieces come on the next ticks
+                    }
+                    Err(e) => Err(e),
+                },
                 Some(name) => self.usb.read_file(job.drive, job.vol, &f).and_then(|data| {
                     let e = self.storage.create_in(&mut self.usb, &job.dest, &name, &data)?;
                     job.existing.push((name, data.len() as u64));
@@ -406,7 +464,10 @@ impl Desktop {
                 }),
             };
             match r {
-                Ok(SaveResult::Saved(_)) => job.saved += 1,
+                Ok(SaveResult::Saved(_)) => {
+                    job.saved += 1;
+                    job.keys.push(phone_key(&job.serial, &f));
+                }
                 Ok(SaveResult::AlreadyThere) => job.skipped += 1,
                 Err(e) => {
                     kprintln!("solon: import {} failed: {:?}", f.name, e);
@@ -419,10 +480,13 @@ impl Desktop {
             }
             job.done += 1;
         }
-        if job.done >= job.files.len() {
-            let (saved, skipped, failed) = (job.saved, job.skipped, job.failed);
+        if job.done >= job.files.len() && job.stream.is_none() {
+            let (saved, skipped, failed) = (job.saved, job.skipped + job.seen_before, job.failed);
+            let phone = job.serial.is_some();
+            let keys = core::mem::take(&mut job.keys);
             kprintln!("solon: import finished: {} saved, {} already there, {} failed", saved, skipped, failed);
-            let mut msg = format!("Imported {} photo{}", saved, if saved == 1 { "" } else { "s" });
+            let what = if phone { "photos and videos" } else { "photos" };
+            let mut msg = if phone && saved == 1 { String::from("Imported 1 item") } else if saved == 1 { String::from("Imported 1 photo") } else { format!("Imported {} {}", saved, what) };
             if skipped > 0 {
                 msg += &format!(", {} already in Solon", skipped);
             }
@@ -432,6 +496,9 @@ impl Desktop {
             self.toast = Some((msg.clone(), now + 6 * HZ));
             self.import.set_message(msg);
             self.job = None;
+            if phone && !keys.is_empty() {
+                self.remember_phone_imports(&keys);
+            }
             if self.photos.origin() == "Solon library" || self.photos.origin().is_empty() || self.photos.origin() == "Boot drive" {
                 self.show_library();
             }
@@ -440,16 +507,93 @@ impl Desktop {
         true
     }
 
+    /// One-click phone import: everything on the phone that wasn't imported before.
+    fn start_phone_import(&mut self, source: &str, drive: u32, vol: usize, now: u64) {
+        let serial = self.usb.phones.iter().find(|p| p.id == drive).map(|p| if p.serial.is_empty() { p.name.clone() } else { p.serial.clone() });
+        let all = self.phone_media(drive, vol);
+        let known = self.phone_imports();
+        let total = all.len();
+        let files: Vec<DirEntry> = all.into_iter().filter(|f| !known.contains(&phone_key(&serial, f))).collect();
+        let seen_before = total - files.len();
+        kprintln!("solon: phone has {} photo(s)/video(s), {} new", total, files.len());
+        if files.is_empty() {
+            let msg = if total == 0 { String::from("No photos or videos found on the phone") } else { format!("Nothing new: all {} photos and videos are already in Solon", total) };
+            self.toast = Some((msg.clone(), now + 6 * HZ));
+            self.import.set_message(msg);
+            return;
+        }
+        match self.storage.import_folder(&mut self.usb, if source.is_empty() { "Phone" } else { source }) {
+            Ok(dest) => {
+                let existing = self.storage.list(&mut self.usb, &dest).unwrap_or_default().into_iter().map(|e| (e.name, e.size)).collect();
+                self.toast = Some((format!("Importing {} new photos and videos...", files.len()), now + 4 * HZ));
+                self.job = Some(ImportJob { drive, vol, dest, files, existing, done: 0, saved: 0, skipped: 0, failed: 0, serial, stream: None, keys: Vec::new(), seen_before });
+                self.refresh_storage_view();
+            }
+            Err(e) => {
+                self.toast = None;
+                self.import.set_message(String::from(e.message()));
+            }
+        }
+    }
+
+    /// Lines of "phone serial<TAB>file name<TAB>size" already imported from phones.
+    fn phone_imports(&mut self) -> Vec<String> {
+        let text = self.storage.read_root_file(&mut self.usb, PHONE_INDEX).unwrap_or_default();
+        core::str::from_utf8(&text).unwrap_or("").lines().map(String::from).collect()
+    }
+
+    fn remember_phone_imports(&mut self, keys: &[String]) {
+        let mut all = self.phone_imports();
+        all.extend(keys.iter().cloned());
+        let text: String = all.iter().map(|l| format!("{}\n", l)).collect();
+        if let Err(e) = self.storage.write_root_file(&mut self.usb, PHONE_INDEX, text.as_bytes()) {
+            kprintln!("solon: couldn't save the phone import list: {:?}", e);
+        }
+    }
+
+    /// Every photo and video on a phone storage (skipping app data and thumbnails).
+    fn phone_media(&mut self, drive: u32, vol: usize) -> Vec<DirEntry> {
+        let Some(root) = self.usb.source_root(drive, vol) else { return Vec::new() };
+        let mut out = Vec::new();
+        let mut stack = Vec::from([(root, 0u32)]);
+        let mut seen = 0;
+        while let Some((dir, depth)) = stack.pop() {
+            let Ok(list) = self.usb.list(drive, vol, &dir) else { continue };
+            for e in list {
+                seen += 1;
+                if seen > 50_000 {
+                    return out;
+                }
+                let lower = e.name.to_ascii_lowercase();
+                if e.is_dir {
+                    let skip = lower.starts_with('.') || (depth == 0 && (lower == "android" || lower == "notifications" || lower == "ringtones" || lower == "alarms"));
+                    if !skip && depth < 8 {
+                        stack.push((e, depth + 1));
+                    }
+                } else if crate::import::is_photo(&e.name) || crate::phone::is_video(&e.name) || crate::phone::is_other_photo(&e.name) {
+                    out.push(e);
+                }
+            }
+        }
+        out
+    }
+
     /// Periodic work: USB plug/unplug and input, loading the next photo. Returns true to redraw.
     pub fn tick(&mut self, now: u64) -> bool {
         let mut redraw = false;
         if self.usb.poll() {
-            let ids: Vec<u32> = self.usb.drives.iter().map(|d| d.id).collect();
-            if let Some(d) = self.usb.drives.iter().find(|d| !self.drive_ids.contains(&d.id)) {
+            let ids: Vec<u32> = self.usb.drives.iter().map(|d| d.id).chain(self.usb.phones.iter().map(|p| p.id)).collect();
+            if let Some(p) = self.usb.phones.iter().find(|p| !self.drive_ids.contains(&p.id)) {
+                let msg = match p.problem {
+                    Some(hint) => format!("{} connected. {}", p.name, hint),
+                    None => format!("{} connected - open Import to copy its photos", p.name),
+                };
+                self.toast = Some((msg, now + 10 * HZ));
+            } else if let Some(d) = self.usb.drives.iter().find(|d| !self.drive_ids.contains(&d.id)) {
                 let name = d.volumes.first().map(|v| v.label.clone()).filter(|l| !l.is_empty()).unwrap_or(d.name.clone());
                 self.toast = Some((format!("{} connected - open Import to see it", name), now + 6 * HZ));
             } else if ids.len() < self.drive_ids.len() {
-                self.toast = Some((String::from("Drive removed"), now + 4 * HZ));
+                self.toast = Some((String::from("Drive or phone removed"), now + 4 * HZ));
             }
             self.drive_ids = ids;
             self.import.drives_changed(&self.usb);
@@ -467,6 +611,10 @@ impl Desktop {
         if matches!(&self.toast, Some((_, end)) if now >= *end) {
             self.toast = None;
             redraw = true;
+        }
+        if let Some((source, drive, vol)) = self.pending_phone_import.take() {
+            self.start_phone_import(&source, drive, vol, now);
+            return true;
         }
         if let Some((pages, layout, printer)) = self.pending_sheet_print.take() {
             match self.run_print_canvases(pages, layout, printer) {
@@ -863,11 +1011,16 @@ impl Desktop {
                     Ok(dest) => {
                         kprintln!("solon: importing {} photo(s) into \"{}\"", files.len(), dest.name);
                         let existing = self.storage.list(&mut self.usb, &dest).unwrap_or_default().into_iter().map(|e| (e.name, e.size)).collect();
-                        self.job = Some(ImportJob { drive, vol, dest, files, existing, done: 0, saved: 0, skipped: 0, failed: 0 });
+                        self.job = Some(ImportJob { drive, vol, dest, files, existing, done: 0, saved: 0, skipped: 0, failed: 0, serial: None, stream: None, keys: Vec::new(), seen_before: 0 });
                         self.refresh_storage_view();
                     }
                     Err(e) => self.import.set_message(String::from(e.message())),
                 }
+                true
+            }
+            Action::ImportPhone { source, drive, vol } => {
+                self.toast = Some((String::from("Looking for new photos and videos on the phone..."), Self::now() + 120 * HZ));
+                self.pending_phone_import = Some((source, drive, vol));
                 true
             }
             Action::SetupStorage(disk) => {

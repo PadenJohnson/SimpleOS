@@ -494,25 +494,71 @@ impl Fat {
     }
 
     fn link(&self, io: &mut VolumeIo, dev: &mut dyn BlockDev, chain: &[u32]) -> Result<(), FsError> {
-        for (i, &c) in chain.iter().enumerate() {
-            let next = chain.get(i + 1).copied().unwrap_or(self.eoc());
-            self.fat_set(io, dev, c, next)?;
+        // Entries in table order; each window of the table is read, changed and written once
+        // (per FAT copy) instead of once per cluster.
+        let mut sets: Vec<(u32, u32)> = chain.iter().enumerate().map(|(i, &c)| (c, chain.get(i + 1).copied().unwrap_or(self.eoc()))).collect();
+        sets.sort_by_key(|s| s.0);
+        let entry_off = |c: u32| -> u64 {
+            match self.kind {
+                FsKind::Fat32 => c as u64 * 4,
+                FsKind::Fat16 => c as u64 * 2,
+                _ => c as u64 + c as u64 / 2,
+            }
+        };
+        const WINDOW: u64 = 128 * 1024;
+        let mut i = 0;
+        while i < sets.len() {
+            let start = entry_off(sets[i].0) / self.bps * self.bps;
+            let mut j = i;
+            while j < sets.len() && entry_off(sets[j].0) + 4 <= start + WINDOW {
+                j += 1;
+            }
+            let end = ((entry_off(sets[j - 1].0) + 4 + self.bps - 1) / self.bps * self.bps).min(self.fat_size * self.bps);
+            for k in 0..self.num_fats {
+                let base = (self.fat_start + k * self.fat_size) * self.bps;
+                let mut buf = vec![0u8; (end - start) as usize];
+                io.read_at(dev, base + start, &mut buf)?;
+                for &(c, v) in &sets[i..j] {
+                    let o = (entry_off(c) - start) as usize;
+                    match self.kind {
+                        FsKind::Fat32 => {
+                            let old = u32::from_le_bytes(buf[o..o + 4].try_into().unwrap());
+                            buf[o..o + 4].copy_from_slice(&((old & 0xF000_0000) | (v & 0x0FFF_FFFF)).to_le_bytes());
+                        }
+                        FsKind::Fat16 => buf[o..o + 2].copy_from_slice(&(v as u16).to_le_bytes()),
+                        _ => {
+                            let old = u16::from_le_bytes([buf[o], buf[o + 1]]);
+                            let new = if c & 1 == 1 { (old & 0x000F) | ((v as u16) << 4) } else { (old & 0xF000) | (v as u16 & 0x0FFF) };
+                            buf[o..o + 2].copy_from_slice(&new.to_le_bytes());
+                        }
+                    }
+                }
+                io.write_at(dev, base + start, &buf)?;
+            }
+            i = j;
         }
         Ok(())
     }
 
     fn write_clusters(&self, io: &mut VolumeIo, dev: &mut dyn BlockDev, chain: &[u32], data: &[u8]) -> Result<(), FsError> {
         let cb = self.cluster_bytes();
-        for (i, &c) in chain.iter().enumerate() {
-            let from = (i * cb).min(data.len());
-            let to = ((i + 1) * cb).min(data.len());
-            if to - from == cb {
-                io.write_sectors(dev, self.cluster_sector(c), &data[from..to])?;
-            } else {
-                let mut buf = vec![0u8; cb];
-                buf[..to - from].copy_from_slice(&data[from..to]);
-                io.write_sectors(dev, self.cluster_sector(c), &buf)?;
+        let mut i = 0;
+        while i < chain.len() {
+            // A run of consecutive clusters goes in one write (up to 1 MiB).
+            let mut n = 1;
+            while i + n < chain.len() && chain[i + n] == chain[i] + n as u32 && (n + 1) * cb <= 1024 * 1024 {
+                n += 1;
             }
+            let from = (i * cb).min(data.len());
+            let to = ((i + n) * cb).min(data.len());
+            if to - from == n * cb {
+                io.write_sectors(dev, self.cluster_sector(chain[i]), &data[from..to])?;
+            } else {
+                let mut buf = vec![0u8; n * cb];
+                buf[..to - from].copy_from_slice(&data[from..to]);
+                io.write_sectors(dev, self.cluster_sector(chain[i]), &buf)?;
+            }
+            i += n;
         }
         Ok(())
     }

@@ -651,6 +651,75 @@ impl ExFat {
         Ok(DirEntry { name: String::from(name), is_dir, size: len, first_cluster: first, contiguous: n > 0 && contiguous, loc })
     }
 
+    /// Start writing a big file in pieces: reserve its space now (marked in use so nothing
+    /// else takes it); `write_part` fills it; `finish` adds it to the folder. If Solon stops
+    /// part way, the reserved space shows up in the health check, which can free it.
+    pub fn begin(&mut self, io: &mut VolumeIo, dev: &mut dyn BlockDev, dir: &DirEntry, name: &str, len: u64) -> Result<Pending, FsError> {
+        if self.rw.is_none() {
+            return Err(FsError::ReadOnly);
+        }
+        let units: Vec<u16> = name.encode_utf16().collect();
+        if units.is_empty() || units.len() > 255 || name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) {
+            return Err(FsError::Exists);
+        }
+        let up: Vec<u16> = units.iter().map(|&u| self.up(u)).collect();
+        for e in self.list(io, dev, dir)? {
+            let other: Vec<u16> = e.name.encode_utf16().map(|u| self.up(u)).collect();
+            if other == up {
+                return Err(FsError::Exists);
+            }
+        }
+        let cb = self.cluster_bytes();
+        let n = ((len + cb - 1) / cb) as usize;
+        let chain = if n > 0 { self.find_free(n)? } else { Vec::new() };
+        self.set_dirty(io, dev, true)?;
+        if n > 0 {
+            self.set_bits(io, dev, &chain, true)?;
+        }
+        dev.flush()?;
+        Ok(Pending { dir: dir.clone(), name: String::from(name), units, len, chain })
+    }
+
+    /// Write `data` at `offset` (a multiple of the piece size used, which must be a whole
+    /// number of clusters) of a file started with `begin`.
+    pub fn write_part(&mut self, io: &mut VolumeIo, dev: &mut dyn BlockDev, p: &Pending, offset: u64, data: &[u8]) -> Result<(), FsError> {
+        let cb = self.cluster_bytes();
+        if offset % cb != 0 || offset + data.len() as u64 > p.len {
+            return Err(FsError::Io);
+        }
+        let first = (offset / cb) as usize;
+        let count = ((data.len() as u64 + cb - 1) / cb) as usize;
+        self.write_clusters(io, dev, &p.chain[first..first + count], data)
+    }
+
+    /// Add the finished file to its folder.
+    pub fn finish(&mut self, io: &mut VolumeIo, dev: &mut dyn BlockDev, p: Pending) -> Result<DirEntry, FsError> {
+        dev.flush()?;
+        let contiguous = p.chain.windows(2).all(|w| w[1] == w[0] + 1);
+        if !p.chain.is_empty() && !contiguous {
+            self.write_fat_chain(io, dev, &p.chain)?;
+        }
+        dev.flush()?;
+        let first = p.chain.first().copied().unwrap_or(0);
+        let nofat = !p.chain.is_empty() && contiguous;
+        let set = self.entry_set(&p.units, false, first, p.len, nofat);
+        let loc = self.add_to_dir(io, dev, &p.dir, &set)?;
+        dev.flush()?;
+        self.set_dirty(io, dev, false)?;
+        dev.flush()?;
+        Ok(DirEntry { name: p.name, is_dir: false, size: p.len, first_cluster: first, contiguous: nofat, loc })
+    }
+
+    /// Give back the space of a file that won't be finished.
+    pub fn abort(&mut self, io: &mut VolumeIo, dev: &mut dyn BlockDev, p: Pending) -> Result<(), FsError> {
+        if !p.chain.is_empty() {
+            self.set_bits(io, dev, &p.chain, false)?;
+        }
+        dev.flush()?;
+        self.set_dirty(io, dev, false)?;
+        dev.flush()
+    }
+
     /// Rename and/or move an entry into `dest`, keeping its data where it is: a new
     /// directory entry set is written first, then the old one is hidden. (exFAT folders have
     /// no "." / ".." entries, so folders move the same way as files.)
@@ -962,4 +1031,13 @@ impl CheckReport {
     pub fn healthy(&self) -> bool {
         self.leaked_bytes == 0 && self.unmarked == 0 && self.problems.is_empty()
     }
+}
+
+/// A big file being written in pieces (see `ExFat::begin`).
+pub struct Pending {
+    dir: DirEntry,
+    name: String,
+    units: Vec<u16>,
+    pub len: u64,
+    chain: Vec<u32>,
 }

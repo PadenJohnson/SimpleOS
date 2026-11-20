@@ -30,7 +30,7 @@ const BTN: u32 = rgb(230, 233, 238);
 const SIDE_BG: u32 = rgb(240, 242, 246);
 
 /// Items at the top of Solon storage that Files doesn't show.
-const HIDDEN: [&str; 4] = [BIN, "Originals", "Settings.txt", "RecycleBin.txt"];
+const HIDDEN: [&str; 5] = [BIN, "Originals", "Settings.txt", "RecycleBin.txt", "PhoneImports.txt"];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Place {
@@ -115,16 +115,14 @@ fn button(c: &mut Canvas, b: Rect, label: &str, primary: bool, enabled: bool) {
     c.text_centered(b.x + b.w / 2, b.y + b.h / 2 - 9, label, Size::Small, true, fg);
 }
 
-/// USB volumes Files can show (every drive except Solon's own stick).
+/// USB drives and phones Files can show (every drive except Solon's own stick).
 fn usb_places(usb: &Usb) -> Vec<(Place, String)> {
-    let mut v = Vec::new();
-    for d in usb.drives.iter().filter(|d| !d.is_boot) {
-        for (i, vol) in d.volumes.iter().enumerate() {
-            let name = if vol.label.is_empty() { d.name.clone() } else { vol.label.clone() };
-            v.push((Place::Usb { drive: d.id, vol: i }, name));
-        }
-    }
-    v
+    usb.sources().into_iter().map(|s| (Place::Usb { drive: s.drive, vol: s.vol }, s.label)).collect()
+}
+
+/// Where copies can go: USB drives (phones are only read).
+fn copy_targets(usb: &Usb) -> Vec<(Place, String)> {
+    usb.sources().into_iter().filter(|s| !s.phone).map(|s| (Place::Usb { drive: s.drive, vol: s.vol }, s.label)).collect()
 }
 
 fn list_place(storage: &mut Storage, usb: &mut Usb, place: Place, dir: &DirEntry, top: bool) -> Result<Vec<DirEntry>, &'static str> {
@@ -144,7 +142,7 @@ fn list_place(storage: &mut Storage, usb: &mut Usb, place: Place, dir: &DirEntry
 fn root_of(storage: &mut Storage, usb: &mut Usb, place: Place) -> Option<DirEntry> {
     match place {
         Place::Library | Place::Bin => storage.root(usb).ok(),
-        Place::Usb { drive, vol } => usb.drives.iter().find(|d| d.id == drive)?.volumes.get(vol).map(|v| v.root()),
+        Place::Usb { drive, vol } => usb.source_root(drive, vol),
     }
 }
 
@@ -178,7 +176,7 @@ impl Files {
             self.path.clear();
         }
         if let Place::Usb { drive, vol } = self.place {
-            let present = usb.drives.iter().any(|d| d.id == drive && d.volumes.len() > vol);
+            let present = usb.sources().iter().any(|s| s.drive == drive && s.vol == vol);
             if !present {
                 self.place = Place::Library;
                 self.path.clear();
@@ -254,7 +252,7 @@ impl Files {
                 ("New folder", true),
                 ("Rename", sel),
                 ("Move", sel),
-                ("Copy to USB", sel && !usb_places(usb).is_empty()),
+                ("Copy to USB", sel && !copy_targets(usb).is_empty()),
                 ("Delete", sel),
             ]),
             Place::Bin => Vec::from([("Restore", sel), ("Delete forever", sel), ("Empty bin", !self.entries.is_empty())]),
@@ -290,6 +288,10 @@ impl Files {
                     c.fill_rect(gx + 3, gy + 2, 14, 3, DIM);
                     c.round_rect(gx + 4, gy + 6, 12, 14, 2, DIM);
                 }
+                Place::Usb { drive, .. } if usb.is_phone(*drive) => {
+                    c.round_rect(gx + 4, gy, 13, 21, 3, rgb(60, 64, 72));
+                    c.fill_rect(gx + 6, gy + 3, 9, 13, rgb(150, 190, 240));
+                }
                 Place::Usb { .. } => {
                     c.round_rect(gx + 5, gy + 6, 10, 14, 2, icons::tile_color(App::Import));
                     c.fill_rect(gx + 7, gy + 1, 6, 5, icons::tile_color(App::Import));
@@ -298,7 +300,7 @@ impl Files {
             let label = crate::photos::ellipsize(name, b.w - 50, Size::Small, true);
             c.text(b.x + 40, b.y + 10, &label, Size::Small, true, if *enabled { INK } else { rgb(170, 174, 180) });
             if i == 1 {
-                c.text(r.x + 20, Self::side_item(r, 2).y - 24, "USB drives", Size::Small, false, DIM);
+                c.text(r.x + 20, Self::side_item(r, 2).y - 24, "USB drives and phones", Size::Small, false, DIM);
             }
         }
         if items.len() == 2 {
@@ -433,7 +435,7 @@ impl Files {
 
     /// Copying to USB with more than one USB drive plugged in: offer to switch drives.
     fn can_switch(p: &Picker, usb: &Usb) -> bool {
-        p.purpose == PickFor::Copy && matches!(p.place, Place::Usb { .. }) && usb_places(usb).len() > 1
+        p.purpose == PickFor::Copy && matches!(p.place, Place::Usb { .. }) && copy_targets(usb).len() > 1
     }
 
     fn draw_picker(&self, c: &mut Canvas, d: Rect, p: &Picker, usb: &Usb) {
@@ -548,7 +550,7 @@ impl Files {
             ("Rename", Some(e)) => self.dialog = Dialog::Name(NameFor::Rename, TextField::new(&e.name, 120)),
             ("Move", Some(_)) => self.open_picker(PickFor::Move, Place::Library, storage, usb),
             ("Copy to USB", Some(_)) => {
-                if let Some(p) = usb_places(usb).first().map(|(p, _)| *p) {
+                if let Some(p) = copy_targets(usb).first().map(|(p, _)| *p) {
                     self.open_picker(PickFor::Copy, p, storage, usb);
                 }
             }
@@ -662,7 +664,7 @@ impl Files {
             }
             if let Dialog::Pick(p) = &mut self.dialog {
                 if Self::can_switch(p, usb) && Self::other_drive(d).contains(x, y) {
-                    let places: Vec<Place> = usb_places(usb).into_iter().map(|(q, _)| q).collect();
+                    let places: Vec<Place> = copy_targets(usb).into_iter().map(|(q, _)| q).collect();
                     let k = places.iter().position(|q| *q == p.place).map(|k| (k + 1) % places.len()).unwrap_or(0);
                     let to = places[k];
                     if let Some(root) = root_of(storage, usb, to) {
@@ -870,6 +872,8 @@ pub struct CopyJob {
     pub failed: usize,
     pub top_name: String,
     stop: bool,
+    /// A big file from a phone being copied a piece at a time: (space, source, next offset).
+    stream: Option<(crate::fs::exfat::Pending, DirEntry, u64)>,
 }
 
 impl CopyJob {
@@ -877,15 +881,38 @@ impl CopyJob {
         let top_name = spec.item.name.clone();
         let mut queue = alloc::collections::VecDeque::new();
         queue.push_back((spec.item, spec.dest));
-        CopyJob { from: spec.from, to: spec.to, queue, copied: 0, skipped: 0, failed: 0, top_name, stop: false }
+        CopyJob { from: spec.from, to: spec.to, queue, copied: 0, skipped: 0, failed: 0, top_name, stop: false, stream: None }
     }
 
     pub fn finished(&self) -> bool {
-        self.queue.is_empty() || self.stop
+        (self.queue.is_empty() && self.stream.is_none()) || self.stop
     }
 
     /// Copy the next item. Folders are created (under a free name) and their contents queued.
     pub fn step(&mut self, storage: &mut Storage, usb: &mut Usb) {
+        if let Some((pending, src, off)) = self.stream.take() {
+            let Place::Usb { drive, .. } = self.from else { return };
+            let r = usb.read_part(drive, &src, off, crate::phone::PIECE).and_then(|part| {
+                if part.is_empty() {
+                    return Err(FsError::Io);
+                }
+                storage.write_part(usb, &pending, off, &part)?;
+                Ok(off + part.len() as u64)
+            });
+            match r {
+                Ok(next) if next < pending.len => self.stream = Some((pending, src, next)),
+                Ok(_) => match storage.finish_file(usb, pending) {
+                    Ok(_) => self.copied += 1,
+                    Err(_) => self.failed += 1,
+                },
+                Err(e) => {
+                    kprintln!("files: copying \"{}\" failed: {:?}", src.name, e);
+                    let _ = storage.abort_file(usb, pending);
+                    self.failed += 1;
+                }
+            }
+            return;
+        }
         let Some((src, dest)) = self.queue.pop_front() else { return };
         let r: Result<(), FsError> = (|| {
             let existing = list_any(storage, usb, self.to, &dest)?;
@@ -900,6 +927,11 @@ impl CopyJob {
             let pairs: Vec<(String, u64)> = existing.iter().map(|e| (e.name.clone(), e.size)).collect();
             match crate::library::unique_name(&pairs, &src.name, src.size) {
                 None => self.skipped += 1, // same name and size already there
+                Some(name) if matches!((self.from, self.to), (Place::Usb { drive, .. }, Place::Library) if usb.is_phone(drive)) && src.size > crate::phone::PIECE as u64 => {
+                    // Big phone files (videos) go a piece at a time on the next steps.
+                    let p = storage.begin_file(usb, &dest, &name, src.size)?;
+                    self.stream = Some((p, src.clone(), 0));
+                }
                 Some(name) => {
                     let data = read_any(storage, usb, self.from, &src)?;
                     create_any(storage, usb, self.to, &dest, &name, Some(&data))?;

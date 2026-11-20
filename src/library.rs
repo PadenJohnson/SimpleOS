@@ -766,3 +766,19 @@ pub fn is_document(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     (n.ends_with(".xlsx") || n.ends_with(".csv")) && !n.starts_with("~$")
 }
+
+/// Big files written in pieces (videos from phones).
+impl Storage {
+    pub fn begin_file(&mut self, usb: &mut Usb, dir: &DirEntry, name: &str, len: u64) -> Result<fs::exfat::Pending, FsError> {
+        self.with(usb, |vol, d| vol.begin_file(d, dir, name, len))
+    }
+    pub fn write_part(&mut self, usb: &mut Usb, p: &fs::exfat::Pending, offset: u64, data: &[u8]) -> Result<(), FsError> {
+        self.with(usb, |vol, d| vol.write_part(d, p, offset, data))
+    }
+    pub fn finish_file(&mut self, usb: &mut Usb, p: fs::exfat::Pending) -> Result<DirEntry, FsError> {
+        self.with(usb, |vol, d| vol.finish_file(d, p))
+    }
+    pub fn abort_file(&mut self, usb: &mut Usb, p: fs::exfat::Pending) -> Result<(), FsError> {
+        self.with(usb, |vol, d| vol.abort_file(d, p))
+    }
+}

@@ -34,6 +34,8 @@ pub enum Action {
     ShowPhotos { origin: String, items: Vec<(String, Source)>, open_at: Option<usize> },
     /// Copy these files into the library.
     ImportPhotos { source: String, drive: u32, vol: usize, files: Vec<DirEntry> },
+    /// Copy every photo and video on a phone that wasn't imported before.
+    ImportPhone { source: String, drive: u32, vol: usize },
     /// Create Solon storage on this internal disk (user confirmed).
     SetupStorage(usize),
 }
@@ -55,6 +57,8 @@ struct Folder {
     /// Folders from the root down to the current one (root first).
     path: Vec<DirEntry>,
     entries: Vec<DirEntry>,
+    /// A phone: the import button takes everything new from the whole phone.
+    phone: bool,
 }
 
 pub struct Import {
@@ -78,6 +82,7 @@ struct DriveRow {
     vol: Option<usize>,
     title: String,
     detail: String,
+    phone: bool,
 }
 
 fn drive_rows(usb: &Usb) -> Vec<DriveRow> {
@@ -90,11 +95,23 @@ fn drive_rows(usb: &Usb) -> Vec<DriveRow> {
                 vol: None,
                 title: d.name.clone(),
                 detail: format!("{}  |  Can't read this drive's format", human(d.ms.size_bytes())),
+                phone: false,
             });
         }
         for (i, v) in d.volumes.iter().enumerate() {
             let title = if v.label.is_empty() { d.name.clone() } else { format!("{}  ({})", v.label, d.name) };
-            rows.push(DriveRow { drive: d.id, vol: Some(i), title, detail: format!("{}  |  {}", v.kind.name(), human(v.size)) });
+            rows.push(DriveRow { drive: d.id, vol: Some(i), title, detail: format!("{}  |  {}", v.kind.name(), human(v.size)), phone: false });
+        }
+    }
+    for p in &usb.phones {
+        if p.storages.is_empty() {
+            let hint = p.problem.unwrap_or("The phone isn't sharing files yet.");
+            rows.push(DriveRow { drive: p.id, vol: None, title: p.name.clone(), detail: format!("{}  Then click here.", hint), phone: true });
+        }
+        for (i, s) in p.storages.iter().enumerate() {
+            let title = if p.storages.len() == 1 { p.name.clone() } else { format!("{}  ({})", p.name, s.label) };
+            let detail = format!("Phone  |  {}  |  {} free of {}", s.label, human(s.free), human(s.capacity));
+            rows.push(DriveRow { drive: p.id, vol: Some(i), title, detail, phone: true });
         }
     }
     rows
@@ -212,7 +229,7 @@ impl Import {
 
     fn draw_drives(&self, c: &mut Canvas, r: Rect, usb: &Usb, sv: &StorageView) {
         c.text(r.x + PAD, r.y + 16, "Drives", Size::Medium, true, INK);
-        let hint = "Files are read from the drive. Nothing on it is ever changed.";
+        let hint = "Files are read from drives and phones. Nothing on them is changed.";
         c.text(r.x + r.w - PAD - text_width(hint, Size::Small, false), r.y + 19, hint, Size::Small, false, INK_DIM);
         Self::header_line(c, r);
 
@@ -230,9 +247,15 @@ impl Import {
                 c.round_rect_alpha(rr.x, rr.y, rr.w, rr.h, 8, ACCENT, 40);
             }
             let (gx, gy) = (rr.x + 12, rr.y + 8);
-            c.round_rect(gx, gy, 28, 28, 7, icons::tile_color(App::Import));
-            c.round_rect(gx + 9, gy + 9, 10, 15, 2, rgb(255, 255, 255));
-            c.fill_rect(gx + 10, gy + 4, 8, 5, rgb(255, 255, 255));
+            if row.phone {
+                c.round_rect(gx + 5, gy, 18, 30, 4, rgb(60, 64, 72));
+                c.fill_rect(gx + 8, gy + 4, 12, 20, rgb(150, 190, 240));
+                c.fill_rect(gx + 12, gy + 26, 4, 2, rgb(200, 204, 210));
+            } else {
+                c.round_rect(gx, gy, 28, 28, 7, icons::tile_color(App::Import));
+                c.round_rect(gx + 9, gy + 9, 10, 15, 2, rgb(255, 255, 255));
+                c.fill_rect(gx + 10, gy + 4, 8, 5, rgb(255, 255, 255));
+            }
             let color = if row.vol.is_some() { INK } else { INK_FAINT };
             c.text(rr.x + 56, rr.y + 4, &row.title, Size::Small, true, color);
             c.text(rr.x + 56, rr.y + 23, &row.detail, Size::Small, false, INK_DIM);
@@ -277,7 +300,7 @@ impl Import {
 
         let photos = self.photo_files().len();
         let mut right = 0;
-        if photos > 0 {
+        if photos > 0 || f.phone {
             let ib = Self::import_button(r);
             match sv.job {
                 Some((done, total)) => {
@@ -288,12 +311,22 @@ impl Import {
                     c.text_centered(ib.x + ib.w / 2, ib.y + 7, &label, Size::Small, true, INK);
                 }
                 None => {
-                    let label = if photos == 1 { String::from("Import 1 photo") } else { format!("Import {} photos", photos) };
+                    let label = if f.phone {
+                        String::from("Import new photos & videos")
+                    } else if photos == 1 {
+                        String::from("Import 1 photo")
+                    } else {
+                        format!("Import {} photos", photos)
+                    };
                     Self::button(c, ib, &label, sv.library.is_some());
                 }
             }
-            Self::button(c, Self::photos_button(r), "View here", false);
-            right = r.x + r.w - Self::photos_button(r).x + 12;
+            if photos > 0 {
+                Self::button(c, Self::photos_button(r), "View here", false);
+                right = r.x + r.w - Self::photos_button(r).x + 12;
+            } else {
+                right = r.x + r.w - Self::import_button(r).x + 12;
+            }
         }
 
         let mut crumb = if f.label.is_empty() { String::from("Drive") } else { f.label.clone() };
@@ -375,11 +408,10 @@ impl Import {
     // ---- actions ------------------------------------------------------------
 
     fn open_drive(&mut self, usb: &mut Usb, drive: u32, vol: usize) {
-        let Some(d) = usb.drives.iter().find(|d| d.id == drive) else { return };
-        let Some(v) = d.volumes.get(vol) else { return };
-        let label = if v.label.is_empty() { d.name.clone() } else { v.label.clone() };
-        let root = v.root();
-        self.folder = Some(Folder { drive, vol, label, path: Vec::new(), entries: Vec::new() });
+        let Some(root) = usb.source_root(drive, vol) else { return };
+        let label = usb.sources().into_iter().find(|s| s.drive == drive && s.vol == vol).map(|s| s.label).unwrap_or_default();
+        let phone = usb.is_phone(drive);
+        self.folder = Some(Folder { drive, vol, label, path: Vec::new(), entries: Vec::new(), phone });
         self.enter(usb, root);
     }
 
@@ -459,6 +491,18 @@ impl Import {
         Action::ImportPhotos { source: f.label.clone(), drive: f.drive, vol: f.vol, files }
     }
 
+    fn import_phone(&mut self, sv: &StorageView) -> Action {
+        if sv.job.is_some() {
+            return Action::None;
+        }
+        if sv.library.is_none() {
+            self.message = Some(String::from("Set up Solon storage first (Back, then \"Set up Solon storage\")."));
+            return Action::Redraw;
+        }
+        let Some(f) = &self.folder else { return Action::None };
+        Action::ImportPhone { source: f.label.clone(), drive: f.drive, vol: f.vol }
+    }
+
     fn activate(&mut self, usb: &mut Usb, sv: &StorageView, i: usize) -> Action {
         match &self.folder {
             None => {
@@ -466,6 +510,10 @@ impl Import {
                 if let Some(row) = rows.get(i) {
                     if let Some(vol) = row.vol {
                         self.open_drive(usb, row.drive, vol);
+                    } else if row.phone {
+                        // Ask the phone again (the user may have unlocked it by now).
+                        usb.retry_phones();
+                        self.message = usb.phones.iter().find(|p| p.id == row.drive).and_then(|p| p.problem).map(String::from);
                     } else {
                         self.message = Some(String::from("Solon can't read this drive's format."));
                     }
@@ -512,6 +560,10 @@ impl Import {
             if Self::back_button(r).contains(x, y) {
                 self.back(usb);
                 return Action::Redraw;
+            }
+            let phone = self.folder.as_ref().is_some_and(|f| f.phone);
+            if phone && Self::import_button(r).contains(x, y) {
+                return self.import_phone(sv);
             }
             if !self.photo_files().is_empty() {
                 if Self::import_button(r).contains(x, y) {

@@ -111,7 +111,7 @@ fn sheet_icon(c: &mut Canvas, x: i32, y: i32) {
 }
 
 /// Spreadsheets on a USB volume (looks a few folders deep, and not forever).
-fn usb_documents(usb: &mut Usb, drive: u32, vol: usize, root: DirEntry, label: &str, out: &mut Vec<Item>) {
+fn usb_documents(usb: &mut Usb, drive: u32, vol: usize, root: DirEntry, label: &str, phone: bool, out: &mut Vec<Item>) {
     let mut stack = Vec::from([(root, String::new(), 0u32)]);
     let mut seen = 0;
     while let Some((dir, path, depth)) = stack.pop() {
@@ -122,7 +122,10 @@ fn usb_documents(usb: &mut Usb, drive: u32, vol: usize, root: DirEntry, label: &
                 return;
             }
             if e.is_dir {
-                if depth < 4 {
+                // On phones only look where documents live (photo folders are huge).
+                let lower = e.name.to_ascii_lowercase();
+                let wanted = !phone || depth > 0 || lower == "documents" || lower.starts_with("download");
+                if depth < 4 && wanted {
                     let p = if path.is_empty() { e.name.clone() } else { format!("{}/{}", path, e.name) };
                     stack.push((e, p, depth + 1));
                 }
@@ -151,14 +154,9 @@ impl DocsApp {
             items.push(Item { name: e.name.clone(), place, size: e.size, src: DocSrc::Library { dir, entry: e } });
         }
         let lib_count = items.len();
-        let vols: Vec<(u32, usize, DirEntry, String)> = usb
-            .drives
-            .iter()
-            .filter(|d| !d.is_boot)
-            .flat_map(|d| d.volumes.iter().enumerate().map(move |(i, v)| (d.id, i, v.root(), if v.label.is_empty() { d.name.clone() } else { v.label.clone() })))
-            .collect();
-        for (drive, vol, root, label) in vols {
-            usb_documents(usb, drive, vol, root, &label, &mut items);
+        let vols: Vec<(u32, usize, DirEntry, String, bool)> = usb.sources().into_iter().filter_map(|s| Some((s.drive, s.vol, usb.source_root(s.drive, s.vol)?, s.label, s.phone))).collect();
+        for (drive, vol, root, label, phone) in vols {
+            usb_documents(usb, drive, vol, root, &label, phone, &mut items);
         }
         self.usb_count = items.len() - lib_count;
         self.items = items;
@@ -406,7 +404,7 @@ impl DocsApp {
         head(c, top + 8 - self.scroll, if lib > 0 { "In Solon storage" } else { "Nothing in Solon storage yet" });
         if self.usb_count > 0 {
             let y = self.row(r, lib).y - 26;
-            head(c, y, "On USB drives (saving keeps a copy in Solon storage)");
+            head(c, y, "On USB drives and phones (saving keeps a copy in Solon storage)");
         }
         for (i, it) in self.items.iter().enumerate() {
             let b = self.row(r, i);

@@ -387,3 +387,31 @@ pub fn utf16_name(units: &[u16]) -> String {
     let end = units.iter().position(|&u| u == 0 || u == 0xFFFF).unwrap_or(units.len());
     char::decode_utf16(units[..end].iter().copied()).map(|r| r.unwrap_or('?')).collect()
 }
+
+impl Volume {
+    /// Start a big file written in pieces (exFAT only: Solon storage).
+    pub fn begin_file(&mut self, dev: &mut dyn BlockDev, dir: &DirEntry, name: &str, len: u64) -> Result<exfat::Pending, FsError> {
+        match &mut self.fs {
+            FsImpl::ExFat(e) => e.begin(&mut self.io, dev, dir, name, len),
+            FsImpl::Fat(_) => Err(FsError::ReadOnly),
+        }
+    }
+    pub fn write_part(&mut self, dev: &mut dyn BlockDev, p: &exfat::Pending, offset: u64, data: &[u8]) -> Result<(), FsError> {
+        match &mut self.fs {
+            FsImpl::ExFat(e) => e.write_part(&mut self.io, dev, p, offset, data),
+            FsImpl::Fat(_) => Err(FsError::ReadOnly),
+        }
+    }
+    pub fn finish_file(&mut self, dev: &mut dyn BlockDev, p: exfat::Pending) -> Result<DirEntry, FsError> {
+        match &mut self.fs {
+            FsImpl::ExFat(e) => e.finish(&mut self.io, dev, p),
+            FsImpl::Fat(_) => Err(FsError::ReadOnly),
+        }
+    }
+    pub fn abort_file(&mut self, dev: &mut dyn BlockDev, p: exfat::Pending) -> Result<(), FsError> {
+        match &mut self.fs {
+            FsImpl::ExFat(e) => e.abort(&mut self.io, dev, p),
+            FsImpl::Fat(_) => Err(FsError::ReadOnly),
+        }
+    }
+}

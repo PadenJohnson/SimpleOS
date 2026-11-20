@@ -98,3 +98,22 @@ Solon's desktop should appear within a few seconds.
 To check the crash screen itself, add the line `    cmdline: crashtest` to the end of
 `boot\limine.conf` on the stick: Solon will show the red screen two seconds after starting.
 Remove the line afterwards.
+
+## Phones
+
+Plug the phone into the PC with its charging cable (a cable that only charges won't work).
+
+- **Android:** unlock the phone, pull down the notification "Charging this device via USB",
+  tap it and choose **File transfer** (sometimes called MTP). The phone then appears in Files
+  and Import. If Solon shows "Unlock the phone..." first, do that and click the phone's row in
+  Import.
+- **iPhone:** unlock it and tap **Trust** (or **Allow**) when it asks about this computer.
+  Solon sees the photos and videos in the camera roll (Apple doesn't let other computers see
+  other files). If the iPhone is set to save photos as HEIC, keep *Settings > Photos >
+  Transfer to Mac or PC* on **Automatic** so it sends ordinary JPEG photos.
+- **Cameras:** turn the camera on; some need a "PC connection" or "MTP/PTP" USB setting.
+
+In Import, open the phone and press **Import new photos & videos**: everything that wasn't
+imported before is copied into Solon storage (a folder named with today's date and the phone).
+Pressing it again later only copies the new ones. Solon never changes or deletes anything on
+the phone.

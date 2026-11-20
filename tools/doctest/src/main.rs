@@ -46,6 +46,15 @@ fn check(what: &str, got: &str, want: &str) {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("pattern") {
+        // FNV-1a of the test phone's pretend video (src/phone.rs), to check imports.
+        let mut h: u32 = 0x811C_9DC5;
+        for i in 0..20 * 1024 * 1024 + 12345u32 {
+            h = (h ^ (i.wrapping_mul(2_654_435_761) >> 24)).wrapping_mul(0x0100_0193);
+        }
+        println!("test phone video: {} bytes fnv {:08x}", 20 * 1024 * 1024 + 12345, h);
+        return;
+    }
     let out = std::env::args().nth(1);
     let mut wb = Workbook::new();
     let s = 0;

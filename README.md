@@ -25,6 +25,11 @@ nothing to download.
   you type), bold, text and fill colours, number formats (money, percent, dates), column
   widths, several sheets, undo, copy/paste, fill down, and printing. Charts, pictures and
   merged cells in Excel files aren't kept when saving.
+- Phones over USB: Android phones (MTP, "File transfer") and iPhones and cameras (PTP) show up
+  in Files and Import. Browse and copy anything off them; Import's "Import new photos &
+  videos" copies everything not imported before (big videos are copied a piece at a time).
+  Phones are only read. Tested with a built-in pretend phone (boot option `testphone`);
+  not yet tried with a real phone.
 - Disks: every disk inside the PC and plugged in, with its partitions, sizes and free space;
   set up Solon storage; a storage health check with a safe repair; erase and format a USB
   drive (never an internal disk or the SimpleOS stick).
@@ -40,7 +45,7 @@ nothing to download.
   page; colour or black & white; copies. Checked with a test printer and GhostPCL; not yet
   tried on a real printer.
 
-**Planned:** videos, phones over USB, installing to the internal disk.
+**Planned:** playing videos, installing to the internal disk.
 
 ## Making a USB stick
 
@@ -69,7 +74,8 @@ QEMU for Windows.
 
 `test.ps1` options include `-Usb` (keyboard, mouse, read-only or writable USB drives, hot-plugging), `-Internal`
 (NVMe/SATA disk images), `-BootStick` / `-LegacyBios` (boot from a USB image like a real PC)
-and `-Cmdline "testprinter=pcl"` (a fake printer whose jobs are captured for checking).
+and `-Cmdline "testprinter=pcl"` (a fake printer whose jobs are captured for checking) or
+`-Cmdline "testphone"` (a pretend phone with photos, a video and a document).
 
 ## Layout
 

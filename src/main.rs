@@ -28,6 +28,7 @@ mod memory;
 mod msc;
 mod nvme;
 mod pci;
+mod phone;
 mod photos;
 mod power;
 mod print;
@@ -181,6 +182,10 @@ extern "C" fn kmain() -> ! {
     // USB: controllers, keyboards/mice, and drives already plugged in.
     let t0 = TICKS.load(Relaxed);
     let mut usb = Usb::init(boot_disk);
+    // Boot option "testphone": a pretend phone (QEMU can't emulate one here).
+    if EXECUTABLE_CMDLINE_REQUEST.get_response().and_then(|r| r.cmdline().to_str().ok()).is_some_and(|c| c.split_whitespace().any(|w| w == "testphone")) {
+        usb.add_test_phone();
+    }
     let mut storage = Storage::init(&mut usb);
     kprintln!("solon: usb ready in {} ms, {} drive(s)", (TICKS.load(Relaxed) - t0) * 1000 / HZ, usb.drives.len());
 
