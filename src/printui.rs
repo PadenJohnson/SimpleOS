@@ -220,7 +220,7 @@ impl PrintDialog {
                 if let Some(t) = thumb(*i) {
                     let mut t = t;
                     if !self.layout.color {
-                        crate::edit::color(&mut t, &crate::edit::Edits { filter: crate::edit::Filter::BlackWhite, ..Default::default() });
+                        crate::edit::color(&mut t, &crate::edit::Edits { bw: true, ..Default::default() });
                     }
                     page.place(&t, *cell, self.layout.fill);
                 } else {

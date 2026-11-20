@@ -1,41 +1,19 @@
-//! Photo edits: a small, non-destructive description of what to do to a photo.
-//! The same `Edits` are applied to a screen-sized preview while editing and to the
-//! full-resolution original when saving.
+//! Photo edits, in the spirit of Lightroom: a small, non-destructive description of what to
+//! do to a photo. The same `Edits` are applied to a screen-sized preview while editing and
+//! to the full-resolution original when saving.
 //!
-//! Order: rotate/flip -> crop -> light & color -> filter.
+//! Order: rotate/flip -> straighten -> crop -> exposure & white balance (in linear light)
+//! -> tone curve (contrast, highlights, shadows, whites, blacks, fade) -> clarity and
+//! sharpening (local contrast on brightness) -> vibrance & saturation -> black & white
+//! -> vignette.
 
 use alloc::vec;
 use alloc::vec::Vec;
+use spin::Lazy;
 
 use crate::image::Image;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Filter {
-    None,
-    BlackWhite,
-    Sepia,
-    Vivid,
-    Warm,
-    Cool,
-    Fade,
-}
-
-impl Filter {
-    pub const ALL: [Filter; 7] = [Filter::None, Filter::BlackWhite, Filter::Sepia, Filter::Vivid, Filter::Warm, Filter::Cool, Filter::Fade];
-    pub fn name(self) -> &'static str {
-        match self {
-            Filter::None => "Original",
-            Filter::BlackWhite => "Black & white",
-            Filter::Sepia => "Sepia",
-            Filter::Vivid => "Vivid",
-            Filter::Warm => "Warm",
-            Filter::Cool => "Cool",
-            Filter::Fade => "Faded",
-        }
-    }
-}
-
-/// Crop rectangle in units of 1/10000 of the (rotated) image's width and height.
+/// Crop rectangle in units of 1/10000 of the (rotated, straightened) image's width/height.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Crop {
     pub x: u32,
@@ -56,28 +34,74 @@ pub struct Edits {
     pub turns: u8,
     /// Mirror left-right (applied after rotating).
     pub flip: bool,
+    /// Small rotation to level the horizon, in tenths of a degree (-450..=450).
+    pub straighten: i32,
     pub crop: Crop,
-    /// Each -100..=100.
-    pub brightness: i32,
+    // Light, each -100..=100
+    pub exposure: i32,
     pub contrast: i32,
+    pub highlights: i32,
+    pub shadows: i32,
+    pub whites: i32,
+    pub blacks: i32,
+    // Color, each -100..=100
+    pub temperature: i32,
+    pub tint: i32,
+    pub vibrance: i32,
     pub saturation: i32,
-    pub warmth: i32,
-    pub filter: Filter,
+    // Effects
+    /// Local contrast, -100..=100.
+    pub clarity: i32,
+    /// Darker (negative) or lighter (positive) corners, -100..=100.
+    pub vignette: i32,
+    /// 0..=100.
+    pub sharpen: i32,
+    /// Lifted blacks for a matte, film look, 0..=100.
+    pub fade: i32,
+    pub bw: bool,
+    /// The preset last picked (0 = none), to show it as chosen.
+    pub preset: u8,
 }
 
 impl Default for Edits {
     fn default() -> Self {
-        Edits { turns: 0, flip: false, crop: Crop::ALL, brightness: 0, contrast: 0, saturation: 0, warmth: 0, filter: Filter::None }
+        Edits {
+            turns: 0,
+            flip: false,
+            straighten: 0,
+            crop: Crop::ALL,
+            exposure: 0,
+            contrast: 0,
+            highlights: 0,
+            shadows: 0,
+            whites: 0,
+            blacks: 0,
+            temperature: 0,
+            tint: 0,
+            vibrance: 0,
+            saturation: 0,
+            clarity: 0,
+            vignette: 0,
+            sharpen: 0,
+            fade: 0,
+            bw: false,
+            preset: 0,
+        }
     }
 }
 
 impl Edits {
     pub fn is_original(&self) -> bool {
-        *self == Edits::default()
+        Edits { preset: 0, ..*self } == Edits::default()
     }
 
-    fn has_color(&self) -> bool {
-        self.brightness != 0 || self.contrast != 0 || self.saturation != 0 || self.warmth != 0 || self.filter != Filter::None
+    /// The same look with no rotation, straightening or crop.
+    pub fn look(&self) -> Edits {
+        Edits { turns: 0, flip: false, straighten: 0, crop: Crop::ALL, ..*self }
+    }
+
+    fn has_tone(&self) -> bool {
+        self.look() != Edits { preset: self.preset, ..Edits::default() }.look()
     }
 
     /// Rotate clockwise; the crop turns with the picture.
@@ -96,8 +120,43 @@ impl Edits {
     pub fn mirror(&mut self) {
         self.flip = !self.flip;
         self.crop.x = FULL - self.crop.x - self.crop.w;
+        self.straighten = -self.straighten;
     }
 }
+
+// ---- presets ---------------------------------------------------------------------------
+
+pub struct Preset {
+    pub name: &'static str,
+    pub set: fn(&mut Edits),
+}
+
+/// Set the look (keeping the framing) to defaults, then the preset's values.
+fn base(e: &mut Edits) {
+    *e = Edits { turns: e.turns, flip: e.flip, straighten: e.straighten, crop: e.crop, ..Edits::default() };
+}
+
+pub const PRESETS: [Preset; 12] = [
+    Preset { name: "Original", set: |e| base(e) },
+    Preset { name: "Vivid", set: |e| { base(e); e.contrast = 20; e.vibrance = 45; e.saturation = 8; e.clarity = 15; } },
+    Preset { name: "Warm sun", set: |e| { base(e); e.temperature = 32; e.tint = 6; e.vibrance = 18; e.highlights = -15; e.shadows = 10; } },
+    Preset { name: "Cool", set: |e| { base(e); e.temperature = -28; e.contrast = 10; e.vibrance = 10; } },
+    Preset { name: "Soft portrait", set: |e| { base(e); e.contrast = -10; e.clarity = -25; e.shadows = 20; e.highlights = -10; e.vibrance = 8; e.temperature = 8; } },
+    Preset { name: "Dramatic", set: |e| { base(e); e.contrast = 35; e.highlights = -45; e.shadows = 30; e.whites = 15; e.blacks = -20; e.clarity = 45; e.vibrance = 10; e.vignette = -35; } },
+    Preset { name: "Matte", set: |e| { base(e); e.fade = 35; e.contrast = -12; e.saturation = -15; e.highlights = -10; } },
+    Preset { name: "Vintage", set: |e| { base(e); e.fade = 28; e.temperature = 25; e.tint = 8; e.saturation = -30; e.contrast = -8; e.vignette = -25; } },
+    Preset { name: "Faded film", set: |e| { base(e); e.fade = 40; e.saturation = -20; e.temperature = 10; e.shadows = 15; e.highlights = -15; } },
+    Preset { name: "Bright & airy", set: |e| { base(e); e.exposure = 18; e.highlights = -25; e.shadows = 35; e.contrast = -15; e.vibrance = 10; e.temperature = -5; } },
+    Preset { name: "Black & white", set: |e| { base(e); e.bw = true; e.contrast = 15; e.clarity = 15; } },
+    Preset { name: "B&W punchy", set: |e| { base(e); e.bw = true; e.contrast = 45; e.blacks = -25; e.whites = 20; e.clarity = 30; e.vignette = -20; } },
+];
+
+pub fn apply_preset(e: &mut Edits, i: usize) {
+    (PRESETS[i].set)(e);
+    e.preset = i as u8;
+}
+
+// ---- geometry ----------------------------------------------------------------------------
 
 /// Size of the image after rotating.
 pub fn turned_size(w: usize, h: usize, turns: u8) -> (usize, usize) {
@@ -131,6 +190,52 @@ pub fn orient(src: &Image, turns: u8, flip: bool) -> Image {
     Image { w, h, px, opaque: src.opaque }
 }
 
+/// Rotate by a small angle (tenths of a degree) and zoom in just enough that no empty
+/// corners show. The size stays the same.
+pub fn straighten(src: &Image, tenths: i32) -> Image {
+    if tenths == 0 || src.w < 2 || src.h < 2 {
+        return Image { w: src.w, h: src.h, px: src.px.clone(), opaque: src.opaque };
+    }
+    let a = tenths as f32 / 10.0 * core::f32::consts::PI / 180.0;
+    let (s, c) = (libm::sinf(a), libm::cosf(a));
+    let (w, h) = (src.w as f32, src.h as f32);
+    let (sa, ca) = (s.abs(), c.abs());
+    // Largest same-shaped rectangle inside the rotated picture.
+    let scale = (w / (w * ca + h * sa)).min(h / (w * sa + h * ca));
+    let (cx, cy) = ((w - 1.0) / 2.0, (h - 1.0) / 2.0);
+    let mut px = vec![0u32; src.w * src.h];
+    for y in 0..src.h {
+        let dy = (y as f32 - cy) * scale;
+        for x in 0..src.w {
+            let dx = (x as f32 - cx) * scale;
+            // Turn back into source coordinates.
+            let sx = c * dx + s * dy + cx;
+            let sy = -s * dx + c * dy + cy;
+            px[y * src.w + x] = bilinear(src, sx, sy);
+        }
+    }
+    Image { w: src.w, h: src.h, px, opaque: src.opaque }
+}
+
+fn bilinear(img: &Image, x: f32, y: f32) -> u32 {
+    let x = x.clamp(0.0, (img.w - 1) as f32);
+    let y = y.clamp(0.0, (img.h - 1) as f32);
+    let (x0, y0) = (x as usize, y as usize);
+    let (x1, y1) = ((x0 + 1).min(img.w - 1), (y0 + 1).min(img.h - 1));
+    let (fx, fy) = (((x - x0 as f32) * 256.0) as u32, ((y - y0 as f32) * 256.0) as u32);
+    let p = |xx: usize, yy: usize| img.px[yy * img.w + xx];
+    let (a, b, cc, d) = (p(x0, y0), p(x1, y0), p(x0, y1), p(x1, y1));
+    let mut out = 0u32;
+    for shift in [0u32, 8, 16, 24] {
+        let ch = |v: u32| (v >> shift) & 0xFF;
+        let top = ch(a) * (256 - fx) + ch(b) * fx;
+        let bot = ch(cc) * (256 - fx) + ch(d) * fx;
+        let v = (top * (256 - fy) + bot * fy) >> 16;
+        out |= v.min(255) << shift;
+    }
+    out
+}
+
 /// Crop rectangle in pixels for an image of size (w, h).
 pub fn crop_pixels(c: Crop, w: usize, h: usize) -> (usize, usize, usize, usize) {
     let x = (c.x as usize * w / FULL as usize).min(w - 1);
@@ -152,98 +257,279 @@ pub fn crop(src: Image, c: Crop) -> Image {
     Image { w, h, px, opaque: src.opaque }
 }
 
-#[inline]
-fn clamp8(v: i32) -> u32 {
-    v.clamp(0, 255) as u32
+/// Rotate, mirror, straighten and (unless `with_crop` is false) crop.
+pub fn geometry(src: &Image, e: &Edits, with_crop: bool) -> Image {
+    let img = straighten(&orient(src, e.turns, e.flip), e.straighten);
+    if with_crop {
+        crop(img, e.crop)
+    } else {
+        img
+    }
 }
 
-/// Light, color and filter, in place.
-pub fn color(img: &mut Image, e: &Edits) {
-    if !e.has_color() {
+// ---- light and color ------------------------------------------------------------------------
+
+/// sRGB value -> linear light (0..=4095).
+static TO_LINEAR: Lazy<[u16; 256]> = Lazy::new(|| {
+    let mut t = [0u16; 256];
+    for (v, o) in t.iter_mut().enumerate() {
+        let c = v as f32 / 255.0;
+        let l = if c <= 0.04045 { c / 12.92 } else { libm::powf((c + 0.055) / 1.055, 2.4) };
+        *o = (l * 4095.0 + 0.5) as u16;
+    }
+    t
+});
+
+/// Linear light (0..=4095) -> sRGB value.
+static TO_SRGB: Lazy<[u8; 4096]> = Lazy::new(|| {
+    let mut t = [0u8; 4096];
+    for (v, o) in t.iter_mut().enumerate() {
+        let l = v as f32 / 4095.0;
+        let c = if l <= 0.003_130_8 { l * 12.92 } else { 1.055 * libm::powf(l, 1.0 / 2.4) - 0.055 };
+        *o = (c * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
+    }
+    t
+});
+
+/// Three 256-entry tables (red, green, blue) doing exposure, white balance, the tone curve
+/// and fade in one lookup per channel.
+fn tone_tables(e: &Edits) -> [[u8; 256]; 3] {
+    let ev = e.exposure as f32 / 100.0 * 2.0; // up to ±2 stops
+    let gain = libm::powf(2.0, ev);
+    let t = e.temperature as f32 / 100.0;
+    let m = e.tint as f32 / 100.0;
+    let gains = [gain * (1.0 + 0.42 * t + 0.10 * m), gain * (1.0 - 0.24 * m), gain * (1.0 - 0.42 * t + 0.10 * m)];
+    // Tone curve on 0..1 values.
+    let (c, hi, sh, wh, bl, fade) = (
+        e.contrast as f32 / 100.0,
+        e.highlights as f32 / 100.0,
+        e.shadows as f32 / 100.0,
+        e.whites as f32 / 100.0,
+        e.blacks as f32 / 100.0,
+        e.fade as f32 / 100.0,
+    );
+    let mut curve = [0u8; 256];
+    for (v, o) in curve.iter_mut().enumerate() {
+        let x = v as f32 / 255.0;
+        let inv = 1.0 - x;
+        // Each control works mostly on its own part of the range.
+        let mut y = x
+            + 0.30 * sh * 6.75 * x * inv * inv
+            + 0.30 * hi * 6.75 * x * x * inv
+            + 0.18 * bl * inv * inv * inv * inv
+            + 0.18 * wh * x * x * x * x;
+        y = y.clamp(0.0, 1.0);
+        // Contrast: an S-curve around the middle (or a flatter one).
+        let s = y * y * (3.0 - 2.0 * y);
+        y += c * (s - y) * 1.1;
+        y = y.clamp(0.0, 1.0);
+        // Fade: lift the blacks.
+        y = fade * 0.22 + y * (1.0 - fade * 0.22);
+        *o = (y * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
+    }
+    let lin = &*TO_LINEAR;
+    let srgb = &*TO_SRGB;
+    let mut out = [[0u8; 256]; 3];
+    for ch in 0..3 {
+        for v in 0..256 {
+            let mut l = lin[v] as f32 * gains[ch];
+            // A soft shoulder instead of hard clipping when brightening.
+            if l > 3276.0 {
+                let over = l - 3276.0;
+                l = 3276.0 + over / (1.0 + over / 819.0);
+            }
+            let s = srgb[(l as usize).min(4095)];
+            out[ch][v] = curve[s as usize];
+        }
+    }
+    out
+}
+
+#[inline]
+fn luma(r: i32, g: i32, b: i32) -> i32 {
+    (54 * r + 183 * g + 19 * b) >> 8
+}
+
+fn luminance(img: &Image) -> Vec<u8> {
+    img.px.iter().map(|&p| luma(((p >> 16) & 0xFF) as i32, ((p >> 8) & 0xFF) as i32, (p & 0xFF) as i32) as u8).collect()
+}
+
+/// Box blur (two passes horizontally and vertically: close to a Gaussian).
+fn blur(src: &[u8], w: usize, h: usize, r: usize) -> Vec<u8> {
+    let mut a = src.to_vec();
+    if w < 2 || h < 2 {
+        return a;
+    }
+    let mut b = vec![0u8; src.len()];
+    let r = r.min(w - 1).min(h - 1).max(1);
+    for _ in 0..2 {
+        // Horizontal: a -> b
+        for y in 0..h {
+            let row = &a[y * w..(y + 1) * w];
+            let mut sum: u32 = 0;
+            for x in 0..=r.min(w - 1) {
+                sum += row[x] as u32;
+            }
+            sum += row[0] as u32 * r as u32;
+            for x in 0..w {
+                b[y * w + x] = (sum / (2 * r as u32 + 1)) as u8;
+                let add = row[(x + r + 1).min(w - 1)] as u32;
+                let sub = row[x.saturating_sub(r)] as u32;
+                sum = sum + add - sub;
+            }
+        }
+        // Vertical: b -> a
+        for x in 0..w {
+            let mut sum: u32 = 0;
+            for y in 0..=r.min(h - 1) {
+                sum += b[y * w + x] as u32;
+            }
+            sum += b[x] as u32 * r as u32;
+            for y in 0..h {
+                a[y * w + x] = (sum / (2 * r as u32 + 1)) as u8;
+                let add = b[(y + r + 1).min(h - 1) * w + x] as u32;
+                let sub = b[y.saturating_sub(r) * w + x] as u32;
+                sum = sum + add - sub;
+            }
+        }
+    }
+    a
+}
+
+/// What clarity and sharpening need from a picture: its brightness, and blurred versions
+/// of it (computed once per framing, reused while sliders move).
+pub struct Detail {
+    lum: Vec<u8>,
+    wide: Vec<u8>,
+    fine: Vec<u8>,
+}
+
+impl Detail {
+    pub fn of(img: &Image) -> Detail {
+        let lum = luminance(img);
+        let r = (img.w.max(img.h) / 70).clamp(3, 120);
+        let wide = blur(&lum, img.w, img.h, r);
+        let fine = blur(&lum, img.w, img.h, 1);
+        Detail { lum, wide, fine }
+    }
+}
+
+/// Light, color and effects, in place. `detail` (from the same image before this call) is
+/// needed for clarity and sharpening; without it they're skipped.
+pub fn render(img: &mut Image, e: &Edits, detail: Option<&Detail>) {
+    if !e.has_tone() {
         return;
     }
-    // Filters are expressed as extra adjustments where possible.
-    let (mut contrast, mut saturation, mut warmth, mut lift) = (e.contrast, e.saturation, e.warmth, 0);
-    match e.filter {
-        Filter::Vivid => {
-            saturation += 45;
-            contrast += 15;
-        }
-        Filter::Warm => warmth += 35,
-        Filter::Cool => warmth -= 35,
-        Filter::Fade => {
-            saturation -= 35;
-            contrast -= 15;
-            lift = 30;
-        }
-        _ => {}
-    }
-    // Brightness + contrast + fade lift as one lookup table.
-    let mut lut = [0u8; 256];
-    for (v, out) in lut.iter_mut().enumerate() {
-        let mut x = v as i32 + e.brightness * 128 / 100;
-        x = (x - 128) * (100 + contrast.clamp(-100, 200)) / 100 + 128;
-        x = lift + x * (255 - lift) / 255;
-        *out = x.clamp(0, 255) as u8;
-    }
-    let sat = (100 + saturation).clamp(0, 300);
-    let warm = warmth.clamp(-100, 100) * 30 / 100; // up to ±30 levels
-    for p in img.px.iter_mut() {
-        let a = *p & 0xFF00_0000;
-        let mut r = lut[((*p >> 16) & 0xFF) as usize] as i32;
-        let mut g = lut[((*p >> 8) & 0xFF) as usize] as i32;
-        let mut b = lut[(*p & 0xFF) as usize] as i32;
-        if sat != 100 {
-            let y = (77 * r + 150 * g + 29 * b) >> 8;
-            r = y + (r - y) * sat / 100;
-            g = y + (g - y) * sat / 100;
-            b = y + (b - y) * sat / 100;
-        }
-        if warm != 0 {
-            r += warm;
-            b -= warm;
-        }
-        match e.filter {
-            Filter::BlackWhite => {
-                let y = (77 * r.clamp(0, 255) + 150 * g.clamp(0, 255) + 29 * b.clamp(0, 255)) >> 8;
-                r = y;
-                g = y;
-                b = y;
+    let lut = tone_tables(e);
+    let clarity = e.clarity * 140 / 100; // -140..140 (/100)
+    let sharp = e.sharpen * 200 / 100; // 0..200 (/100)
+    let local = detail.filter(|d| d.lum.len() == img.px.len() && (clarity != 0 || sharp != 0));
+    let sat = e.saturation;
+    let vib = e.vibrance;
+    // Vignette: per-column and per-row parts of the distance from the middle.
+    let vig = e.vignette;
+    let (w, h) = (img.w, img.h);
+    let dist = |i: usize, n: usize| -> u32 {
+        let d = (i as i64 * 2 - (n as i64 - 1)).unsigned_abs() as u64 * 1024 / n.max(1) as u64; // 0..1024
+        (d * d / 1024) as u32 // squared, 0..1024
+    };
+    let col: Vec<u32> = if vig != 0 { (0..w).map(|x| dist(x, w)).collect() } else { Vec::new() };
+    for y in 0..h {
+        let row_d = if vig != 0 { dist(y, h) } else { 0 };
+        for x in 0..w {
+            let i = y * w + x;
+            let p = img.px[i];
+            let a = p & 0xFF00_0000;
+            let mut r = lut[0][((p >> 16) & 0xFF) as usize] as i32;
+            let mut g = lut[1][((p >> 8) & 0xFF) as usize] as i32;
+            let mut b = lut[2][(p & 0xFF) as usize] as i32;
+            if let Some(d) = local {
+                let l = d.lum[i] as i32;
+                let mut delta = 0;
+                if clarity != 0 {
+                    // Mostly in the mid-tones.
+                    let m = 255 - ((l - 128).abs() * 2).min(255);
+                    delta += (l - d.wide[i] as i32) * clarity * m / (100 * 255);
+                }
+                if sharp != 0 {
+                    delta += (l - d.fine[i] as i32) * sharp / 100;
+                }
+                r += delta;
+                g += delta;
+                b += delta;
             }
-            Filter::Sepia => {
-                let (r0, g0, b0) = (r.clamp(0, 255), g.clamp(0, 255), b.clamp(0, 255));
-                r = (393 * r0 + 769 * g0 + 189 * b0) / 1000;
-                g = (349 * r0 + 686 * g0 + 168 * b0) / 1000;
-                b = (272 * r0 + 534 * g0 + 131 * b0) / 1000;
+            if sat != 0 || vib != 0 {
+                let y0 = luma(r, g, b);
+                let mx = r.max(g).max(b);
+                let mn = r.min(g).min(b);
+                let s = (mx - mn).clamp(0, 255);
+                // Vibrance boosts dull colors most and leaves strong ones alone.
+                let f = 100 + sat + vib * (255 - s) / 255;
+                let f = f.max(0);
+                r = y0 + (r - y0) * f / 100;
+                g = y0 + (g - y0) * f / 100;
+                b = y0 + (b - y0) * f / 100;
             }
-            _ => {}
+            if e.bw {
+                let y0 = luma(r.clamp(0, 255), g.clamp(0, 255), b.clamp(0, 255));
+                r = y0;
+                g = y0;
+                b = y0;
+            }
+            if vig != 0 {
+                let d2 = (col[x] + row_d) as i32; // 0..2048
+                // Smooth: starts a third of the way out, strongest in the corners.
+                let m = ((d2 - 500).max(0) * 256 / 1548).min(256);
+                let m = m * m / 256;
+                let f = 256 + vig * m * 7 / 1000; // ±~180/256
+                r = r * f / 256;
+                g = g * f / 256;
+                b = b * f / 256;
+            }
+            img.px[i] = a | (r.clamp(0, 255) as u32) << 16 | (g.clamp(0, 255) as u32) << 8 | b.clamp(0, 255) as u32;
         }
-        *p = a | clamp8(r) << 16 | clamp8(g) << 8 | clamp8(b);
     }
+}
+
+/// Light and color without clarity or sharpening (small previews, thumbnails).
+pub fn color(img: &mut Image, e: &Edits) {
+    render(img, e, None);
 }
 
 /// Apply every edit.
 pub fn apply(src: &Image, e: &Edits) -> Image {
-    let mut img = crop(orient(src, e.turns, e.flip), e.crop);
-    color(&mut img, e);
+    let mut img = geometry(src, e, true);
+    let detail = if e.clarity != 0 || e.sharpen != 0 { Some(Detail::of(&img)) } else { None };
+    render(&mut img, e, detail.as_ref());
     img
 }
 
-/// Suggest light & color settings: stretch the darkest/brightest 1% to the full range,
-/// center the mid-tones, and add a little saturation.
-pub fn auto_fix(img: &Image) -> (i32, i32, i32) {
-    let mut hist = [0u32; 256];
-    let step = (img.px.len() / 200_000).max(1);
-    let mut n = 0u32;
-    for p in img.px.iter().step_by(step) {
-        let (r, g, b) = ((p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF);
-        hist[((77 * r + 150 * g + 29 * b) >> 8) as usize] += 1;
-        n += 1;
+// ---- auto and histogram ---------------------------------------------------------------------
+
+/// Brightness and color counts (red, green, blue, brightness), 256 bins each.
+pub fn histogram(img: &Image) -> [[u32; 256]; 4] {
+    let mut h = [[0u32; 256]; 4];
+    let step = (img.px.len() / 300_000).max(1);
+    for &p in img.px.iter().step_by(step) {
+        let (r, g, b) = (((p >> 16) & 0xFF) as usize, ((p >> 8) & 0xFF) as usize, (p & 0xFF) as usize);
+        h[0][r] += 1;
+        h[1][g] += 1;
+        h[2][b] += 1;
+        h[3][luma(r as i32, g as i32, b as i32) as usize] += 1;
     }
+    h
+}
+
+/// Lightroom-style Auto: settings for exposure, contrast, highlights, shadows, whites,
+/// blacks, white balance, vibrance and saturation, worked out from the picture (with its
+/// framing applied). Effects and framing are kept.
+pub fn auto(img: &Image, e: &Edits) -> Edits {
+    let hist = histogram(img);
+    let total: u32 = hist[3].iter().sum::<u32>().max(1);
     let pct = |frac: u32| -> i32 {
-        let target = n * frac / 1000;
+        let target = (total as u64 * frac as u64 / 1000) as u32;
         let mut acc = 0;
-        for (v, &c) in hist.iter().enumerate() {
+        for (v, &c) in hist[3].iter().enumerate() {
             acc += c;
             if acc >= target {
                 return v as i32;
@@ -251,13 +537,42 @@ pub fn auto_fix(img: &Image) -> (i32, i32, i32) {
         }
         255
     };
-    let (lo, hi, mid) = (pct(10), pct(990), pct(500));
-    let span = (hi - lo).max(32);
-    let contrast = ((255 * 100 / span) - 100).clamp(0, 60);
-    // Brightness that moves the median toward 128 after the contrast stretch.
-    let mid_after = (mid - 128) * (100 + contrast) / 100 + 128;
-    let brightness = ((128 - mid_after) * 100 / 128 / 2).clamp(-40, 40);
-    (brightness, contrast, 12)
+    let (lo, mid, hi) = (pct(5), pct(500), pct(995));
+    let bright = hist[3][235..].iter().sum::<u32>() * 100 / total; // % near white
+    let lin = &*TO_LINEAR;
+    // Exposure: bring the middle brightness to about 46% grey.
+    let target = 118usize;
+    let ev = libm::log2f(lin[target] as f32 / (lin[mid.clamp(1, 254) as usize] as f32).max(1.0));
+    let exposure = ((ev / 2.0 * 100.0) as i32).clamp(-60, 70);
+    // Where the darkest/brightest end up after that exposure (roughly).
+    let shift = |v: i32| -> i32 {
+        let l = lin[v.clamp(0, 255) as usize] as f32 * libm::powf(2.0, exposure as f32 / 50.0);
+        TO_SRGB[(l as usize).min(4095)] as i32
+    };
+    let (lo2, hi2) = (shift(lo), shift(hi));
+    let whites = ((248 - hi2) * 100 / 46).clamp(-40, 50);
+    let blacks = (-(lo2 - 8) * 100 / 46).clamp(-50, 30);
+    let span = hi2 - lo2;
+    let contrast = ((210 - span) / 3).clamp(-15, 25);
+    let shadows = if mid < 90 { 30 } else if mid < 120 { 15 } else { 5 };
+    let highlights = if bright > 8 { -45 } else if bright > 3 { -25 } else { -10 };
+    // White balance is left as it is (a sunset should stay warm), like Lightroom's Auto.
+    let (temperature, tint) = (e.temperature, e.tint);
+    kprintln!("editor: auto: mid {} lo {} hi {} -> exposure {} contrast {} hi {} sh {} wh {} bl {} temp {} tint {}", mid, lo, hi, exposure, contrast, highlights, shadows, whites, blacks, temperature, tint);
+    Edits {
+        exposure,
+        contrast,
+        highlights,
+        shadows,
+        whites,
+        blacks,
+        temperature,
+        tint,
+        vibrance: 25,
+        saturation: 5,
+        preset: 0,
+        ..*e
+    }
 }
 
 /// Encode as JPEG (transparent areas become white).

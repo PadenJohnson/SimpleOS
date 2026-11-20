@@ -158,6 +158,8 @@ pub struct Desktop {
     pending_sheet_print: Option<(Vec<Canvas>, Layout, PrinterInfo)>,
     /// A phone import to start on the next tick (after the "looking" notice shows).
     pending_phone_import: Option<(String, u32, usize)>,
+    /// An edited photo to save on the next tick (after the "saving" notice shows).
+    pending_save: Option<(usize, SaveChoice, Edits)>,
     request: Option<PowerRequest>,
 }
 
@@ -263,6 +265,7 @@ impl Desktop {
             docs: DocsApp::new(),
             pending_sheet_print: None,
             pending_phone_import: None,
+            pending_save: None,
             request: None,
         };
         d.refresh_storage_view();
@@ -630,6 +633,20 @@ impl Desktop {
             self.toast = None;
             redraw = true;
         }
+        if let Some((i, choice, edits)) = self.pending_save.take() {
+            match self.save_edit(i, choice, edits) {
+                Ok(()) => {
+                    if matches!(&self.toast, Some((m, _)) if m.starts_with("Saving")) {
+                        self.toast = Some((String::from("Photo saved"), now + 3 * HZ));
+                    }
+                }
+                Err(e) => {
+                    kprintln!("editor: save failed: {}", e);
+                    self.toast = Some((format!("Couldn't save: {}", e), now + 6 * HZ));
+                }
+            }
+            return true;
+        }
         if let Some((source, drive, vol)) = self.pending_phone_import.take() {
             self.start_phone_import(&source, drive, vol, now);
             return true;
@@ -729,10 +746,9 @@ impl Desktop {
                 self.photos.start_edit(i, can_save, can_save && can_replace, has_original);
             }
             PhotoAction::Save(i, choice, edits) => {
-                if let Err(e) = self.save_edit(i, choice, edits) {
-                    kprintln!("editor: save failed: {}", e);
-                    self.toast = Some((format!("Couldn't save: {}", e), Self::now() + 6 * HZ));
-                }
+                // Show the notice first; the (slow, full-size) save runs on the next tick.
+                self.toast = Some((String::from("Saving your photo..."), Self::now() + 120 * HZ));
+                self.pending_save = Some((i, choice, edits));
             }
             PhotoAction::Print(i) => {
                 let printers = self.printers();
@@ -870,10 +886,7 @@ impl Desktop {
         let src = self.photos.source(i).cloned().ok_or("Photo not found")?;
         let name = String::from(self.photos.name(i).unwrap_or("photo"));
         let t0 = Self::now();
-        kprintln!(
-            "editor: edits turns {} mirror {} crop {:?} brightness {} contrast {} saturation {} warmth {} filter {:?}",
-            edits.turns, edits.flip, edits.crop, edits.brightness, edits.contrast, edits.saturation, edits.warmth, edits.filter
-        );
+        kprintln!("editor: edits {:?}", edits);
         let full = {
             let bytes = self.fetch(&src)?;
             crate::image::decode(&bytes)?

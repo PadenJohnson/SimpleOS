@@ -9,9 +9,13 @@ nothing to download.
 
 **Working now**
 - Desktop with Photos, Videos, Documents, Printers, Import, Files, Disks and Settings
-- Photos: thumbnail grid, full-screen viewer, and an editor (rotate, crop with print shapes,
-  brightness/contrast/saturation/warmth, Auto-fix, filters, undo, save as copy or replace
-  with revert)
+- Desktop: a taskbar along the bottom with an Applications menu and a button per open
+  window; several apps open at once in windows that move, minimize and maximize
+- Photos: thumbnail grid, full-screen viewer, and a Lightroom-style editor: histogram, Auto,
+  Light (exposure, contrast, highlights, shadows, whites, blacks), Color (temperature, tint,
+  vibrance, saturation, black & white), Effects (clarity, vignette, sharpen, fade), 12
+  presets with live previews, before/after, crop with print shapes, rotate and straighten,
+  undo; save as a copy, or replace with the original kept for Revert
 - USB: USB 3 (xHCI) and USB 2 (EHCI) controllers: USB drives, SD card readers (FAT12/16/32
   and exFAT), hubs, printers and phones on either; keyboards and mice on USB 3 ports.
   USB drives are only changed when you ask: Files can add copies to them (never changing or
