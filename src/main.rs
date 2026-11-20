@@ -122,7 +122,7 @@ static _REQUESTS_END: RequestsEndMarker = RequestsEndMarker::new();
 #[no_mangle]
 extern "C" fn kmain() -> ! {
     serial::init();
-    kprintln!("solon: kernel entered");
+    kprintln!("solon: kernel entered (build {})", env!("SOLON_BUILD"));
 
     assert!(BASE_REVISION.is_supported(), "bootloader does not support our protocol revision");
 
@@ -167,6 +167,18 @@ extern "C" fn kmain() -> ! {
     );
     kprintln!("solon: stack {}", if STACK_SIZE_REQUEST.get_response().is_some() { "1 MiB" } else { "default (64 KiB)" });
     cpu_irq::enable(); // the timer drives timeouts from here on
+    // Boot option "straytest": fire the interrupts real PCs send unasked (spurious IRQ 7/15,
+    // a stray APIC vector, the APIC spurious vector, an NMI); Solon must carry on.
+    if EXECUTABLE_CMDLINE_REQUEST.get_response().and_then(|r| r.cmdline().to_str().ok()).is_some_and(|c| c.split_whitespace().any(|w| w == "straytest")) {
+        unsafe {
+            x86_64::instructions::interrupts::software_interrupt::<39>();
+            x86_64::instructions::interrupts::software_interrupt::<47>();
+            x86_64::instructions::interrupts::software_interrupt::<0x50>();
+            x86_64::instructions::interrupts::software_interrupt::<0xFF>();
+            x86_64::instructions::interrupts::software_interrupt::<2>();
+        }
+        kprintln!("solon: stray interrupt test survived ({} ignored)", interrupts::STRAY.load(Relaxed));
+    }
 
     // Everything (timeouts, double-clicks, the clock) depends on the timer: make sure it ticks.
     let start = TICKS.load(Relaxed);

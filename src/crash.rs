@@ -117,6 +117,10 @@ pub fn show(info: &core::panic::PanicInfo) {
     fb.text(40, y, b"Solon stopped because of a problem.", RasterHeight::Size32, true, white);
     y += 50;
     fb.text(40, y, b"Your photos and files are safe. Please take a picture of this screen, then restart the computer.", RasterHeight::Size16, false, dim);
+    let mut build = StackStr { buf: [0; 600], len: 0 };
+    let _ = write!(build, "Solon build {}", env!("SOLON_BUILD"));
+    let bw = (build.len * get_raster_width(FontWeight::Regular, RasterHeight::Size16)) as usize;
+    fb.text(fb.w.saturating_sub(40 + bw), 52, &build.buf[..build.len], RasterHeight::Size16, false, dim);
     y += 36;
 
     let mut msg = StackStr { buf: [0; 600], len: 0 };

@@ -1177,6 +1177,10 @@ fn main() {
             windows_like(Path::new(&args[2]), args[3].parse().unwrap(), Path::new(&args[4]));
             return;
         }
+        Some("sym") if args.len() == 4 => {
+            sym_lookup(Path::new(&args[2]), u64::from_str_radix(args[3].trim_start_matches("0x"), 16).unwrap());
+            return;
+        }
         Some("fatcheck") if args.len() == 3 => {
             std::process::exit(if fat_check(Path::new(&args[2])) { 0 } else { 1 });
         }
@@ -1191,6 +1195,7 @@ fn main() {
         eprintln!("       mkimg windows-like <file> <MiB> <samples folder>");
         eprintln!("       mkimg check <disk image>");
         eprintln!("       mkimg fatcheck <disk image>");
+        eprintln!("       mkimg sym <kernel elf> <hex address>");
         std::process::exit(2);
     }
     let src = Path::new(&args[1]);
@@ -1461,4 +1466,43 @@ fn fat_check(path: &Path) -> bool {
     }
     println!("{} files, {} folders: {}", files, dirs, if ok { "FAT OK" } else { "PROBLEMS FOUND" });
     ok
+}
+
+// ---- symbol lookup (for crash screens from real PCs) ---------------------------------
+
+/// Print the function containing `addr` in an ELF64 kernel (from its symbol table).
+fn sym_lookup(path: &Path, addr: u64) {
+    let b = fs::read(path).unwrap();
+    let u16_ = |o: usize| u16::from_le_bytes([b[o], b[o + 1]]) as usize;
+    let u32_ = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap()) as usize;
+    let u64_ = |o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+    let shoff = u64_(0x28) as usize;
+    let shentsize = u16_(0x3A);
+    let shnum = u16_(0x3C);
+    let mut best: Option<(u64, u64, String)> = None;
+    for i in 0..shnum {
+        let sh = shoff + i * shentsize;
+        if u32_(sh + 4) != 2 {
+            continue; // SHT_SYMTAB
+        }
+        let off = u64_(sh + 0x18) as usize;
+        let size = u64_(sh + 0x20) as usize;
+        let link = u32_(sh + 0x28);
+        let strsh = shoff + link * shentsize;
+        let stroff = u64_(strsh + 0x18) as usize;
+        for s in (off..off + size).step_by(24) {
+            let name = u32_(s);
+            let value = u64_(s + 8);
+            let sz = u64_(s + 16);
+            if value <= addr && addr < value + sz.max(1) && best.as_ref().is_none_or(|(v, _, _)| value >= *v) {
+                let end = b[stroff + name..].iter().position(|&c| c == 0).unwrap();
+                let n = String::from_utf8_lossy(&b[stroff + name..stroff + name + end]).into_owned();
+                best = Some((value, sz, n));
+            }
+        }
+    }
+    match best {
+        Some((v, sz, n)) => println!("{:#x} = {} + {:#x} (size {:#x})", addr, n, addr - v, sz),
+        None => println!("{:#x}: no symbol", addr),
+    }
 }
