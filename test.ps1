@@ -22,6 +22,7 @@ param(
     [switch]$LegacyBios,      # boot with SeaBIOS (old BIOS PCs) instead of UEFI
     [string]$Cmdline = "",    # kernel command line (development boot only), e.g. "testprinter=pcl"
     [string]$Resolution = "", # screen mode (development boot only), e.g. "1920x1080"
+    [switch]$NoEsp,           # no development boot folder: boot from an internal disk (after installing)
     [switch]$ExpectExit       # the test ends with Solon turning the machine off or restarting
 )
 $ErrorActionPreference = "Stop"
@@ -53,7 +54,7 @@ if (-not $LegacyBios) {
     $args += @("-drive", "`"if=pflash,format=raw,unit=0,readonly=on,file=$(Join-Path $share 'edk2-x86_64-code.fd')`"",
                "-drive", "if=pflash,format=raw,unit=1,file=test-out\vars.fd")
 }
-if (-not $BootStick) { $args += @("-drive", "format=raw,file=fat:rw:esp") }
+if (-not $BootStick -and -not $NoEsp) { $args += @("-drive", "format=raw,file=fat:rw:esp") }
 $xhci = $false
 if ($BootStick) {
     $args += @("-device", "qemu-xhci,id=xhci",

@@ -31,12 +31,14 @@ pub struct Settings {
     pub clock24: bool,
     pub show_date: bool,
     pub mouse: usize,
+    /// The "install Solon on this computer" notice was shown.
+    pub install_notice: bool,
 }
 
 impl Settings {
     /// First-boot defaults: bigger text on very high-resolution screens.
     pub fn defaults(screen_w: usize, screen_h: usize) -> Settings {
-        let mut s = Settings { background: 0, size: 0, clock24: false, show_date: true, mouse: 1 };
+        let mut s = Settings { background: 0, size: 0, clock24: false, show_date: true, mouse: 1, install_notice: false };
         for i in (0..SIZES.len()).rev() {
             if screen_w >= 2400 && s.size_fits(i, screen_w, screen_h) {
                 s.size = i;
@@ -58,8 +60,8 @@ impl Settings {
 
     pub fn to_text(&self) -> String {
         format!(
-            "background={}\nsize={}\nclock24={}\nshow_date={}\nmouse={}\n",
-            self.background, self.size, self.clock24 as u8, self.show_date as u8, self.mouse
+            "background={}\nsize={}\nclock24={}\nshow_date={}\nmouse={}\ninstall_notice={}\n",
+            self.background, self.size, self.clock24 as u8, self.show_date as u8, self.mouse, self.install_notice as u8
         )
     }
 
@@ -74,6 +76,7 @@ impl Settings {
                 "clock24" if n <= 1 => s.clock24 = n == 1,
                 "show_date" if n <= 1 => s.show_date = n == 1,
                 "mouse" if n < MOUSE.len() => s.mouse = n,
+                "install_notice" if n <= 1 => s.install_notice = n == 1,
                 _ => {}
             }
         }

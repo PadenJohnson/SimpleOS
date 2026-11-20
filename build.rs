@@ -18,4 +18,5 @@ fn main() {
     println!("cargo:rustc-env=SOLON_BUILD={}{}", commit, if dirty { "+" } else { "" });
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/index");
+    println!("cargo:rerun-if-changed=src");
 }

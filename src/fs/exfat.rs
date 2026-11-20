@@ -256,6 +256,25 @@ impl ExFat {
         Ok(out)
     }
 
+    /// Up to `len` bytes of a file from `offset` (big files are copied a piece at a time).
+    pub fn read_part(&mut self, io: &mut VolumeIo, dev: &mut dyn BlockDev, f: &DirEntry, offset: u64, len: usize) -> Result<Vec<u8>, FsError> {
+        let end = (offset + len as u64).min(f.size);
+        if offset >= end {
+            return Ok(Vec::new());
+        }
+        let cb = self.cluster_bytes();
+        let first = (offset / cb) as usize;
+        let last = ((end + cb - 1) / cb) as usize;
+        let chain = self.chain(io, dev, f.first_cluster, f.contiguous, last)?;
+        if chain.len() < last {
+            return Err(FsError::Corrupt);
+        }
+        let mut out = Vec::with_capacity((last - first) * cb as usize);
+        self.read_clusters(io, dev, &chain[first..last], &mut out)?;
+        let skip = (offset - first as u64 * cb) as usize;
+        Ok(out[skip..skip + (end - offset) as usize].to_vec())
+    }
+
     // ---- writing ----------------------------------------------------------------------
 
     /// Load the allocation bitmap and up-case table so the volume can be modified.

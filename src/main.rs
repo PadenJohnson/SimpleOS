@@ -22,6 +22,7 @@ mod gfx;
 mod icons;
 mod import;
 mod image;
+mod install;
 mod interrupts;
 mod library;
 mod memory;

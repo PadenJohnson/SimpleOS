@@ -782,3 +782,38 @@ impl Storage {
         self.with(usb, |vol, d| vol.abort_file(d, p))
     }
 }
+
+/// For the installer.
+impl Storage {
+    /// Part of a file in Solon storage.
+    pub fn read_part(&mut self, usb: &mut Usb, file: &DirEntry, offset: u64, len: usize) -> Result<Vec<u8>, FsError> {
+        self.with(usb, |vol, d| vol.read_part(d, file, offset, len))
+    }
+
+    /// Internal disk `i`: (name, blocks, block size).
+    pub fn disk_info(&self, i: usize) -> Option<(String, u64, usize)> {
+        self.disks.get(i).map(|d| (d.name.clone(), d.blocks, d.block_size))
+    }
+
+    pub fn disk_count(&self) -> usize {
+        self.disks.len()
+    }
+
+    /// Raw access to internal disk `i` (only the installer, after the user confirmed erasing it).
+    pub fn with_disk<R>(&mut self, i: usize, f: impl FnOnce(&mut dyn BlockDev) -> R) -> Option<R> {
+        self.disks.get_mut(i).map(|d| f(d))
+    }
+
+    /// Is Solon storage (the one in use) on internal disk `i`?
+    pub fn library_on_disk(&self, i: usize) -> bool {
+        matches!(self.library.as_ref().map(|l| l.backend), Some(Backend::Internal(d)) if d == i)
+    }
+
+    /// Create Solon storage on disk `i` from block `min_start` on (installer), without
+    /// switching to it.
+    pub fn create_volume_on(&mut self, i: usize, min_start: u64) -> Result<Volume, FsError> {
+        let d = self.disks.get_mut(i).ok_or(FsError::Io)?;
+        let (total, name) = (d.blocks, d.name.clone());
+        create_on(d, total, &name, min_start)
+    }
+}

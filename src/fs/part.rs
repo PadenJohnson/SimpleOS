@@ -382,3 +382,45 @@ pub fn write_single_mbr(dev: &mut dyn BlockDev, total: u64, part_type: u8) -> Re
     dev.flush()?;
     Ok((start, len))
 }
+
+pub const ESP_TYPE: [u8; 16] = guid(0xC12A7328, 0xF81F, 0x11D2, [0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B]);
+
+/// The boot (EFI system) partition: (slot, first block, last block).
+pub fn esp(g: &Gpt) -> Option<(usize, u64, u64)> {
+    g.parts.iter().find(|p| p.type_guid == ESP_TYPE).map(|p| (p.slot, p.first, p.last))
+}
+
+/// Installer: after the boot area of Solon's stick has been copied onto an internal disk,
+/// give the disk its own partition table. It has the same shape as the stick's (Limine
+/// keeps its BIOS code right after the shortened entry array, so the array must stay the
+/// same size), holds only the boot partition, spans the whole disk, and gets new IDs.
+pub fn install_table(dev: &mut dyn BlockDev, total: u64, stick: &Gpt, esp_slot: usize, disk_guid: [u8; 16], esp_guid: [u8; 16]) -> Result<(), FsError> {
+    let bs = dev.block_size();
+    let esize = le32(&stick.header, 84) as usize;
+    let mut entries = vec![0u8; stick.entries.len()];
+    entries[esp_slot * esize..(esp_slot + 1) * esize].copy_from_slice(&stick.entries[esp_slot * esize..(esp_slot + 1) * esize]);
+    entries[esp_slot * esize + 16..esp_slot * esize + 32].copy_from_slice(&esp_guid);
+    let ecrc = crc32(&entries);
+    let entry_blocks = ((entries.len() + bs - 1) / bs) as u64;
+    let backup_entries = total - 1 - entry_blocks;
+    let mut base = stick.header.clone();
+    base[48..56].copy_from_slice(&(backup_entries - 1).to_le_bytes());
+    base[56..72].copy_from_slice(&disk_guid);
+    write_padded(dev, backup_entries, &entries)?;
+    write_padded(dev, total - 1, &header_bytes(&base, total - 1, 1, backup_entries, ecrc))?;
+    write_padded(dev, stick.entries_lba, &entries)?;
+    write_padded(dev, 1, &header_bytes(&base, 1, total - 1, stick.entries_lba, ecrc))?;
+    // Protective MBR: keep the boot code (Limine's first stage), fix the size.
+    let mut mbr = vec![0u8; bs];
+    dev.read_blocks(0, &mut mbr)?;
+    for i in 0..4 {
+        let e = &mut mbr[446 + i * 16..462 + i * 16];
+        if e[4] == 0xEE {
+            e[12..16].copy_from_slice(&((total - 1).min(0xFFFF_FFFF) as u32).to_le_bytes());
+        }
+    }
+    dev.write_blocks(0, &mbr)?;
+    dev.flush()?;
+    kprintln!("part: install partition table written ({} blocks)", total);
+    Ok(())
+}

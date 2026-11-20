@@ -33,6 +33,10 @@ nothing to download.
 - Disks: every disk inside the PC and plugged in, with its partitions, sizes and free space;
   set up Solon storage; a storage health check with a safe repair; erase and format a USB
   drive (never an internal disk or the SimpleOS stick).
+- Installing: while Solon runs from its USB stick, Disks offers "Install Solon here" on the
+  internal disk (with a one-time notice at startup). It erases that disk after two warnings,
+  copies Solon's boot area from the stick (so it starts on UEFI and old BIOS PCs) and
+  copies everything in the stick's Solon storage. Remove the stick and restart.
 - Settings: background colour, text and icon size (Normal / Large / Extra large; the whole
   desktop is scaled, which also helps on 4K screens), 12/24-hour clock, date in the top bar,
   setting the time and date, mouse speed. Saved in the library.
@@ -45,7 +49,7 @@ nothing to download.
   page; colour or black & white; copies. Checked with a test printer and GhostPCL; not yet
   tried on a real printer.
 
-**Planned:** playing videos, installing to the internal disk.
+**Planned:** playing videos.
 
 ## Making a USB stick
 

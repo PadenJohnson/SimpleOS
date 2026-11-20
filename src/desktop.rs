@@ -136,6 +136,8 @@ pub struct Desktop {
     screen: (usize, usize),
     date: (u16, u8, u8),
     power_menu: bool,
+    /// One-time notice: Solon runs from its USB stick and could be installed.
+    install_notice: bool,
     confirm: Option<PowerRequest>,
     screen_off: bool,
     files: Files,
@@ -250,6 +252,7 @@ impl Desktop {
             screen,
             date: crate::rtc::date(),
             power_menu: false,
+            install_notice: false,
             confirm: None,
             screen_off: false,
             files: Files::new(),
@@ -261,6 +264,10 @@ impl Desktop {
             request: None,
         };
         d.refresh_storage_view();
+        d.install_notice = !d.settings.install_notice && (0..d.storage.disk_count()).any(|i| crate::install::blocker(&d.storage, &d.usb, i).is_none());
+        if d.install_notice {
+            kprintln!("solon: showing the install notice");
+        }
         d
     }
 
@@ -987,6 +994,11 @@ impl Desktop {
         match a {
             DiskAction::None => false,
             DiskAction::Redraw => true,
+            DiskAction::Restart => {
+                kprintln!("power: restart after installing");
+                self.request = Some(PowerRequest::Restart);
+                true
+            }
             DiskAction::Changed(msg) => {
                 self.toast = Some((msg, now + 5 * HZ));
                 self.import.drives_changed(&self.usb);
@@ -1036,6 +1048,54 @@ impl Desktop {
                 self.refresh_storage_view();
                 true
             }
+        }
+    }
+
+    // ---- "install on this computer" notice ------------------------------------------------
+
+    fn notice_box(&self) -> Rect {
+        let w = 600.min(self.w - 40);
+        Rect::new((self.w - w) / 2, (self.h - 230) / 2, w, 230)
+    }
+    fn notice_open(&self) -> Rect {
+        let b = self.notice_box();
+        Rect::new(b.x + b.w - 24 - 150, b.y + b.h - 58, 150, 38)
+    }
+    fn notice_later(&self) -> Rect {
+        let o = self.notice_open();
+        Rect::new(o.x - 12 - 110, o.y, 110, 38)
+    }
+
+    fn draw_install_notice(&self, c: &mut Canvas) {
+        c.fill_rect_alpha(0, 0, self.w, self.h, 0, 110);
+        let b = self.notice_box();
+        c.round_rect_alpha(b.x + 3, b.y + 6, b.w, b.h, 12, 0, 90);
+        c.round_rect(b.x, b.y, b.w, b.h, 12, rgb(255, 255, 255));
+        c.text(b.x + 24, b.y + 20, "Solon is running from the USB stick", Size::Medium, true, rgb(40, 44, 52));
+        let lines = [
+            "You can install Solon on this computer's disk, so it starts",
+            "without the stick. Installing erases that disk, and copies your",
+            "photos and files from the stick. It's in the Disks app.",
+        ];
+        for (i, l) in lines.iter().enumerate() {
+            c.text(b.x + 24, b.y + 62 + i as i32 * 24, l, Size::Small, false, rgb(110, 116, 126));
+        }
+        let o = self.notice_open();
+        c.round_rect(o.x, o.y, o.w, o.h, 8, rgb(46, 134, 222));
+        c.text_centered(o.x + o.w / 2, o.y + 10, "Open Disks", Size::Small, true, rgb(255, 255, 255));
+        let l = self.notice_later();
+        c.round_rect(l.x, l.y, l.w, l.h, 8, rgb(230, 233, 238));
+        c.text_centered(l.x + l.w / 2, l.y + 10, "Not now", Size::Small, true, rgb(40, 44, 52));
+    }
+
+    /// Either way the notice isn't shown again (the Disks app keeps the button).
+    fn dismiss_install_notice(&mut self, open_disks: bool) {
+        self.install_notice = false;
+        let mut s = self.settings;
+        s.install_notice = true;
+        self.apply_settings(s);
+        if open_disks {
+            self.open(App::Disks);
         }
     }
 
@@ -1100,6 +1160,9 @@ impl Desktop {
                 app => draw_placeholder(c, app, body),
             }
             c.reset_clip();
+        }
+        if self.install_notice {
+            self.draw_install_notice(c);
         }
         self.draw_power(c);
         if self.show_log {
@@ -1193,6 +1256,13 @@ impl Desktop {
             return redraw;
         }
         kprintln!("solon: click at {},{}", x, y);
+        if self.install_notice {
+            let (open, later) = (self.notice_open(), self.notice_later());
+            if open.contains(x, y) || later.contains(x, y) {
+                self.dismiss_install_notice(open.contains(x, y));
+            }
+            return true;
+        }
         if let Some(r) = self.power_click(x, y) {
             return r;
         }
@@ -1223,7 +1293,7 @@ impl Desktop {
                         redraw |= self.files_action(a, now);
                     }
                     App::Disks => {
-                        let a = self.disks.on_press(x, y, body, &self.storage);
+                        let a = self.disks.on_press(x, y, body, &self.storage, &self.usb);
                         redraw |= self.disk_action(a, now);
                     }
                     App::Documents => {
@@ -1275,6 +1345,14 @@ impl Desktop {
 
     /// Scancode set 1. Returns true if the screen needs redrawing.
     pub fn on_key(&mut self, sc: u8) -> bool {
+        if self.install_notice && sc & 0x80 == 0 {
+            match sc {
+                0x1C => self.dismiss_install_notice(true),
+                0x01 => self.dismiss_install_notice(false),
+                _ => return false,
+            }
+            return true;
+        }
         if sc == 0x58 {
             // F12: diagnostics (kernel log)
             self.show_log = !self.show_log;

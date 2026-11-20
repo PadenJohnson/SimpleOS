@@ -117,3 +117,19 @@ In Import, open the phone and press **Import new photos & videos**: everything t
 imported before is copied into Solon storage (a folder named with today's date and the phone).
 Pressing it again later only copies the new ones. Solon never changes or deletes anything on
 the phone.
+
+## Installing on the computer's disk
+
+Once Solon works well from the stick, it can live on the computer's own disk instead:
+
+1. Start the PC from the Solon stick.
+2. Open **Disks** and press **Install Solon here** on the internal disk. (Solon also offers
+   this once at startup.)
+3. Read the two warnings: **everything on that disk is erased** (Windows, programs, files).
+   Copy anything you want to keep onto a USB drive first.
+4. Solon copies itself and everything in its storage on the stick (photos, documents,
+   settings) to the disk. Then remove the stick and press **Restart now**.
+
+If the PC still starts the old system or the stick, open its boot menu at power-on (often
+F12, F9, F8 or Esc) and pick the internal disk, or put it first in the firmware's boot order.
+Disks with 4K sectors aren't supported by the installer yet.

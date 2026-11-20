@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use crate::disk::human;
 use crate::gfx::{rgb, text_width, Canvas, Rect, Size};
 use crate::library::{DiskView, PartView, Storage};
+use crate::install::{self, Install};
 use crate::usb::Usb;
 
 const INK: u32 = rgb(40, 44, 52);
@@ -29,6 +30,8 @@ pub enum DiskAction {
     Redraw,
     /// Storage or drives changed; show this notice.
     Changed(String),
+    /// Restart the computer (after installing).
+    Restart,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -36,6 +39,7 @@ enum Op {
     Setup(usize),
     Check(bool),
     Erase(u32),
+    Install(usize),
 }
 
 enum Dialog {
@@ -47,6 +51,10 @@ enum Dialog {
     Erase2 { drive: u32, name: String, bytes: u64 },
     Busy(String),
     Message(String),
+    Install1 { disk: usize, name: String, bytes: u64 },
+    Install2 { disk: usize, name: String, bytes: u64 },
+    Progress(String, u32),
+    Installed(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -54,6 +62,7 @@ enum Btn {
     Setup,
     Check,
     Erase,
+    Install,
 }
 
 pub struct DiskMgr {
@@ -61,6 +70,9 @@ pub struct DiskMgr {
     scroll: i32,
     dialog: Dialog,
     pending: Option<Op>,
+    /// Running from Solon's USB stick (so it can be installed).
+    from_stick: bool,
+    install: Option<Install>,
 }
 
 fn card_h(v: &DiskView) -> i32 {
@@ -121,7 +133,7 @@ fn usb_views(storage: &Storage, usb: &mut Usb) -> Vec<DiskView> {
 
 impl DiskMgr {
     pub fn new() -> DiskMgr {
-        DiskMgr { views: Vec::new(), scroll: 0, dialog: Dialog::None, pending: None }
+        DiskMgr { views: Vec::new(), scroll: 0, dialog: Dialog::None, pending: None, from_stick: false, install: None }
     }
 
     /// Re-read every disk (opening the window, plug/unplug, after changes).
@@ -129,10 +141,11 @@ impl DiskMgr {
         let mut v = storage.disk_views();
         v.extend(usb_views(storage, usb));
         self.views = v;
+        self.from_stick = usb.boot_drive().is_some();
     }
 
     pub fn busy(&self) -> bool {
-        self.pending.is_some()
+        self.pending.is_some() || self.install.is_some()
     }
 
     fn holds_library(v: &DiskView) -> bool {
@@ -140,8 +153,11 @@ impl DiskMgr {
     }
 
     /// Buttons on a disk's card, right to left.
-    fn buttons(v: &DiskView, has_library: bool) -> Vec<(Btn, &'static str)> {
+    fn buttons(v: &DiskView, has_library: bool, from_stick: bool) -> Vec<(Btn, &'static str)> {
         let mut b = Vec::new();
+        if from_stick && v.internal.is_some() {
+            b.push((Btn::Install, "Install Solon here"));
+        }
         if has_library && Self::holds_library(v) {
             b.push((Btn::Check, "Check health"));
         }
@@ -194,7 +210,7 @@ impl DiskMgr {
                 (Some(_), false) => String::from("USB drive"),
                 (None, _) => format!("Inside this computer ({})", v.kind),
             };
-            let btns = Self::buttons(v, has_lib);
+            let btns = Self::buttons(v, has_lib, self.from_stick);
             let rects = Self::btn_rects(k, &btns);
             let text_right = rects.last().map(|b| b.x - 12).unwrap_or(k.x + k.w - PAD);
             let title = format!("{}  -  {}", v.name, human(v.bytes));
@@ -207,6 +223,7 @@ impl DiskMgr {
                     Btn::Setup => (ACCENT, rgb(255, 255, 255)),
                     Btn::Check => (rgb(230, 233, 238), INK),
                     Btn::Erase => (rgb(252, 232, 230), DANGER),
+                    Btn::Install => (rgb(39, 174, 96), rgb(255, 255, 255)),
                 };
                 c.round_rect(br.x, br.y, br.w, br.h, 8, bg);
                 c.text_centered(br.x + br.w / 2, br.y + 9, label, Size::Small, true, fg);
@@ -296,6 +313,36 @@ impl DiskMgr {
             ),
             Dialog::Busy(msg) => (String::from("Please wait"), Vec::from([msg.clone(), String::from("Don't unplug anything.")]), Vec::new()),
             Dialog::Message(msg) => (String::from("Disks"), Vec::from([msg.clone()]), Vec::from([("OK", false)])),
+            Dialog::Install1 { name, .. } => (
+                format!("Install Solon on {}?", name),
+                Vec::from([
+                    String::from("Everything on this disk will be erased: Windows, programs"),
+                    String::from("and files. Solon, and everything in Solon storage on the"),
+                    String::from("USB stick, will be copied onto it."),
+                    String::from("Copy anything you want to keep to a USB drive first."),
+                ]),
+                Vec::from([("Continue", true), ("Cancel", false)]),
+            ),
+            Dialog::Install2 { name, bytes, .. } => (
+                String::from("Are you completely sure?"),
+                Vec::from([format!("All of {} ({}) will be erased.", name, human(*bytes)), String::from("This can't be undone.")]),
+                Vec::from([("Erase and install", true), ("Cancel", false)]),
+            ),
+            Dialog::Progress(msg, _) => (
+                String::from("Installing Solon"),
+                Vec::from([msg.clone(), String::from("Don't turn off the computer or unplug the USB stick."), String::new()]),
+                Vec::new(),
+            ),
+            Dialog::Installed(name) => (
+                String::from("Solon is installed"),
+                Vec::from([
+                    format!("Solon is now on {}.", name),
+                    String::from("Remove the USB stick, then restart the computer."),
+                    String::from("If it still starts the old system, choose the disk in"),
+                    String::from("the PC's boot menu (often F12, F9 or Esc at power-on)."),
+                ]),
+                Vec::from([("Restart now", false), ("Later", false)]),
+            ),
         })
     }
 
@@ -322,6 +369,12 @@ impl DiskMgr {
             let l = crate::photos::ellipsize(l, d.w - 48, Size::Small, false);
             c.text(d.x + 24, d.y + 62 + i as i32 * 24, &l, Size::Small, false, DIM);
         }
+        if let Dialog::Progress(_, pct) = &self.dialog {
+            let bar = Rect::new(d.x + 24, d.y + 62 + 2 * 24 + 6, d.w - 48, 14);
+            c.round_rect(bar.x, bar.y, bar.w, bar.h, 7, rgb(228, 231, 236));
+            let w = (bar.w * (*pct).min(100) as i32 / 100).max(14);
+            c.round_rect(bar.x, bar.y, w, bar.h, 7, rgb(39, 174, 96));
+        }
         for (k, ((label, danger), b)) in btns.iter().zip(Self::dialog_buttons(d, &btns)).enumerate() {
             let (bg, fg) = match (k, danger) {
                 (_, true) => (DANGER, rgb(255, 255, 255)),
@@ -346,6 +399,20 @@ impl DiskMgr {
                 DiskAction::Redraw
             }
             (Dialog::Erase2 { drive, name, .. }, 0) => self.start(Op::Erase(drive), &format!("Erasing {}...", name)),
+            (Dialog::Install1 { disk, name, bytes }, 0) => {
+                self.dialog = Dialog::Install2 { disk, name, bytes };
+                DiskAction::Redraw
+            }
+            (Dialog::Install2 { disk, .. }, 0) => {
+                self.pending = Some(Op::Install(disk));
+                self.dialog = Dialog::Progress(String::from("Getting ready..."), 0);
+                DiskAction::Redraw
+            }
+            (Dialog::Installed(_), 0) => DiskAction::Restart,
+            (Dialog::Progress(m, p), _) => {
+                self.dialog = Dialog::Progress(m, p);
+                DiskAction::None
+            }
             (Dialog::Busy(m), _) => {
                 self.dialog = Dialog::Busy(m);
                 DiskAction::None
@@ -362,6 +429,38 @@ impl DiskMgr {
 
     /// Run the pending operation (called from the desktop's tick, after "Please wait" is shown).
     pub fn step(&mut self, storage: &mut Storage, usb: &mut Usb) -> Option<DiskAction> {
+        if let Some(job) = &mut self.install {
+            return Some(match job.step(storage, usb) {
+                Ok(()) if job.finished() => {
+                    let name = storage.disk_info(job.disk).map(|i| i.0).unwrap_or_default();
+                    let failed = job.files_failed;
+                    self.install = None;
+                    self.dialog = Dialog::Installed(name);
+                    if failed > 0 {
+                        kprintln!("disks: {} file(s) couldn't be copied", failed);
+                    }
+                    self.refresh(storage, usb);
+                    DiskAction::Changed(String::from("Solon is installed"))
+                }
+                Ok(()) => {
+                    let (msg, pct) = job.progress();
+                    let changed = !matches!(&self.dialog, Dialog::Progress(m, p) if *m == msg && *p == pct);
+                    self.dialog = Dialog::Progress(msg, pct);
+                    if changed {
+                        DiskAction::Redraw
+                    } else {
+                        DiskAction::None
+                    }
+                }
+                Err(e) => {
+                    kprintln!("disks: install stopped: {}", e);
+                    self.install = None;
+                    self.dialog = Dialog::Message(format!("Installing stopped: {}. The disk needs installing again.", e));
+                    self.refresh(storage, usb);
+                    DiskAction::Redraw
+                }
+            });
+        }
         let op = self.pending.take()?;
         let action = match op {
             Op::Setup(disk) => match storage.create_library(disk) {
@@ -426,6 +525,16 @@ impl DiskMgr {
                     DiskAction::Redraw
                 }
             },
+            Op::Install(disk) => match Install::new(storage, usb, disk) {
+                Ok(job) => {
+                    self.install = Some(job);
+                    return Some(DiskAction::Redraw);
+                }
+                Err(e) => {
+                    self.dialog = Dialog::Message(String::from(e));
+                    DiskAction::Redraw
+                }
+            },
             Op::Erase(drive) => match usb.format_drive(drive, "USB DRIVE") {
                 Ok(()) => {
                     self.dialog = Dialog::Message(String::from("The USB drive is erased and ready to use."));
@@ -442,7 +551,7 @@ impl DiskMgr {
         Some(action)
     }
 
-    pub fn on_press(&mut self, x: i32, y: i32, r: Rect, storage: &Storage) -> DiskAction {
+    pub fn on_press(&mut self, x: i32, y: i32, r: Rect, storage: &Storage, usb: &Usb) -> DiskAction {
         if let Some((_, lines, btns)) = self.dialog_parts() {
             let d = Self::dialog_rect(r, lines.len());
             for (k, b) in Self::dialog_buttons(d, &btns).iter().enumerate() {
@@ -456,7 +565,7 @@ impl DiskMgr {
         for i in 0..self.views.len() {
             let k = self.card(r, i);
             let v = &self.views[i];
-            let btns = Self::buttons(v, has_lib);
+            let btns = Self::buttons(v, has_lib, self.from_stick);
             for ((b, _), br) in btns.iter().zip(Self::btn_rects(k, &btns)) {
                 if !br.contains(x, y) {
                     continue;
@@ -467,6 +576,13 @@ impl DiskMgr {
                         return self.start(Op::Check(false), "Checking Solon storage...");
                     }
                     Btn::Erase => Dialog::Erase1 { drive: v.usb.unwrap(), name: v.name.clone(), bytes: v.bytes },
+                    Btn::Install => {
+                        let disk = v.internal.unwrap();
+                        match install::blocker(storage, usb, disk) {
+                            Some(why) => Dialog::Message(String::from(why)),
+                            None => Dialog::Install1 { disk, name: v.name.clone(), bytes: v.bytes },
+                        }
+                    }
                 };
                 return DiskAction::Redraw;
             }
@@ -489,9 +605,9 @@ impl DiskMgr {
         }
         match (&self.dialog, sc) {
             (Dialog::None, _) => None,
-            (Dialog::Busy(_), _) => Some(DiskAction::None),
+            (Dialog::Busy(_) | Dialog::Progress(..), _) => Some(DiskAction::None),
             // Erasing needs a click, never just a key.
-            (Dialog::Erase1 { .. } | Dialog::Erase2 { .. }, 0x1C) => Some(DiskAction::None),
+            (Dialog::Erase1 { .. } | Dialog::Erase2 { .. } | Dialog::Install1 { .. } | Dialog::Install2 { .. }, 0x1C) => Some(DiskAction::None),
             (_, 0x1C) => Some(self.dialog_choice(0)),
             (_, 0x01) => {
                 self.dialog = Dialog::None;
