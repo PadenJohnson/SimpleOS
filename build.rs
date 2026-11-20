@@ -16,6 +16,8 @@ fn main() {
         .unwrap_or_else(|| String::from("unknown"));
     let dirty = Command::new("git").args(["status", "--porcelain", "--untracked-files=no"]).output().map(|o| !o.stdout.is_empty()).unwrap_or(false);
     println!("cargo:rustc-env=SOLON_BUILD={}{}", commit, if dirty { "+" } else { "" });
+    let time = Command::new("git").args(["log", "-1", "--format=%ct"]).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| String::from("0"));
+    println!("cargo:rustc-env=SOLON_BUILD_TIME={}", time);
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/index");
     println!("cargo:rerun-if-changed=src");

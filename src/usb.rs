@@ -261,6 +261,16 @@ impl Usb {
             boot_disk,
         };
         usb.poll();
+        // Ports moved over from the USB 2 controller reconnect a moment later: wait for them
+        // (up to 2 s), so Solon's own stick is found before its storage is looked for.
+        if usb.hcs.iter().any(|h| h.switched_ports) {
+            let end = TICKS.load(Relaxed) + 2 * HZ;
+            while TICKS.load(Relaxed) < end && !(usb.boot_disk.is_some() && usb.boot_drive().is_some()) {
+                crate::interrupts::sleep_ms(50);
+                usb.poll();
+            }
+            kprintln!("usb: {} drive(s) after moving ports", usb.drives.len());
+        }
         // Devices behind hubs need a few rounds of hub polling to appear.
         for _ in 0..3 {
             if usb.hubs.is_empty() {
@@ -891,5 +901,21 @@ impl Usb {
         p.start(&mut self.hcs);
         kprintln!("usb: test phone \"{}\": {} storage area(s)", p.name, p.storages.len());
         self.phones.push(p);
+    }
+}
+
+impl Usb {
+    /// Stop the USB controllers before switching the computer off.
+    pub fn shutdown(&mut self) {
+        for hc in &mut self.hcs {
+            hc.shutdown();
+        }
+    }
+}
+
+impl Usb {
+    /// The ID of the disk Solon started from (from the bootloader), if it has one.
+    pub fn boot_disk_id(&self) -> Option<[u8; 16]> {
+        self.boot_disk
     }
 }

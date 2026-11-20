@@ -429,3 +429,20 @@ impl Volume {
         }
     }
 }
+
+impl Volume {
+    /// FAT only: delete a file. Ok(false) if it isn't there.
+    pub fn fat_delete(&mut self, dev: &mut dyn BlockDev, dir: &DirEntry, name: &str) -> Result<bool, FsError> {
+        match &mut self.fs {
+            FsImpl::Fat(f) => f.delete_file(&mut self.io, dev, dir, name),
+            FsImpl::ExFat(_) => Err(FsError::ReadOnly),
+        }
+    }
+    /// FAT only: give `target` the contents of `source` and remove `source` (see `Fat::swap_in`).
+    pub fn fat_swap_in(&mut self, dev: &mut dyn BlockDev, dir: &DirEntry, target: &str, source: &str) -> Result<(), FsError> {
+        match &mut self.fs {
+            FsImpl::Fat(f) => f.swap_in(&mut self.io, dev, dir, target, source),
+            FsImpl::ExFat(_) => Err(FsError::ReadOnly),
+        }
+    }
+}

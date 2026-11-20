@@ -42,6 +42,7 @@ mod settingsui;
 mod sheetui;
 mod textfield;
 mod usb;
+mod update;
 mod usbprint;
 mod xhci;
 
@@ -89,6 +90,11 @@ static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 #[used]
 #[link_section = ".requests"]
 static STACK_SIZE_REQUEST: StackSizeRequest = StackSizeRequest::new().with_size(1024 * 1024);
+
+/// Marks this file as a Solon kernel, with its build and commit time (seconds since 1970),
+/// so an update on a USB drive can be recognised and compared.
+#[used]
+pub static KERNEL_MARK: &str = concat!("SOLON-KERNEL:", env!("SOLON_BUILD"), ":", env!("SOLON_BUILD_TIME"), ";");
 
 /// Boot command line (from limine.conf "cmdline:"), e.g. "crashtest".
 #[used]
@@ -328,6 +334,7 @@ extern "C" fn kmain() -> ! {
                 let shutting = req == PowerRequest::ShutDown;
                 message(&mut canvas, &screen, scale, if shutting { "Turning off..." } else { "Restarting..." }, "");
                 if shutting {
+                    desktop.prepare_power_off();
                     power::shutdown(acpi.as_ref());
                     // Still here: the PC didn't switch itself off.
                     message(&mut canvas, &screen, scale, "It's now safe to turn off your computer.", "Hold the power button for a few seconds.");

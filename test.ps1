@@ -22,6 +22,7 @@ param(
     [switch]$LegacyBios,      # boot with SeaBIOS (old BIOS PCs) instead of UEFI
     [string]$Cmdline = "",    # kernel command line (development boot only), e.g. "testprinter=pcl"
     [string]$Resolution = "", # screen mode (development boot only), e.g. "1920x1080"
+    [switch]$StickOnUsb2,     # with -BootStick: put the stick on a USB 2 controller Solon can't use
     [switch]$NoEsp,           # no development boot folder: boot from an internal disk (after installing)
     [switch]$ExpectExit       # the test ends with Solon turning the machine off or restarting
 )
@@ -56,7 +57,12 @@ if (-not $LegacyBios) {
 }
 if (-not $BootStick -and -not $NoEsp) { $args += @("-drive", "format=raw,file=fat:rw:esp") }
 $xhci = $false
-if ($BootStick) {
+if ($BootStick -and $StickOnUsb2) {
+    # The stick on a USB 2 (EHCI) controller, which Solon doesn't drive (like some laptops' ports).
+    $args += @("-device", "usb-ehci,id=ehci",
+               "-drive", "`"if=none,id=bootstick,format=raw,file=$BootStick`"",
+               "-device", "usb-storage,bus=ehci.0,drive=bootstick,bootindex=0")
+} elseif ($BootStick) {
     $args += @("-device", "qemu-xhci,id=xhci",
                "-drive", "`"if=none,id=bootstick,format=raw,file=$BootStick`"",
                "-device", "usb-storage,bus=xhci.0,drive=bootstick,bootindex=0")

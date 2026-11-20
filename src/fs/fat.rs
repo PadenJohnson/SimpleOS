@@ -494,9 +494,13 @@ impl Fat {
     }
 
     fn link(&self, io: &mut VolumeIo, dev: &mut dyn BlockDev, chain: &[u32]) -> Result<(), FsError> {
-        // Entries in table order; each window of the table is read, changed and written once
-        // (per FAT copy) instead of once per cluster.
-        let mut sets: Vec<(u32, u32)> = chain.iter().enumerate().map(|(i, &c)| (c, chain.get(i + 1).copied().unwrap_or(self.eoc()))).collect();
+        let sets: Vec<(u32, u32)> = chain.iter().enumerate().map(|(i, &c)| (c, chain.get(i + 1).copied().unwrap_or(self.eoc()))).collect();
+        self.fat_set_many(io, dev, sets)
+    }
+
+    /// Set many table entries: each window of the table is read, changed and written once
+    /// (per FAT copy) instead of once per cluster.
+    fn fat_set_many(&self, io: &mut VolumeIo, dev: &mut dyn BlockDev, mut sets: Vec<(u32, u32)>) -> Result<(), FsError> {
         sets.sort_by_key(|s| s.0);
         let entry_off = |c: u32| -> u64 {
             match self.kind {
@@ -690,5 +694,115 @@ impl Fat {
             }
         }
         Ok(free * self.cluster_bytes() as u64)
+    }
+}
+
+/// Replacing files in place (for updating Solon's boot files).
+impl Fat {
+    /// Byte offsets of a file's directory records: (long-name records, short record) and
+    /// the short record itself.
+    fn records(&self, io: &mut VolumeIo, dev: &mut dyn BlockDev, dir: &DirEntry, want: &str) -> Result<Option<(Vec<u64>, u64, [u8; 32])>, FsError> {
+        let raw = self.dir_bytes(io, dev, dir)?;
+        let chain = self.dir_clusters(io, dev, dir)?;
+        let mut lfn: Vec<(usize, u8, [u16; 13])> = Vec::new();
+        let mut lfn_sum = 0u8;
+        for (i, e) in raw.chunks_exact(32).enumerate() {
+            if e[0] == 0x00 {
+                break;
+            }
+            if e[0] == 0xE5 {
+                lfn.clear();
+                continue;
+            }
+            if e[11] & 0x3F == 0x0F {
+                let mut chars = [0u16; 13];
+                for (k, off) in [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30].iter().enumerate() {
+                    chars[k] = le16(e, *off);
+                }
+                if e[0] & 0x40 != 0 {
+                    lfn.clear();
+                }
+                lfn_sum = e[13];
+                lfn.push((i, e[0] & 0x1F, chars));
+                continue;
+            }
+            if e[11] & 0x08 != 0 {
+                lfn.clear();
+                continue;
+            }
+            let mut sum: u8 = 0;
+            for &c in &e[0..11] {
+                sum = (sum >> 1 | sum << 7).wrapping_add(c);
+            }
+            let has_lfn = !lfn.is_empty() && sum == lfn_sum;
+            let name = if has_lfn {
+                let mut parts = lfn.clone();
+                parts.sort_by_key(|(_, ord, _)| *ord);
+                let units: Vec<u16> = parts.iter().flat_map(|(_, _, c)| c.iter().copied()).collect();
+                utf16_name(&units)
+            } else {
+                short_name(e)
+            };
+            if name.eq_ignore_ascii_case(want) {
+                let mut offs = Vec::new();
+                if has_lfn {
+                    for (k, _, _) in &lfn {
+                        offs.push(self.record_offset(dir, &chain, *k).ok_or(FsError::Corrupt)?);
+                    }
+                }
+                let short = self.record_offset(dir, &chain, i).ok_or(FsError::Corrupt)?;
+                return Ok(Some((offs, short, e.try_into().unwrap())));
+            }
+            lfn.clear();
+        }
+        Ok(None)
+    }
+
+    fn free_chain(&self, io: &mut VolumeIo, dev: &mut dyn BlockDev, first: u32) -> Result<(), FsError> {
+        let chain = self.chain(io, dev, first, self.clusters as usize)?;
+        if !chain.is_empty() {
+            self.fat_set_many(io, dev, chain.into_iter().map(|c| (c, 0)).collect())?;
+        }
+        Ok(())
+    }
+
+    /// Delete a file (not a folder). Ok(false) if there's no such file.
+    pub fn delete_file(&mut self, io: &mut VolumeIo, dev: &mut dyn BlockDev, dir: &DirEntry, name: &str) -> Result<bool, FsError> {
+        let Some((lfn, short, e)) = self.records(io, dev, dir, name)? else { return Ok(false) };
+        if e[11] & 0x10 != 0 {
+            return Err(FsError::Exists);
+        }
+        self.clear_fsinfo(io, dev)?;
+        for o in lfn.iter().chain(core::iter::once(&short)) {
+            io.write_at(dev, *o, &[0xE5])?;
+        }
+        dev.flush()?;
+        let first = (le16(&e, 20) as u32) << 16 | le16(&e, 26) as u32;
+        self.free_chain(io, dev, first)?;
+        dev.flush()?;
+        Ok(true)
+    }
+
+    /// Make file `target` use the data of file `source` (written beforehand), then remove
+    /// `source`'s entry and `target`'s old data. The switch is one 32-byte record in one
+    /// sector, so after a power cut either the old or the new data is there, never neither.
+    pub fn swap_in(&mut self, io: &mut VolumeIo, dev: &mut dyn BlockDev, dir: &DirEntry, target: &str, source: &str) -> Result<(), FsError> {
+        let (_, t_short, t) = self.records(io, dev, dir, target)?.ok_or(FsError::Io)?;
+        let (s_lfn, s_short, s) = self.records(io, dev, dir, source)?.ok_or(FsError::Io)?;
+        self.clear_fsinfo(io, dev)?;
+        let old_first = (le16(&t, 20) as u32) << 16 | le16(&t, 26) as u32;
+        let mut new = t;
+        new[20..22].copy_from_slice(&s[20..22]);
+        new[26..28].copy_from_slice(&s[26..28]);
+        new[28..32].copy_from_slice(&s[28..32]);
+        io.write_at(dev, t_short, &new)?;
+        dev.flush()?;
+        for o in s_lfn.iter().chain(core::iter::once(&s_short)) {
+            io.write_at(dev, *o, &[0xE5])?;
+        }
+        dev.flush()?;
+        self.free_chain(io, dev, old_first)?;
+        dev.flush()?;
+        Ok(())
     }
 }

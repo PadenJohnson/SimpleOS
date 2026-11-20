@@ -35,6 +35,12 @@ impl Gas {
 pub struct Acpi {
     pm1a_cnt: u16,
     pm1b_cnt: u16,
+    /// PM1 event blocks (status, then enable) and their length.
+    pm1a_evt: u16,
+    pm1b_evt: u16,
+    pm1_evt_len: u8,
+    /// General-purpose event blocks (status, then enable): (port, length).
+    gpe: [(u16, u8); 2],
     smi_cmd: u16,
     acpi_enable: u8,
     sleep_control: Option<Gas>,
@@ -81,6 +87,14 @@ fn find_s5(aml: &[u8]) -> Option<(u8, u8)> {
                     0x0B => {
                         *v = *aml.get(p + 1)?; // WordPrefix (low byte)
                         p += 3;
+                    }
+                    0x0C => {
+                        *v = *aml.get(p + 1)?; // DWordPrefix (low byte)
+                        p += 5;
+                    }
+                    0x0E => {
+                        *v = *aml.get(p + 1)?; // QWordPrefix (low byte)
+                        p += 9;
                     }
                     0x00 => {
                         *v = 0; // Zero
@@ -148,6 +162,10 @@ pub fn init(rsdp_phys: u64) -> Option<Acpi> {
     let a = Acpi {
         pm1a_cnt: pm1a,
         pm1b_cnt: get32(68) as u16,
+        pm1a_evt: get32(56) as u16,
+        pm1b_evt: get32(60) as u16,
+        pm1_evt_len: f.get(88).copied().unwrap_or(0),
+        gpe: [(get32(80) as u16, f.get(92).copied().unwrap_or(0)), (get32(84) as u16, f.get(93).copied().unwrap_or(0))],
         smi_cmd: get32(48) as u16,
         acpi_enable: f.get(52).copied().unwrap_or(0),
         sleep_control,
@@ -185,9 +203,21 @@ pub fn shutdown(acpi: Option<&Acpi>) {
                     }
                 }
             }
-            cnt.write((typ_a as u16 & 7) << 10 | 1 << 13);
+            quiet_wake_events(a);
+            // Like Linux: keep the other bits (ACPI mode!), write the sleep type, then set
+            // SLP_EN in a second write.
+            core::arch::asm!("wbinvd", options(nostack));
+            let keep = |v: u16| v & !(7 << 10 | 1 << 13);
+            let a_val = keep(cnt.read()) | (typ_a as u16 & 7) << 10;
+            let mut cnt_b = Port::<u16>::new(a.pm1b_cnt);
+            let b_val = if a.pm1b_cnt != 0 { keep(cnt_b.read()) | (typ_b as u16 & 7) << 10 } else { 0 };
+            cnt.write(a_val);
             if a.pm1b_cnt != 0 {
-                Port::<u16>::new(a.pm1b_cnt).write((typ_b as u16 & 7) << 10 | 1 << 13);
+                cnt_b.write(b_val);
+            }
+            cnt.write(a_val | 1 << 13);
+            if a.pm1b_cnt != 0 {
+                cnt_b.write(b_val | 1 << 13);
             }
         }
     }
@@ -228,4 +258,29 @@ pub fn restart(acpi: Option<&Acpi>) -> ! {
     loop {
         x86_64::instructions::hlt();
     }
+}
+
+/// Before switching off: clear wake events that are already waiting and switch off every
+/// wake source except the power button. A pending event (USB, network, RTC alarm, lid)
+/// otherwise wakes the PC right back up, which looks like a restart.
+unsafe fn quiet_wake_events(a: &Acpi) {
+    for &(blk, len) in &a.gpe {
+        if blk == 0 || len < 2 {
+            continue;
+        }
+        let half = len as u16 / 2;
+        for i in 0..half {
+            Port::<u8>::new(blk + half + i).write(0); // enable: off
+            Port::<u8>::new(blk + i).write(0xFF); // status: clear
+        }
+    }
+    let half = a.pm1_evt_len as u16 / 2;
+    for evt in [a.pm1a_evt, a.pm1b_evt] {
+        if evt == 0 || half < 2 {
+            continue;
+        }
+        Port::<u16>::new(evt + half).write(1 << 8); // only the power button may wake
+        Port::<u16>::new(evt).write(0x8731); // clear timer, bus master, global lock, buttons, RTC, wake
+    }
+    kprintln!("power: wake events cleared");
 }

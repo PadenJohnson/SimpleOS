@@ -424,3 +424,9 @@ pub fn install_table(dev: &mut dyn BlockDev, total: u64, stick: &Gpt, esp_slot: 
     kprintln!("part: install partition table written ({} blocks)", total);
     Ok(())
 }
+
+/// A GPT disk's own ID (to tell which disk Solon started from).
+pub fn disk_guid(dev: &mut dyn BlockDev, total: u64) -> Option<[u8; 16]> {
+    let g = read_gpt(dev, total)?;
+    g.header.get(56..72).map(|b| b.try_into().unwrap())
+}

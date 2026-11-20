@@ -138,6 +138,8 @@ pub struct Desktop {
     power_menu: bool,
     /// One-time notice: Solon runs from its USB stick and could be installed.
     install_notice: bool,
+    /// The internal disk Solon started from (it's installed there), for update notices.
+    installed_disk: Option<usize>,
     confirm: Option<PowerRequest>,
     screen_off: bool,
     files: Files,
@@ -253,6 +255,7 @@ impl Desktop {
             date: crate::rtc::date(),
             power_menu: false,
             install_notice: false,
+            installed_disk: None,
             confirm: None,
             screen_off: false,
             files: Files::new(),
@@ -264,6 +267,7 @@ impl Desktop {
             request: None,
         };
         d.refresh_storage_view();
+        d.installed_disk = d.usb.boot_disk_id().and_then(|id| d.storage.boot_internal(id));
         d.install_notice = !d.settings.install_notice && (0..d.storage.disk_count()).any(|i| crate::install::blocker(&d.storage, &d.usb, i).is_none());
         if d.install_notice {
             kprintln!("solon: showing the install notice");
@@ -399,6 +403,11 @@ impl Desktop {
             return Some(true);
         }
         None
+    }
+
+    /// Stop USB controllers before the computer is switched off.
+    pub fn prepare_power_off(&mut self) {
+        self.usb.shutdown();
     }
 
     pub fn screen_off(&self) -> bool {
@@ -599,6 +608,12 @@ impl Desktop {
             } else if let Some(d) = self.usb.drives.iter().find(|d| !self.drive_ids.contains(&d.id)) {
                 let name = d.volumes.first().map(|v| v.label.clone()).filter(|l| !l.is_empty()).unwrap_or(d.name.clone());
                 self.toast = Some((format!("{} connected - open Import to see it", name), now + 6 * HZ));
+                if self.installed_disk.is_some() {
+                    let cur = crate::update::Build::current();
+                    if crate::update::find(&mut self.usb).iter().any(|(c, _)| c.build.id.trim_end_matches('+') != cur.id.trim_end_matches('+') && c.build.time >= cur.time) {
+                        self.toast = Some((String::from("A newer Solon is on this USB drive - open Disks and press Update from USB"), now + 12 * HZ));
+                    }
+                }
             } else if ids.len() < self.drive_ids.len() {
                 self.toast = Some((String::from("Drive or phone removed"), now + 4 * HZ));
             }

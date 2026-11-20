@@ -10,6 +10,7 @@ use crate::disk::human;
 use crate::gfx::{rgb, text_width, Canvas, Rect, Size};
 use crate::library::{DiskView, PartView, Storage};
 use crate::install::{self, Install};
+use crate::update::{self, Build};
 use crate::usb::Usb;
 
 const INK: u32 = rgb(40, 44, 52);
@@ -40,6 +41,8 @@ enum Op {
     Check(bool),
     Erase(u32),
     Install(usize),
+    FindUpdate(usize),
+    Update(usize),
 }
 
 enum Dialog {
@@ -55,6 +58,8 @@ enum Dialog {
     Install2 { disk: usize, name: String, bytes: u64 },
     Progress(String, u32),
     Installed(String),
+    UpdateConfirm { disk: usize, label: String, build: Build, older: bool, same: bool },
+    Updated(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -63,6 +68,7 @@ enum Btn {
     Check,
     Erase,
     Install,
+    Update,
 }
 
 pub struct DiskMgr {
@@ -73,6 +79,12 @@ pub struct DiskMgr {
     /// Running from Solon's USB stick (so it can be installed).
     from_stick: bool,
     install: Option<Install>,
+    /// Started from a USB stick Solon can't reach (so it can't install or update).
+    stick_unseen: bool,
+    /// Internal disk Solon started from (installed).
+    pub boot_internal: Option<usize>,
+    /// The kernel found for updating (waiting for the user to confirm).
+    update_data: Option<Vec<u8>>,
 }
 
 fn card_h(v: &DiskView) -> i32 {
@@ -133,7 +145,7 @@ fn usb_views(storage: &Storage, usb: &mut Usb) -> Vec<DiskView> {
 
 impl DiskMgr {
     pub fn new() -> DiskMgr {
-        DiskMgr { views: Vec::new(), scroll: 0, dialog: Dialog::None, pending: None, from_stick: false, install: None }
+        DiskMgr { views: Vec::new(), scroll: 0, dialog: Dialog::None, pending: None, from_stick: false, install: None, stick_unseen: false, boot_internal: None, update_data: None }
     }
 
     /// Re-read every disk (opening the window, plug/unplug, after changes).
@@ -142,6 +154,8 @@ impl DiskMgr {
         v.extend(usb_views(storage, usb));
         self.views = v;
         self.from_stick = usb.boot_drive().is_some();
+        self.boot_internal = usb.boot_disk_id().and_then(|id| storage.boot_internal(id));
+        self.stick_unseen = !self.from_stick && usb.boot_disk_id().is_some() && self.boot_internal.is_none();
     }
 
     pub fn busy(&self) -> bool {
@@ -153,8 +167,11 @@ impl DiskMgr {
     }
 
     /// Buttons on a disk's card, right to left.
-    fn buttons(v: &DiskView, has_library: bool, from_stick: bool) -> Vec<(Btn, &'static str)> {
+    fn buttons(v: &DiskView, has_library: bool, from_stick: bool, boot_internal: Option<usize>) -> Vec<(Btn, &'static str)> {
         let mut b = Vec::new();
+        if v.internal.is_some() && v.internal == boot_internal {
+            b.push((Btn::Update, "Update from USB"));
+        }
         if from_stick && v.internal.is_some() {
             b.push((Btn::Install, "Install Solon here"));
         }
@@ -170,8 +187,13 @@ impl DiskMgr {
         b
     }
 
+    /// Height of the notice above the disks (0 if none).
+    fn banner_h(&self) -> i32 {
+        if self.stick_unseen { 104 } else { 0 }
+    }
+
     fn card(&self, r: Rect, i: usize) -> Rect {
-        let mut y = r.y + PAD - self.scroll;
+        let mut y = r.y + PAD - self.scroll + self.banner_h();
         for v in &self.views[..i] {
             y += card_h(v) + 12;
         }
@@ -194,6 +216,18 @@ impl DiskMgr {
 
     pub fn draw(&self, c: &mut Canvas, r: Rect, storage: &Storage) {
         c.fill_rect(r.x, r.y, r.w, r.h, rgb(240, 242, 246));
+        if self.stick_unseen {
+            let b = Rect::new(r.x + PAD, r.y + PAD - self.scroll, r.w - 2 * PAD, self.banner_h() - 12);
+            c.round_rect(b.x, b.y, b.w, b.h, 12, rgb(255, 243, 205));
+            let lines = [
+                "Solon started from a USB stick it can't reach, so it can't be installed from here.",
+                "Plug the stick into a different USB port (a blue USB 3 port if the PC has one)",
+                "and restart. If no port works, press F12 and take a picture for help.",
+            ];
+            c.text(b.x + 16, b.y + 12, lines[0], Size::Small, true, rgb(120, 90, 0));
+            c.text(b.x + 16, b.y + 38, lines[1], Size::Small, false, rgb(120, 90, 0));
+            c.text(b.x + 16, b.y + 60, lines[2], Size::Small, false, rgb(120, 90, 0));
+        }
         if self.views.is_empty() {
             c.text_centered(r.x + r.w / 2, r.y + 80, "No disks found.", Size::Medium, true, INK);
         }
@@ -210,7 +244,7 @@ impl DiskMgr {
                 (Some(_), false) => String::from("USB drive"),
                 (None, _) => format!("Inside this computer ({})", v.kind),
             };
-            let btns = Self::buttons(v, has_lib, self.from_stick);
+            let btns = Self::buttons(v, has_lib, self.from_stick, self.boot_internal);
             let rects = Self::btn_rects(k, &btns);
             let text_right = rects.last().map(|b| b.x - 12).unwrap_or(k.x + k.w - PAD);
             let title = format!("{}  -  {}", v.name, human(v.bytes));
@@ -224,6 +258,7 @@ impl DiskMgr {
                     Btn::Check => (rgb(230, 233, 238), INK),
                     Btn::Erase => (rgb(252, 232, 230), DANGER),
                     Btn::Install => (rgb(39, 174, 96), rgb(255, 255, 255)),
+                    Btn::Update => (ACCENT, rgb(255, 255, 255)),
                 };
                 c.round_rect(br.x, br.y, br.w, br.h, 8, bg);
                 c.text_centered(br.x + br.w / 2, br.y + 9, label, Size::Small, true, fg);
@@ -333,6 +368,21 @@ impl DiskMgr {
                 Vec::from([msg.clone(), String::from("Don't turn off the computer or unplug the USB stick."), String::new()]),
                 Vec::new(),
             ),
+            Dialog::UpdateConfirm { label, build, older, same, .. } => (
+                String::from("Update Solon?"),
+                Vec::from([
+                    format!("This computer has Solon {}.", Build::current().label()),
+                    format!("\"{}\" has Solon {}.", label, build.label()),
+                    String::from(if *same { "That's the same version." } else if *older { "That's an OLDER version than the one on this computer." } else { "That's a newer version." }),
+                    String::from("Photos, documents and settings aren't changed."),
+                ]),
+                Vec::from([(if *older { "Install older version" } else { "Update" }, *older), ("Cancel", false)]),
+            ),
+            Dialog::Updated(build) => (
+                String::from("Solon is updated"),
+                Vec::from([format!("Solon {} is ready.", build), String::from("Restart the computer to start it.")]),
+                Vec::from([("Restart now", false), ("Later", false)]),
+            ),
             Dialog::Installed(name) => (
                 String::from("Solon is installed"),
                 Vec::from([
@@ -409,6 +459,8 @@ impl DiskMgr {
                 DiskAction::Redraw
             }
             (Dialog::Installed(_), 0) => DiskAction::Restart,
+            (Dialog::Updated(_), 0) => DiskAction::Restart,
+            (Dialog::UpdateConfirm { disk, .. }, 0) => self.start(Op::Update(disk), "Updating Solon..."),
             (Dialog::Progress(m, p), _) => {
                 self.dialog = Dialog::Progress(m, p);
                 DiskAction::None
@@ -535,6 +587,36 @@ impl DiskMgr {
                     DiskAction::Redraw
                 }
             },
+            Op::FindUpdate(disk) => {
+                let mut found = update::find(usb);
+                // Prefer the newest.
+                found.sort_by_key(|(c, _)| core::cmp::Reverse(c.build.time));
+                match found.into_iter().next() {
+                    Some((c, data)) => {
+                        let cur = Build::current();
+                        let same = c.build.id.trim_end_matches('+') == cur.id.trim_end_matches('+');
+                        let older = !same && c.build.time < cur.time;
+                        self.update_data = Some(data);
+                        self.dialog = Dialog::UpdateConfirm { disk, label: c.label, build: c.build, older, same };
+                    }
+                    None => {
+                        self.dialog = Dialog::Message(String::from("No Solon update found. Plug in a new Solon stick, or a USB drive with the Solon \"boot\" folder on it, and try again."));
+                    }
+                }
+                DiskAction::Redraw
+            }
+            Op::Update(disk) => match self.update_data.take().map(|d| (update::kernel_build(&d), update::apply(storage, disk, &d))) {
+                Some((new, Ok(()))) => {
+                    self.dialog = Dialog::Updated(new.map(|b| b.label()).unwrap_or_default());
+                    DiskAction::Changed(String::from("Solon is updated: restart to use it"))
+                }
+                Some((_, Err(e))) => {
+                    kprintln!("update: failed: {}", e);
+                    self.dialog = Dialog::Message(format!("Updating didn't work: {}. The old version is still in place.", e));
+                    DiskAction::Redraw
+                }
+                None => DiskAction::Redraw,
+            },
             Op::Erase(drive) => match usb.format_drive(drive, "USB DRIVE") {
                 Ok(()) => {
                     self.dialog = Dialog::Message(String::from("The USB drive is erased and ready to use."));
@@ -565,7 +647,7 @@ impl DiskMgr {
         for i in 0..self.views.len() {
             let k = self.card(r, i);
             let v = &self.views[i];
-            let btns = Self::buttons(v, has_lib, self.from_stick);
+            let btns = Self::buttons(v, has_lib, self.from_stick, self.boot_internal);
             for ((b, _), br) in btns.iter().zip(Self::btn_rects(k, &btns)) {
                 if !br.contains(x, y) {
                     continue;
@@ -576,6 +658,10 @@ impl DiskMgr {
                         return self.start(Op::Check(false), "Checking Solon storage...");
                     }
                     Btn::Erase => Dialog::Erase1 { drive: v.usb.unwrap(), name: v.name.clone(), bytes: v.bytes },
+                    Btn::Update => {
+                        let disk = v.internal.unwrap();
+                        return self.start(Op::FindUpdate(disk), "Looking for a Solon update on USB drives...");
+                    }
                     Btn::Install => {
                         let disk = v.internal.unwrap();
                         match install::blocker(storage, usb, disk) {
@@ -591,7 +677,7 @@ impl DiskMgr {
     }
 
     pub fn on_wheel(&mut self, delta: i8, r: Rect) -> bool {
-        let total: i32 = self.views.iter().map(|v| card_h(v) + 12).sum::<i32>() + 2 * PAD;
+        let total: i32 = self.views.iter().map(|v| card_h(v) + 12).sum::<i32>() + 2 * PAD + self.banner_h();
         let max = (total - r.h).max(0);
         let old = self.scroll;
         self.scroll = (self.scroll + delta as i32 * 60).clamp(0, max);

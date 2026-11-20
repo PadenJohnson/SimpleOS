@@ -817,3 +817,14 @@ impl Storage {
         create_on(d, total, &name, min_start)
     }
 }
+
+impl Storage {
+    /// The internal disk Solon started from, if it started from one.
+    pub fn boot_internal(&mut self, id: [u8; 16]) -> Option<usize> {
+        (0..self.disks.len()).find(|&i| {
+            let d = &mut self.disks[i];
+            let total = d.blocks;
+            part::disk_guid(d, total) == Some(id)
+        })
+    }
+}

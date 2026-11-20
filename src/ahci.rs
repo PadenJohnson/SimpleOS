@@ -69,12 +69,26 @@ pub fn init(dev: &pci::Device) -> Vec<AhciPort> {
             continue;
         }
         let port = hba + 0x100 + p * 0x80;
-        let ssts = r32(port + 0x28);
-        if ssts & 0xF != 3 {
+        if r32(port + 0x28) & 0xF != 3 {
+            // The firmware may not have woken this port (it only bothers with the one it
+            // boots from): spin the disk up and reset the link, then give it a moment.
+            w32(port + 0x18, r32(port + 0x18) | 1 << 1 | 1 << 2); // spin up, power on
+            if !wait(20, || r32(port + 0x28) & 0xF == 3) {
+                let sctl = r32(port + 0x2C) & !0xF;
+                w32(port + 0x2C, sctl | 1); // COMRESET
+                wait(2, || false);
+                w32(port + 0x2C, sctl);
+                wait(150, || r32(port + 0x28) & 0xF == 3);
+            }
+            w32(port + 0x30, 0xFFFF_FFFF); // clear errors from the reset
+        }
+        if r32(port + 0x28) & 0xF != 3 {
             continue; // nothing attached
         }
+        // The signature arrives with the disk's first message; give it a little time.
+        wait(100, || r32(port + 0x24) != 0xFFFF_FFFF);
         let sig = r32(port + 0x24);
-        if sig != 0x0000_0101 {
+        if sig != 0x0000_0101 && sig != 0xFFFF_FFFF {
             continue; // not a plain SATA disk (e.g. ATAPI CD drive)
         }
         if let Some(d) = AhciPort::new(port) {

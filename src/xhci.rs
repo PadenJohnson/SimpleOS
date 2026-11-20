@@ -220,6 +220,9 @@ pub struct Xhci {
     done: Vec<Completion>,
     /// Ports (1-based) whose status changed since the last `take_port_changes`.
     port_changes: Vec<u8>,
+    pci: pci::Device,
+    /// Intel ports were moved over from the USB 2 controller (devices reconnect shortly).
+    pub switched_ports: bool,
 }
 
 #[inline]
@@ -265,6 +268,7 @@ impl Xhci {
         let csz = if hcc1 & (1 << 2) != 0 { 64 } else { 32 };
 
         Self::bios_handoff(cap, hcc1);
+        let switched_ports = intel_route_ports(dev, true);
 
         // Stop, then reset.
         w32(op, r32(op) & !1);
@@ -333,6 +337,8 @@ impl Xhci {
             cmd_result: None,
             done: Vec::new(),
             port_changes: Vec::new(),
+            pci: *dev,
+            switched_ports,
         };
         // Power all ports; connected ones are picked up through port changes.
         for p in 1..=max_ports {
@@ -756,4 +762,59 @@ impl Xhci {
 /// Small helper for DMA buffers used in control transfers.
 pub fn dma_buf(len: usize) -> Dma {
     Dma::new(len.max(64), 64)
+}
+
+/// Intel 7/8/9-series chipsets: the USB ports start out wired to the old USB 2 (EHCI)
+/// controller, which Solon doesn't drive, and the operating system moves them over to the
+/// USB 3 one (and back before power off: these chipsets reboot instead of switching off
+/// otherwise). Returns true if ports were moved.
+fn intel_route_ports(dev: &pci::Device, to_xhci: bool) -> bool {
+    let switchable = dev.vendor == 0x8086 && matches!(dev.device, 0x1E31 | 0x8C31 | 0x9C31 | 0x8CB1 | 0x9CB1);
+    if !switchable {
+        return false;
+    }
+    if to_xhci {
+        // Which ports may be switched (set by the firmware), then switch them.
+        let usb3 = dev.read(0xDC);
+        dev.write(0xD8, usb3);
+        let usb2 = dev.read(0xD4);
+        dev.write(0xD0, usb2);
+        kprintln!("xhci: Intel ports moved to USB 3 controller (USB 3 {:#x}, USB 2 {:#x})", usb3 & 0xF, usb2 & 0x7FFF);
+    } else {
+        dev.write(0xD8, 0);
+        dev.write(0xD0, 0);
+    }
+    true
+}
+
+impl Xhci {
+    /// Before switching off: stop the controller, give Intel ports back to the USB 2
+    /// controller, stop it waking the PC, and put it to sleep (D3).
+    pub fn shutdown(&mut self) {
+        w32(self.op, r32(self.op) & !1);
+        wait_until(20, || r32(self.op + 4) & 1 != 0);
+        intel_route_ports(&self.pci, false);
+        // PCI power management capability: no wake events, then D3hot.
+        if self.pci.read(0x04) & (1 << 20) != 0 {
+            let mut p = (self.pci.read(0x34) & 0xFC) as u8;
+            for _ in 0..48 {
+                if p < 0x40 {
+                    break;
+                }
+                let cap = self.pci.read(p);
+                if cap & 0xFF == 1 {
+                    let csr = self.pci.read(p + 4);
+                    // Clear PME enable, clear PME status (write 1), keep the other bits.
+                    let mut v = (csr & !(1 << 8)) | (1 << 15);
+                    if self.pci.vendor == 0x8086 {
+                        v = (v & !3) | 3; // D3hot
+                    }
+                    self.pci.write(p + 4, v);
+                    break;
+                }
+                p = ((cap >> 8) & 0xFC) as u8;
+            }
+        }
+        kprintln!("xhci {}: stopped for power off", self.name);
+    }
 }
