@@ -1,0 +1,11 @@
+# Build output (kernel and tools/mkimg)
+target/
+/dist
+
+# Generated boot folder and test results
+/esp
+/test-out
+/ovmf_vars.fd
+
+# Limine bootloader binaries (cloned separately; see run.ps1)
+/limine

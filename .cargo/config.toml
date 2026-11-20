@@ -1,0 +1,6 @@
+[build]
+target = "x86_64-unknown-none"
+
+[target.x86_64-unknown-none]
+# Limine loads us at a fixed high address; build a static (non-PIE) kernel for that region.
+rustflags = ["-C", "relocation-model=static", "-C", "code-model=kernel"]

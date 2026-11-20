@@ -1,0 +1,4 @@
+# Nightly is needed only for `extern "x86-interrupt"` (abi_x86_interrupt).
+[toolchain]
+channel = "nightly"
+targets = ["x86_64-unknown-none"]

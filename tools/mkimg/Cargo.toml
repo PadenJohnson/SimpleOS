@@ -1,0 +1,10 @@
+[package]
+name = "mkimg"
+version = "0.1.0"
+edition = "2021"
+description = "Builds FAT12/16/32 and exFAT test disk images for Solon (runs on the host PC)"
+
+[dependencies]
+
+[profile.release]
+debug = false
