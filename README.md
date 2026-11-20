@@ -20,6 +20,11 @@ nothing to download.
 - Files: browse Solon storage and USB drives; new folder, rename, move; Delete goes to a
   Recycle bin (restore, delete forever, empty); copy folders and files from USB drives into
   Solon and from Solon onto USB drives. Photos shows every photo in Solon storage.
+- Documents: a spreadsheet app that opens and saves Excel (.xlsx) and CSV files from Solon
+  storage or USB drives. Formulas (SUM, AVERAGE, IF, ROUND, SUMIF and more, recalculated as
+  you type), bold, text and fill colours, number formats (money, percent, dates), column
+  widths, several sheets, undo, copy/paste, fill down, and printing. Charts, pictures and
+  merged cells in Excel files aren't kept when saving.
 - Disks: every disk inside the PC and plugged in, with its partitions, sizes and free space;
   set up Solon storage; a storage health check with a safe repair; erase and format a USB
   drive (never an internal disk or the SimpleOS stick).
@@ -35,7 +40,7 @@ nothing to download.
   page; colour or black & white; copies. Checked with a test printer and GhostPCL; not yet
   tried on a real printer.
 
-**Planned:** videos, documents, installing to the internal disk.
+**Planned:** videos, phones over USB, installing to the internal disk.
 
 ## Making a USB stick
 
@@ -69,7 +74,8 @@ and `-Cmdline "testprinter=pcl"` (a fake printer whose jobs are captured for che
 ## Layout
 
 - `src/`: the kernel. `main.rs` boots; `desktop.rs`, `photos.rs`, `editor.rs`, `import.rs`,
-  `files.rs`, `diskmgr.rs`, `settingsui.rs` and `printui.rs` are the apps; `xhci.rs`, `usb.rs`, `msc.rs`, `usbprint.rs`, `nvme.rs` and
+  `files.rs`, `diskmgr.rs`, `documents.rs`, `sheetui.rs`, `settingsui.rs` and `printui.rs` are
+  the apps; `doc/` reads and writes spreadsheets (zip, XML, formulas, xlsx, csv); `xhci.rs`, `usb.rs`, `msc.rs`, `usbprint.rs`, `nvme.rs` and
   `ahci.rs` are drivers; `fs/` holds partition tables, FAT and exFAT; `library.rs` is the
   photo library; `print.rs` lays out pages and speaks PCL / IPP.
 - `tools/`: build, image and test helpers. `docs/`: guide and screenshots. `samples/`:

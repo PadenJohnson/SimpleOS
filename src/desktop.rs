@@ -19,6 +19,7 @@ use crate::settings::{self, Settings};
 use crate::settingsui::{SettingsAction, SettingsApp};
 use crate::files::{CopyJob, Files, FilesAction};
 use crate::diskmgr::{DiskAction, DiskMgr};
+use crate::documents::{DocSrc, DocsAction, DocsApp};
 use crate::usb::Usb;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -140,6 +141,9 @@ pub struct Desktop {
     files: Files,
     disks: DiskMgr,
     copy: Option<CopyJob>,
+    docs: DocsApp,
+    /// Spreadsheet pages waiting to be printed (on the next tick, after the notice shows).
+    pending_sheet_print: Option<(Vec<Canvas>, Layout, PrinterInfo)>,
     request: Option<PowerRequest>,
 }
 
@@ -236,6 +240,8 @@ impl Desktop {
             files: Files::new(),
             disks: DiskMgr::new(),
             copy: None,
+            docs: DocsApp::new(),
+            pending_sheet_print: None,
             request: None,
         };
         d.refresh_storage_view();
@@ -451,6 +457,9 @@ impl Desktop {
             if matches!(&self.window, Some(w) if w.app == App::Disks) {
                 self.disks.refresh(&mut self.storage, &mut self.usb);
             }
+            if matches!(&self.window, Some(w) if w.app == App::Documents) && !self.docs.editing() {
+                self.docs.refresh(&mut self.storage, &mut self.usb);
+            }
             let usb = &self.usb;
             self.photos.drive_removed(&|id| !usb.has_drive(id));
             redraw = true;
@@ -458,6 +467,16 @@ impl Desktop {
         if matches!(&self.toast, Some((_, end)) if now >= *end) {
             self.toast = None;
             redraw = true;
+        }
+        if let Some((pages, layout, printer)) = self.pending_sheet_print.take() {
+            match self.run_print_canvases(pages, layout, printer) {
+                Ok(msg) => self.toast = Some((msg, now + 6 * HZ)),
+                Err(e) => {
+                    kprintln!("print: failed: {}", e);
+                    self.toast = Some((format!("Printing failed: {}", e), now + 8 * HZ));
+                }
+            }
+            return true;
         }
         if let Some((sources, layout, printer)) = self.pending_print.take() {
             let r = self.run_print(sources, layout, printer);
@@ -599,19 +618,22 @@ impl Desktop {
 
     /// Lay out the pages, encode them for the printer, and send the job.
     fn run_print(&mut self, sources: Vec<Source>, layout: Layout, printer: PrinterInfo) -> Result<String, &'static str> {
-        let t0 = Self::now();
         let dpi = printer.dpi;
         let (pw, ph) = print::page_pixels(layout.paper, dpi);
         let per = layout.per_page.max(1) as usize;
         let pages = (sources.len() + per - 1) / per;
-        let mut pcl = if printer.ipp { None } else { Some(print::PclJob::start(&layout)) };
-        let mut pwg = if printer.ipp { Some(print::PwgJob::start()) } else { None };
-        for (n, chunk) in sources.chunks(per).enumerate() {
+        let (storage, usb) = (&mut self.storage, &mut self.usb);
+        let job = build_job(pages, &layout, &printer, &mut |n| {
             let mut page = print::Page::new(pw, ph);
             let cells = page.cells(layout.per_page, dpi);
-            for (src, cell) in chunk.iter().zip(cells.iter()) {
+            for (src, cell) in sources[n * per..((n + 1) * per).min(sources.len())].iter().zip(cells.iter()) {
+                let bytes: Result<Bytes, &'static str> = match src {
+                    Source::Memory(b) => Ok(Bytes::Static(b)),
+                    Source::Usb { drive, vol, entry } => usb.read_file(*drive, *vol, entry).map(Bytes::Owned).map_err(|e| e.message()),
+                    Source::Library { entry, .. } => storage.read_file(usb, entry).map(Bytes::Owned).map_err(|e| e.message()),
+                };
                 // A photo that can't be read leaves its spot blank instead of failing the job.
-                let img = match self.fetch(src).and_then(|bytes| crate::image::decode(&bytes)) {
+                let img = match bytes.and_then(|bytes| crate::image::decode(&bytes)) {
                     Ok(img) => img,
                     Err(e) => {
                         kprintln!("print: skipping a photo: {}", e);
@@ -623,27 +645,34 @@ impl Desktop {
                 let img = if img.w > side || img.h > side { img.shrink_to_fit(side, side) } else { img };
                 page.place(&img, *cell, layout.fill);
             }
-            if !layout.color {
-                for p in page.px.iter_mut() {
-                    let (r, g, b) = ((*p >> 16) & 0xFF, (*p >> 8) & 0xFF, *p & 0xFF);
-                    let y = (77 * r + 150 * g + 29 * b) >> 8;
-                    *p = y << 16 | y << 8 | y;
+            page
+        })?;
+        self.send_job(job, pages, &layout, &printer)
+    }
+
+    /// Print pages drawn at 100 pixels per inch (spreadsheets), enlarged to the printer's resolution.
+    fn run_print_canvases(&mut self, canvases: Vec<Canvas>, layout: Layout, printer: PrinterInfo) -> Result<String, &'static str> {
+        let (pw, ph) = print::page_pixels(layout.paper, printer.dpi);
+        let job = build_job(canvases.len(), &layout, &printer, &mut |n| {
+            let src = &canvases[n];
+            let mut page = print::Page::new(pw, ph);
+            for y in 0..ph {
+                let sy = (y * src.h / ph).min(src.h - 1);
+                let row = &src.px[sy * src.w..(sy + 1) * src.w];
+                let out = &mut page.px[y * pw..(y + 1) * pw];
+                for (x, p) in out.iter_mut().enumerate() {
+                    *p = row[(x * src.w / pw).min(src.w - 1)] & 0x00FF_FFFF;
                 }
             }
-            if let Some(j) = &mut pcl {
-                j.page(&page, layout.color, dpi);
-            }
-            if let Some(j) = &mut pwg {
-                j.page(&page, &layout, dpi, pages as u32);
-            }
-            kprintln!("print: page {} of {} ready ({}x{} at {} dpi)", n + 1, pages, pw, ph, dpi);
-        }
-        let (bytes, what) = match (pcl, pwg) {
-            (Some(j), _) => (j.finish(), "PCL"),
-            (_, Some(j)) => (print::ipp_print_job(&layout, &j.finish()), "IPP/PWG Raster"),
-            _ => return Err("No printer language"),
-        };
-        kprintln!("print: {} job {} bytes, {} page(s), {} cop{}", what, bytes.len(), pages, layout.copies, if layout.copies == 1 { "y" } else { "ies" });
+            page
+        })?;
+        self.send_job(job, canvases.len(), &layout, &printer)
+    }
+
+    /// Send a finished job (PCL, or an IPP request) to the printer.
+    fn send_job(&mut self, bytes: Vec<u8>, pages: usize, layout: &Layout, printer: &PrinterInfo) -> Result<String, &'static str> {
+        let t0 = Self::now();
+        kprintln!("print: {} job {} bytes, {} page(s), {} cop{}", if printer.ipp { "IPP/PWG Raster" } else { "PCL" }, bytes.len(), pages, layout.copies, if layout.copies == 1 { "y" } else { "ies" });
         match printer.id {
             PrinterId::Test => {
                 // What would go over USB: raw PCL, or the HTTP request for IPP.
@@ -739,6 +768,7 @@ impl Desktop {
                 self.open(App::Photos);
                 true
             }
+            FilesAction::OpenDocument(src) => self.open_document(src, now),
             FilesAction::Copy(spec) => {
                 kprintln!("files: copy \"{}\" from {:?} to {:?} \"{}\"", spec.item.name, spec.from, spec.to, spec.dest.name);
                 let job = CopyJob::new(spec);
@@ -770,6 +800,39 @@ impl Desktop {
             self.library_changed();
         }
         true
+    }
+
+    fn docs_action(&mut self, a: DocsAction, now: u64) -> bool {
+        match a {
+            DocsAction::None => false,
+            DocsAction::Redraw => true,
+            DocsAction::Toast(msg) => {
+                self.toast = Some((msg, now + 5 * HZ));
+                if !self.docs.editing() {
+                    self.docs.refresh(&mut self.storage, &mut self.usb);
+                }
+                self.refresh_storage_view();
+                true
+            }
+            DocsAction::WantPrinters => {
+                let printers = self.printers();
+                kprintln!("print: sheet dialog opened, {} printer(s)", printers.len());
+                self.docs.start_print(printers);
+                true
+            }
+            DocsAction::Print { pages, layout, printer } => {
+                self.toast = Some((format!("Preparing {} page(s) for {}...", pages.len(), printer.name), now + 60 * HZ));
+                self.pending_sheet_print = Some((pages, layout, printer));
+                true
+            }
+        }
+    }
+
+    /// Open a spreadsheet from the Files app.
+    fn open_document(&mut self, src: DocSrc, now: u64) -> bool {
+        self.open(App::Documents);
+        let a = self.docs.open_src(src, &mut self.storage, &mut self.usb);
+        self.docs_action(a, now)
     }
 
     fn disk_action(&mut self, a: DiskAction, now: u64) -> bool {
@@ -870,7 +933,8 @@ impl Desktop {
         }
 
         if let Some(win) = &self.window {
-            draw_frame(c, win);
+            let title = if win.app == App::Documents { self.docs.title() } else { None };
+            draw_frame(c, win, title.as_deref().unwrap_or(win.app.name()));
             let body = win.body();
             c.set_clip(body);
             match win.app {
@@ -879,6 +943,7 @@ impl Desktop {
                 App::Settings => self.settings_app.draw(c, body, &self.settings, self.screen, self.storage.library.is_some()),
                 App::Files => self.files.draw(c, body, &self.storage, &self.usb),
                 App::Disks => self.disks.draw(c, body, &self.storage),
+                App::Documents => self.docs.draw(c, body),
                 app => draw_placeholder(c, app, body),
             }
             c.reset_clip();
@@ -902,6 +967,9 @@ impl Desktop {
         }
         if app == App::Disks {
             self.disks.refresh(&mut self.storage, &mut self.usb);
+        }
+        if app == App::Documents && !self.docs.editing() {
+            self.docs.refresh(&mut self.storage, &mut self.usb);
         }
     }
 
@@ -933,6 +1001,7 @@ impl Desktop {
                         App::Import => redraw |= self.import.on_wheel(wheel, win.body(), &self.usb),
                         App::Files => redraw |= self.files.on_wheel(wheel, win.body()),
                         App::Disks => redraw |= self.disks.on_wheel(wheel, win.body()),
+                        App::Documents => redraw |= self.docs.on_wheel(wheel, win.body()),
                         _ => {}
                     }
                 }
@@ -943,12 +1012,13 @@ impl Desktop {
         if self.capture {
             if let Some(win) = &self.window {
                 let body = win.body();
+                let docs = win.app == App::Documents;
                 if released {
                     self.capture = false;
-                    return redraw | self.photos.on_release();
+                    return redraw | if docs { self.docs.on_release() } else { self.photos.on_release() };
                 }
                 if buttons & 1 != 0 {
-                    return redraw | self.photos.on_drag(x, y, body);
+                    return redraw | if docs { self.docs.on_drag(x, y, body) } else { self.photos.on_drag(x, y, body) };
                 }
             }
             self.capture = false;
@@ -1002,6 +1072,11 @@ impl Desktop {
                     App::Disks => {
                         let a = self.disks.on_press(x, y, body, &self.storage);
                         redraw |= self.disk_action(a, now);
+                    }
+                    App::Documents => {
+                        let a = self.docs.on_press(x, y, body, now, &mut self.storage, &mut self.usb);
+                        self.capture = true;
+                        redraw |= self.docs_action(a, now);
                     }
                     App::Settings => {
                         let screen = self.screen;
@@ -1108,6 +1183,11 @@ impl Desktop {
                         return self.disk_action(a, Self::now());
                     }
                 }
+                App::Documents => {
+                    if let Some(a) = self.docs.on_key(sc, body, &mut self.storage, &mut self.usb) {
+                        return self.docs_action(a, Self::now());
+                    }
+                }
                 _ => {}
             }
             if sc == 0x01 {
@@ -1150,7 +1230,7 @@ impl Desktop {
     }
 }
 
-fn draw_frame(c: &mut Canvas, win: &Window) {
+fn draw_frame(c: &mut Canvas, win: &Window, title: &str) {
     let (x, y, w, h) = (win.x, win.y, win.w, win.h);
     c.round_rect_alpha(x + 4, y + 8, w, h, 10, 0, 90); // shadow
     c.round_rect(x, y, w, h, 10, WIN_BG);
@@ -1160,7 +1240,8 @@ fn draw_frame(c: &mut Canvas, win: &Window) {
 
     // Title with a small app-coloured dot
     c.circle(x + 20, y + TITLE_H / 2, 6, icons::tile_color(win.app));
-    c.text(x + 34, y + 8, win.app.name(), Size::Medium, true, rgb(40, 44, 52));
+    let title = crate::photos::ellipsize(title, w - 90, Size::Medium, true);
+    c.text(x + 34, y + 8, &title, Size::Medium, true, rgb(40, 44, 52));
 
     // Close button
     let b = win.close_box();
@@ -1177,4 +1258,33 @@ fn draw_placeholder(c: &mut Canvas, app: App, r: Rect) {
     let [a, b] = app.placeholder();
     c.text_centered(r.x + r.w / 2, r.y + r.h / 2 - 20, a, Size::Medium, true, rgb(40, 44, 52));
     c.text_centered(r.x + r.w / 2, r.y + r.h / 2 + 12, b, Size::Small, false, rgb(100, 106, 116));
+}
+
+/// Compose `pages` pages (made one at a time by `make`) into a PCL or IPP job.
+fn build_job(pages: usize, layout: &Layout, printer: &PrinterInfo, make: &mut dyn FnMut(usize) -> print::Page) -> Result<Vec<u8>, &'static str> {
+    let dpi = printer.dpi;
+    let mut pcl = if printer.ipp { None } else { Some(print::PclJob::start(layout)) };
+    let mut pwg = if printer.ipp { Some(print::PwgJob::start()) } else { None };
+    for n in 0..pages {
+        let mut page = make(n);
+        if !layout.color {
+            for p in page.px.iter_mut() {
+                let (r, g, b) = ((*p >> 16) & 0xFF, (*p >> 8) & 0xFF, *p & 0xFF);
+                let y = (77 * r + 150 * g + 29 * b) >> 8;
+                *p = y << 16 | y << 8 | y;
+            }
+        }
+        if let Some(j) = &mut pcl {
+            j.page(&page, layout.color, dpi);
+        }
+        if let Some(j) = &mut pwg {
+            j.page(&page, layout, dpi, pages as u32);
+        }
+        kprintln!("print: page {} of {} ready ({}x{} at {} dpi)", n + 1, pages, page.w, page.h, dpi);
+    }
+    match (pcl, pwg) {
+        (Some(j), _) => Ok(j.finish()),
+        (_, Some(j)) => Ok(print::ipp_print_job(layout, &j.finish())),
+        _ => Err("No printer language"),
+    }
 }

@@ -16,6 +16,10 @@ pub struct TextField {
     pub text: String,
     shift: bool,
     max: usize,
+    /// Accept every character (spreadsheet cells), not only ones allowed in file names.
+    any: bool,
+    /// The suggested text is "selected": typing replaces it, Backspace clears it.
+    fresh: bool,
 }
 
 // Set 1 scancode rows: unshifted and shifted characters.
@@ -41,7 +45,12 @@ fn char_for(sc: u8, shift: bool) -> Option<char> {
 
 impl TextField {
     pub fn new(initial: &str, max: usize) -> TextField {
-        TextField { text: String::from(initial), shift: false, max }
+        TextField { text: String::from(initial), shift: false, max, any: false, fresh: !initial.is_empty() }
+    }
+
+    /// A field for any text (formulas, cell contents).
+    pub fn any(initial: &str, max: usize, shift: bool) -> TextField {
+        TextField { text: String::from(initial), shift, max, any: true, fresh: false }
     }
 
     pub fn on_key(&mut self, sc: u8) -> TextEvent {
@@ -58,13 +67,22 @@ impl TextField {
             0x1C => return TextEvent::Submit,
             0x01 => return TextEvent::Cancel,
             0x0E => {
+                if self.fresh {
+                    self.text.clear();
+                    self.fresh = false;
+                    return TextEvent::Changed;
+                }
                 self.text.pop();
                 return TextEvent::Changed;
             }
             _ => {}
         }
         match char_for(sc, self.shift) {
-            Some(c) if !"/\\:*?\"<>|".contains(c) && self.text.chars().count() < self.max => {
+            Some(c) if (self.any || !"/\\:*?\"<>|".contains(c)) && (self.fresh || self.text.chars().count() < self.max) => {
+                if self.fresh {
+                    self.text.clear();
+                    self.fresh = false;
+                }
                 self.text.push(c);
                 TextEvent::Changed
             }
@@ -76,8 +94,12 @@ impl TextField {
         c.round_rect(r.x, r.y, r.w, r.h, 6, rgb(255, 255, 255));
         c.outline_rect(r.x, r.y, r.w, r.h, rgb(46, 134, 222));
         let shown = crate::photos::ellipsize_left(&self.text, r.w - 24, Size::Small, false);
+        if self.fresh {
+            // Selected suggestion: typing replaces it.
+            let w = text_width(&shown, Size::Small, false);
+            c.fill_rect(r.x + 8, r.y + 7, w + 4, r.h - 14, rgb(198, 222, 250));
+        }
         let tw = c.text(r.x + 10, r.y + (r.h - 16) / 2, &shown, Size::Small, false, rgb(40, 44, 52));
-        let _ = text_width;
         c.fill_rect(r.x + 11 + tw, r.y + 8, 2, r.h - 16, rgb(46, 134, 222)); // caret
     }
 }

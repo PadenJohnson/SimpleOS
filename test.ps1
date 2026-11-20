@@ -128,7 +128,18 @@ try {
     foreach ($e in $Events) {
         $kind, $arg = $e -split ':', 2
         switch ($kind) {
-            "key"      { Send-Qmp "{`"execute`":`"send-key`",`"arguments`":{`"keys`":[{`"type`":`"qcode`",`"data`":`"$arg`"}]}}"; Start-Sleep -Milliseconds 200 }
+            "key"      {
+                # "key:a", or a combination pressed together: "key:shift+9", "key:ctrl+s"
+                $keys = ($arg -split "\+" | ForEach-Object { "{`"type`":`"qcode`",`"data`":`"$_`"}" }) -join ","
+                Send-Qmp "{`"execute`":`"send-key`",`"arguments`":{`"keys`":[$keys]}}"; Start-Sleep -Milliseconds 120
+            }
+            "type"     {
+                # "type:text" types letters, digits, space and = - . , ; / (lowercase)
+                foreach ($ch in $arg.ToCharArray()) {
+                    $q = switch ($ch) { " " { "spc" } "=" { "equal" } "-" { "minus" } "." { "dot" } "," { "comma" } ";" { "semicolon" } "/" { "slash" } default { [string]$ch } }
+                    Send-Qmp "{`"execute`":`"send-key`",`"arguments`":{`"keys`":[{`"type`":`"qcode`",`"data`":`"$q`"}]}}"; Start-Sleep -Milliseconds 60
+                }
+            }
             "move"     {
                 # PS/2 packets carry at most ~127 per axis, so send big moves in small steps.
                 $dx, $dy = [int[]]($arg -split ',')

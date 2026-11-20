@@ -460,6 +460,53 @@ impl Storage {
         out
     }
 
+    /// Every spreadsheet (.xlsx, .csv) in Solon storage as (folder, file).
+    pub fn all_documents(&mut self, usb: &mut Usb) -> Vec<(DirEntry, DirEntry)> {
+        let mut out = Vec::new();
+        let Ok(root) = self.root(usb) else { return out };
+        let mut stack = Vec::from([(root, 0u32)]);
+        while let Some((dir, depth)) = stack.pop() {
+            for e in self.list(usb, &dir).unwrap_or_default() {
+                if e.is_dir {
+                    let hidden = depth == 0 && (e.name.eq_ignore_ascii_case(BIN) || e.name.eq_ignore_ascii_case("Originals"));
+                    if !hidden && depth < 8 {
+                        stack.push((e, depth + 1));
+                    }
+                } else if is_document(&e.name) {
+                    out.push((dir.clone(), e));
+                }
+            }
+        }
+        out.sort_by(|a, b| fs::natural_cmp(&a.1.name, &b.1.name));
+        out
+    }
+
+    /// /Documents (created if missing).
+    pub fn documents_dir(&mut self, usb: &mut Usb) -> Result<DirEntry, FsError> {
+        self.with(usb, |vol, d| {
+            let root = vol.root();
+            match vol.find(d, &root, "Documents")? {
+                Some(e) if e.is_dir => Ok(e),
+                _ => vol.mkdir(d, &root, "Documents"),
+            }
+        })
+    }
+
+    /// Save a file safely: write it under a temporary name, then remove the old version
+    /// (`old`), then give the new one its name. A crash leaves at least one whole copy.
+    /// Returns the saved file (named `name`, or "name (2)" if another file has it).
+    pub fn save_file(&mut self, usb: &mut Usb, dir: &DirEntry, old: Option<&DirEntry>, name: &str, data: &[u8]) -> Result<DirEntry, FsError> {
+        let existing = self.names_in(usb, dir)?;
+        let tmp = unique_name(&existing, &format!("{}.saving", name), u64::MAX).ok_or(FsError::Exists)?;
+        let new = self.create_in(usb, dir, &tmp, data)?;
+        if let Some(o) = old {
+            self.delete(usb, o)?;
+        }
+        let existing = self.names_in(usb, dir)?;
+        let final_name = unique_name(&existing, name, u64::MAX).ok_or(FsError::Exists)?;
+        self.with(usb, |vol, d| vol.relink(d, &new, dir, &final_name))
+    }
+
     fn collect_photos(&mut self, usb: &mut Usb, dir: &DirEntry, depth: u32, out: &mut Vec<(DirEntry, DirEntry)>) {
         let Ok(entries) = self.list(usb, dir) else { return };
         let mut subdirs = Vec::new();
@@ -712,4 +759,10 @@ impl Storage {
         kprintln!("selftest: \"{}\" back in \"{}\"", home.name, dir.name);
         Ok(())
     }
+}
+
+/// Spreadsheet files Solon can open.
+pub fn is_document(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    (n.ends_with(".xlsx") || n.ends_with(".csv")) && !n.starts_with("~$")
 }

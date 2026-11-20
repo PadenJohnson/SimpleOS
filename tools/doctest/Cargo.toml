@@ -1,0 +1,9 @@
+[package]
+name = "doctest"
+version = "0.1.0"
+edition = "2021"
+description = "Host tests for the spreadsheet engine in src/doc (formulas, xlsx, csv)"
+
+[dependencies]
+miniz_oxide = "0.8"
+libm = "0.2"

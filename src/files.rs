@@ -51,6 +51,8 @@ pub enum FilesAction {
     None,
     Redraw,
     ShowPhotos { origin: String, items: Vec<(String, Source)>, open_at: Option<usize> },
+    /// Open a spreadsheet in Documents.
+    OpenDocument(crate::documents::DocSrc),
     Copy(CopySpec),
     /// Solon storage changed (Photos should refresh).
     Changed(String),
@@ -525,10 +527,16 @@ impl Files {
             self.scroll = 0;
             self.refresh(storage, usb);
             FilesAction::Redraw
+        } else if crate::library::is_document(&e.name) {
+            let dir = self.path.last().cloned().unwrap();
+            FilesAction::OpenDocument(match self.place {
+                Place::Usb { drive, vol } => crate::documents::DocSrc::Usb { drive, vol, entry: e },
+                _ => crate::documents::DocSrc::Library { dir, entry: e },
+            })
         } else if is_photo(&e.name) {
             self.photos_here(&e)
         } else {
-            self.dialog = Dialog::Message(String::from("Solon can't open this kind of file yet."));
+            self.dialog = Dialog::Message(String::from("Solon can only open photos and spreadsheets (.xlsx, .csv) so far."));
             FilesAction::Redraw
         }
     }
