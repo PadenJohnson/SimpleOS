@@ -48,8 +48,8 @@ pub fn inject_mouse(dx: i32, dy: i32, buttons: u8, wheel: i8) {
     without_interrupts(|| {
         let w = BOUND_W.load(Relaxed);
         let h = BOUND_H.load(Relaxed);
-        let x = (MOUSE_X.load(Relaxed) + dx).clamp(0, w - 1);
-        let y = (MOUSE_Y.load(Relaxed) + dy).clamp(0, h - 1);
+        let x = (MOUSE_X.load(Relaxed) + speed(dx, &REM_X)).clamp(0, w - 1);
+        let y = (MOUSE_Y.load(Relaxed) + speed(dy, &REM_Y)).clamp(0, h - 1);
         MOUSE_X.store(x, Relaxed);
         MOUSE_Y.store(y, Relaxed);
         push(Event::Mouse { x, y, buttons, wheel });
@@ -94,6 +94,23 @@ pub fn set_bounds(w: usize, h: usize) {
 
 pub fn mouse_pos() -> (i32, i32) {
     (MOUSE_X.load(Relaxed), MOUSE_Y.load(Relaxed))
+}
+
+/// Pointer speed in percent (100 = normal), set from Settings.
+static SPEED: AtomicI32 = AtomicI32::new(100);
+static REM_X: AtomicI32 = AtomicI32::new(0);
+static REM_Y: AtomicI32 = AtomicI32::new(0);
+
+pub fn set_speed(percent: i32) {
+    SPEED.store(percent.clamp(20, 400), Relaxed);
+}
+
+/// Scale a movement by the pointer speed, keeping the leftover fraction for next time.
+fn speed(d: i32, rem: &AtomicI32) -> i32 {
+    let v = d * SPEED.load(Relaxed) + rem.load(Relaxed);
+    let out = v / 100;
+    rem.store(v - out * 100, Relaxed);
+    out
 }
 
 pub fn has_wheel() -> bool {
@@ -225,8 +242,8 @@ pub fn on_mouse_byte(b: u8) {
     let w = BOUND_W.load(Relaxed);
     let h = BOUND_H.load(Relaxed);
     // PS/2 reports "up" as positive Y; screen Y grows downward.
-    let x = (MOUSE_X.load(Relaxed) + dx).clamp(0, w - 1);
-    let y = (MOUSE_Y.load(Relaxed) - dy).clamp(0, h - 1);
+    let x = (MOUSE_X.load(Relaxed) + speed(dx, &REM_X)).clamp(0, w - 1);
+    let y = (MOUSE_Y.load(Relaxed) - speed(dy, &REM_Y)).clamp(0, h - 1);
     MOUSE_X.store(x, Relaxed);
     MOUSE_Y.store(y, Relaxed);
     // Wheel is the low 4 bits of byte 3, as a signed nibble.

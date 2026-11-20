@@ -15,6 +15,8 @@ use crate::edit::Edits;
 use crate::print::{self, Layout, PrinterId, PrinterInfo};
 use crate::editor::SaveChoice;
 use crate::photos::{Bytes, PhotoAction, Photos, Source};
+use crate::settings::{self, Settings};
+use crate::settingsui::{SettingsAction, SettingsApp};
 use crate::usb::Usb;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -24,6 +26,7 @@ pub enum App {
     Documents,
     Printers,
     Import,
+    Settings,
 }
 
 impl App {
@@ -34,6 +37,7 @@ impl App {
             App::Documents => "Documents",
             App::Printers => "Printers",
             App::Import => "Import",
+            App::Settings => "Settings",
         }
     }
 
@@ -44,6 +48,7 @@ impl App {
             App::Documents => ["No documents yet.", "Plug in a USB drive or SD card, then open Import."],
             App::Printers => ["No printers found.", "Connect a USB printer to this computer."],
             App::Import => ["No USB drives or cameras detected.", "USB support arrives in an upcoming milestone."],
+            App::Settings => ["", ""],
         }
     }
 }
@@ -64,6 +69,8 @@ struct Icon {
     app: App,
     x: i32,
     y: i32,
+    /// Height of its clickable cell (icons squeeze together on short screens).
+    h: i32,
 }
 
 struct Window {
@@ -115,6 +122,24 @@ pub struct Desktop {
     show_log: bool,
     test_printer: Option<PrinterInfo>,
     pending_print: Option<(Vec<Source>, Layout, PrinterInfo)>,
+    settings: Settings,
+    settings_app: SettingsApp,
+    /// Physical screen size (the desktop itself may be drawn smaller and enlarged).
+    screen: (usize, usize),
+    date: (u16, u8, u8),
+    power_menu: bool,
+    confirm: Option<PowerRequest>,
+    screen_off: bool,
+    request: Option<PowerRequest>,
+}
+
+/// Things only the main loop can do (it owns the screen).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PowerRequest {
+    /// Text size changed: redo the display scaling.
+    Rescale,
+    Restart,
+    ShutDown,
 }
 
 /// Copying photos from a USB drive into the library, one file per tick.
@@ -158,13 +183,16 @@ impl Desktop {
         true
     }
 
-    pub fn new(w: usize, h: usize, photos: Photos, usb: Usb, storage: Storage) -> Self {
-        let apps = [App::Photos, App::Videos, App::Documents, App::Printers, App::Import];
-        let icons = apps
-            .iter()
-            .enumerate()
-            .map(|(i, &app)| Icon { app, x: 24, y: BAR_H + 24 + i as i32 * CELL_H })
-            .collect();
+    fn layout_icons(w: i32, h: i32) -> Vec<Icon> {
+        let _ = w;
+        let apps = [App::Photos, App::Videos, App::Documents, App::Printers, App::Import, App::Settings];
+        let step = ((h - BAR_H - 24) / apps.len() as i32).min(CELL_H);
+        apps.iter().enumerate().map(|(i, &app)| Icon { app, x: 24, y: BAR_H + 24 + i as i32 * step, h: step }).collect()
+    }
+
+    /// `w`, `h`: the (possibly scaled-down) desktop size; `screen`: the physical screen size.
+    pub fn new(w: usize, h: usize, photos: Photos, usb: Usb, storage: Storage, settings: Settings, screen: (usize, usize)) -> Self {
+        let icons = Self::layout_icons(w as i32, h as i32);
         let mut d = Self {
             w: w as i32,
             h: h as i32,
@@ -186,9 +214,157 @@ impl Desktop {
             show_log: false,
             test_printer: None,
             pending_print: None,
+            settings,
+            settings_app: SettingsApp::new(),
+            screen,
+            date: crate::rtc::date(),
+            power_menu: false,
+            confirm: None,
+            screen_off: false,
+            request: None,
         };
         d.refresh_storage_view();
         d
+    }
+
+    // ---- settings and power ------------------------------------------------------------
+
+    pub fn settings(&self) -> Settings {
+        self.settings
+    }
+
+    /// Something only the main loop can do (rescale the display, restart, shut down).
+    pub fn take_request(&mut self) -> Option<PowerRequest> {
+        self.request.take()
+    }
+
+    /// The desktop is now drawn at a new (scaled) size.
+    pub fn resize(&mut self, w: usize, h: usize) {
+        self.w = w as i32;
+        self.h = h as i32;
+        self.icons = Self::layout_icons(self.w, self.h);
+        if let Some(app) = self.window.as_ref().map(|win| win.app) {
+            self.open(app); // re-fit the window
+        }
+    }
+
+    fn apply_settings(&mut self, n: Settings) {
+        let old = self.settings;
+        self.settings = n;
+        crate::ps2::set_speed(settings::MOUSE[n.mouse].1);
+        if n.size != old.size {
+            self.request = Some(PowerRequest::Rescale);
+        }
+        kprintln!("settings: {:?}", n);
+        if self.storage.library.is_some() {
+            if let Err(e) = self.storage.write_root_file(&mut self.usb, "Settings.txt", n.to_text().as_bytes()) {
+                kprintln!("settings: couldn't save: {:?}", e);
+            }
+        }
+    }
+
+    fn power_button(&self) -> Rect {
+        Rect::new(self.w - 44, 0, 44, BAR_H)
+    }
+
+    fn power_item(&self, i: i32) -> Rect {
+        Rect::new(self.w - 236, BAR_H + 10 + i * 46, 220, 42)
+    }
+
+    fn confirm_box(&self) -> Rect {
+        Rect::new(self.w / 2 - 230, self.h / 2 - 100, 460, 200)
+    }
+    fn confirm_ok(&self) -> Rect {
+        let b = self.confirm_box();
+        Rect::new(b.x + b.w - 24 - 150, b.y + b.h - 60, 150, 40)
+    }
+    fn confirm_cancel(&self) -> Rect {
+        let b = self.confirm_box();
+        Rect::new(b.x + b.w - 24 - 150 - 12 - 110, b.y + b.h - 60, 110, 40)
+    }
+
+    fn draw_power(&self, c: &mut Canvas) {
+        // The button: a classic power symbol.
+        let b = self.power_button();
+        let (cx, cy) = (b.x + b.w / 2, b.y + b.h / 2 + 1);
+        if self.power_menu {
+            c.fill_rect_alpha(b.x, b.y, b.w, b.h, rgb(255, 255, 255), 40);
+        }
+        c.circle(cx, cy, 9, TEXT);
+        c.circle(cx, cy, 7, rgb(20, 24, 30));
+        c.fill_rect(cx - 3, cy - 10, 6, 6, rgb(20, 24, 30));
+        c.fill_rect(cx - 1, cy - 11, 2, 9, TEXT);
+
+        if self.power_menu {
+            let top = self.power_item(0);
+            c.round_rect_alpha(top.x - 6 + 3, top.y - 6 + 5, top.w + 12, 3 * 46 + 8, 10, 0, 80);
+            c.round_rect(top.x - 6, top.y - 6, top.w + 12, 3 * 46 + 8, 10, WIN_BG);
+            for (i, label) in ["Turn off screen", "Restart", "Shut down"].iter().enumerate() {
+                let r = self.power_item(i as i32);
+                c.round_rect(r.x, r.y, r.w, r.h, 8, rgb(236, 239, 243));
+                c.text(r.x + 16, r.y + 11, label, Size::Small, true, rgb(40, 44, 52));
+            }
+        }
+        if let Some(req) = self.confirm {
+            c.fill_rect_alpha(0, 0, self.w, self.h, 0, 120);
+            let b = self.confirm_box();
+            c.round_rect_alpha(b.x + 3, b.y + 6, b.w, b.h, 12, 0, 90);
+            c.round_rect(b.x, b.y, b.w, b.h, 12, WIN_BG);
+            let (title, line, ok) = match req {
+                PowerRequest::Restart => ("Restart the computer?", "Your photos are saved. Solon will start again.", "Restart"),
+                _ => ("Shut down the computer?", "Your photos are saved. The computer will turn off.", "Shut down"),
+            };
+            c.text(b.x + 24, b.y + 24, title, Size::Medium, true, rgb(40, 44, 52));
+            c.text(b.x + 24, b.y + 66, line, Size::Small, false, rgb(100, 106, 116));
+            let cb = self.confirm_cancel();
+            c.round_rect(cb.x, cb.y, cb.w, cb.h, 8, rgb(226, 230, 236));
+            c.text_centered(cb.x + cb.w / 2, cb.y + 11, "Cancel", Size::Small, true, rgb(40, 44, 52));
+            let ob = self.confirm_ok();
+            c.round_rect(ob.x, ob.y, ob.w, ob.h, 8, rgb(210, 70, 60));
+            c.text_centered(ob.x + ob.w / 2, ob.y + 11, ok, Size::Small, true, rgb(255, 255, 255));
+        }
+    }
+
+    /// Clicks on the power button, its menu or the confirmation. None = not for us.
+    fn power_click(&mut self, x: i32, y: i32) -> Option<bool> {
+        if let Some(req) = self.confirm {
+            if self.confirm_ok().contains(x, y) {
+                self.confirm = None;
+                kprintln!("power: {:?} confirmed", req);
+                self.request = Some(req);
+            } else if self.confirm_cancel().contains(x, y) || !self.confirm_box().contains(x, y) {
+                self.confirm = None;
+            }
+            return Some(true);
+        }
+        if self.power_menu {
+            self.power_menu = false;
+            match (0..3).find(|&i| self.power_item(i).contains(x, y)) {
+                Some(0) => {
+                    kprintln!("power: screen off");
+                    self.screen_off = true;
+                }
+                Some(1) => self.confirm = Some(PowerRequest::Restart),
+                Some(2) => self.confirm = Some(PowerRequest::ShutDown),
+                _ => {}
+            }
+            return Some(true);
+        }
+        if self.power_button().contains(x, y) {
+            self.power_menu = true;
+            return Some(true);
+        }
+        None
+    }
+
+    pub fn screen_off(&self) -> bool {
+        self.screen_off
+    }
+
+    pub fn set_date(&mut self, d: (u16, u8, u8)) -> bool {
+        let changed = self.date != d;
+        self.date = d;
+        changed
     }
 
     /// True while there's background work (photos to decode, an import), so the main loop shouldn't sleep.
@@ -545,25 +721,35 @@ impl Desktop {
     }
 
     fn icon_rect(i: &Icon) -> Rect {
-        Rect::new(i.x, i.y, CELL_W, CELL_H - 8)
+        Rect::new(i.x, i.y, CELL_W, i.h - 8)
     }
 
     pub fn draw(&mut self, c: &mut Canvas) {
         let (w, h) = (self.w, self.h);
 
+        if self.screen_off {
+            c.fill_rect(0, 0, w, h, 0);
+            return;
+        }
+
         // Background
-        c.gradient_v(0, 0, w, h, rgb(28, 64, 88), rgb(14, 26, 40));
-        c.text_centered(w / 2, h - 44, "Solon", Size::Large, true, rgb(60, 92, 116));
+        let (_, top, bottom) = settings::BACKGROUNDS[self.settings.background];
+        c.gradient_v(0, 0, w, h, top, bottom);
+        c.text_centered(w / 2, h - 44, "Solon", Size::Large, true, crate::gfx::mix(top, rgb(160, 180, 200), 80));
 
         // Top bar
         c.fill_rect_alpha(0, 0, w, BAR_H, 0, 140);
         c.text(16, 6, "Solon", Size::Medium, true, TEXT);
-        let clock = format!("{:02}:{:02}", self.clock.0, self.clock.1);
+        let clock = self.settings.clock_text(self.clock.0, self.clock.1);
         let cw = text_width(&clock, Size::Medium, true);
-        c.text(w - cw - 16, 6, &clock, Size::Medium, true, TEXT);
-        let status = "Offline";
-        let sw = text_width(status, Size::Small, false);
-        c.text(w - cw - 32 - sw, 8, status, Size::Small, false, TEXT_DIM);
+        let right = self.power_button().x - 8;
+        c.text(right - cw, 6, &clock, Size::Medium, true, TEXT);
+        let mut status = String::from("Offline");
+        if self.settings.show_date {
+            status = format!("{}   |   {}", settings::date_text(self.date.0, self.date.1, self.date.2), status);
+        }
+        let sw = text_width(&status, Size::Small, false);
+        c.text(right - cw - 18 - sw, 8, &status, Size::Small, false, TEXT_DIM);
         if let Some((msg, _)) = &self.toast {
             let tw = text_width(msg, Size::Small, true) + 32;
             c.round_rect(w / 2 - tw / 2, 4, tw, 24, 12, rgb(243, 156, 18));
@@ -587,10 +773,12 @@ impl Desktop {
             match win.app {
                 App::Photos => self.photos.draw(c, body),
                 App::Import => self.import.draw(c, body, &self.usb, &self.storage_view),
+                App::Settings => self.settings_app.draw(c, body, &self.settings, self.screen, self.storage.library.is_some()),
                 app => draw_placeholder(c, app, body),
             }
             c.reset_clip();
         }
+        self.draw_power(c);
         if self.show_log {
             self.draw_log(c);
         }
@@ -601,6 +789,9 @@ impl Desktop {
         let wh = (self.h - BAR_H - 28).max(360);
         self.window = Some(Window { app, x: WIN_LEFT, y: BAR_H + 12, w: ww, h: wh });
         kprintln!("solon: open {}", app.name());
+        if app == App::Settings {
+            self.settings_app.reload_time();
+        }
     }
 
     fn close(&mut self) {
@@ -615,6 +806,13 @@ impl Desktop {
         let pressed = buttons & 1 != 0 && prev & 1 == 0;
         let released = buttons & 1 == 0 && prev & 1 != 0;
         let mut redraw = false;
+
+        if self.screen_off {
+            // Any mouse movement or click wakes the screen.
+            self.screen_off = false;
+            kprintln!("power: screen on");
+            return true;
+        }
 
         if wheel != 0 {
             if let Some(win) = &self.window {
@@ -659,6 +857,9 @@ impl Desktop {
             return redraw;
         }
         kprintln!("solon: click at {},{}", x, y);
+        if let Some(r) = self.power_click(x, y) {
+            return r;
+        }
 
         if let Some(win) = &self.window {
             if win.close_box().contains(x, y) {
@@ -680,6 +881,24 @@ impl Desktop {
                     App::Import => {
                         let a = self.import.on_press(x, y, body, now, &mut self.usb, &self.storage_view);
                         redraw |= self.apply(a);
+                    }
+                    App::Settings => {
+                        let screen = self.screen;
+                        match self.settings_app.on_press(x, y, body, &self.settings, screen) {
+                            SettingsAction::None => {}
+                            SettingsAction::Redraw => redraw = true,
+                            SettingsAction::Change(n) => {
+                                self.apply_settings(n);
+                                redraw = true;
+                            }
+                            SettingsAction::SetClock { y, mo, d, h, mi } => {
+                                crate::rtc::set(y, mo, d, h, mi);
+                                self.date = (y, mo, d);
+                                self.clock = (h, mi);
+                                self.toast = Some((String::from("Clock set"), now + 3 * HZ));
+                                redraw = true;
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -715,6 +934,32 @@ impl Desktop {
         if self.show_log {
             if sc == 0x01 {
                 self.show_log = false;
+                return true;
+            }
+            return false;
+        }
+        if self.screen_off {
+            if sc & 0x80 == 0 {
+                self.screen_off = false;
+                kprintln!("power: screen on");
+            }
+            return true;
+        }
+        if let Some(req) = self.confirm {
+            match sc {
+                0x01 => self.confirm = None,
+                0x1C => {
+                    self.confirm = None;
+                    kprintln!("power: {:?} confirmed", req);
+                    self.request = Some(req);
+                }
+                _ => return false,
+            }
+            return true;
+        }
+        if self.power_menu {
+            if sc == 0x01 {
+                self.power_menu = false;
                 return true;
             }
             return false;

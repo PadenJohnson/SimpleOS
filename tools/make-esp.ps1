@@ -3,7 +3,8 @@
 param(
     [ValidateSet("debug", "release")][string]$Profile = "debug",
     [string[]]$Photos = @(),  # folders of photos to include; defaults to .\samples
-    [string]$Cmdline = ""     # kernel command line, e.g. "testprinter=pcl"
+    [string]$Cmdline = "",    # kernel command line, e.g. "testprinter=pcl"
+    [string]$Resolution = ""  # screen mode to ask the bootloader for, e.g. "1920x1080"
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot
@@ -21,6 +22,7 @@ Copy-Item "target\x86_64-unknown-none\$Profile\solon" esp\boot\kernel
 
 $conf = Get-Content limine.conf -Raw
 if ($Cmdline) { $conf = $conf.TrimEnd() + "`n    cmdline: $Cmdline`n" }
+if ($Resolution) { $conf = $conf.TrimEnd() + "`n    resolution: $Resolution`n" }
 $count = 0
 foreach ($dir in $Photos) {
     if (-not (Test-Path $dir)) { Write-Host "Photo folder not found: $dir"; continue }

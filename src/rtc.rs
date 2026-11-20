@@ -13,6 +13,38 @@ fn bcd(v: u8) -> u8 {
     (v & 0x0F) + (v >> 4) * 10
 }
 
+fn write(reg: u8, v: u8) {
+    unsafe {
+        Port::<u8>::new(0x70).write(reg);
+        Port::<u8>::new(0x71).write(v);
+    }
+}
+
+/// Set the hardware clock (local time; seconds become 0). Keeps whatever format
+/// (BCD or binary, 12- or 24-hour) the clock already uses, since other systems on
+/// the PC (e.g. Windows) read it too.
+pub fn set(y: u16, mo: u8, d: u8, h: u8, mi: u8) {
+    let b = read(0x0B);
+    let binary = b & 0x04 != 0;
+    let h24 = b & 0x02 != 0;
+    let enc = |v: u8| if binary { v } else { (v / 10) << 4 | (v % 10) };
+    let hour = if h24 {
+        enc(h)
+    } else {
+        let h12 = if h % 12 == 0 { 12 } else { h % 12 };
+        enc(h12) | if h >= 12 { 0x80 } else { 0 }
+    };
+    write(0x0B, b | 0x80); // SET: pause updates while writing
+    write(0x00, enc(0));
+    write(0x02, enc(mi));
+    write(0x04, hour);
+    write(0x07, enc(d));
+    write(0x08, enc(mo));
+    write(0x09, enc((y % 100) as u8));
+    write(0x0B, b & !0x80);
+    kprintln!("rtc: set to {:04}-{:02}-{:02} {:02}:{:02}", y, mo, d, h, mi);
+}
+
 /// Current (hour, minute, second), 24-hour clock.
 pub fn time() -> (u8, u8, u8) {
     // Wait for any in-progress update to finish so we don't read a torn value.

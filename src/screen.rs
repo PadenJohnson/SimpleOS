@@ -79,4 +79,29 @@ impl Screen {
         }
     }
 
+    /// Copy a canvas drawn at a smaller "logical" size, enlarging it by `scale` halves
+    /// (2 = 1x, 3 = 1.5x, 4 = 2x) with nearest-neighbour sampling.
+    pub fn blit_scaled(&self, c: &crate::gfx::Canvas, scale: u32) {
+        if scale <= 2 {
+            return self.blit(c);
+        }
+        let s = scale as usize;
+        let xmap: alloc::vec::Vec<usize> = (0..self.width).map(|x| (x * 2 / s).min(c.w - 1)).collect();
+        let native = self.r_shift == 16 && self.g_shift == 8 && self.b_shift == 0;
+        let mut line = alloc::vec![0u32; self.width];
+        let mut last_src = usize::MAX;
+        for row in 0..self.height {
+            let sy = (row * 2 / s).min(c.h - 1);
+            if sy != last_src {
+                let src = &c.px[sy * c.w..(sy + 1) * c.w];
+                for (d, &sx) in line.iter_mut().zip(&xmap) {
+                    let p = src[sx];
+                    *d = if native { p } else { self.pack(Rgb((p >> 16) as u8, (p >> 8) as u8, p as u8)) };
+                }
+                last_src = sy;
+            }
+            let dst = unsafe { self.base.add(row * self.pitch) as *mut u32 };
+            unsafe { ptr::copy_nonoverlapping(line.as_ptr(), dst, self.width) };
+        }
+    }
 }

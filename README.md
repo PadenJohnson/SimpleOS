@@ -16,6 +16,10 @@ nothing to download.
   Drives are only ever read; nothing on them is changed.
 - Storage: a "Solon Library" partition on the SimpleOS USB stick itself or in free space on
   an internal NVMe/SATA disk. Windows and other partitions are never touched.
+- Settings: background colour, text and icon size (Normal / Large / Extra large; the whole
+  desktop is scaled, which also helps on 4K screens), 12/24-hour clock, date in the top bar,
+  setting the time and date, mouse speed. Saved in the library.
+- Power button (top right): turn off screen, restart, shut down (ACPI, with confirmation)
 - Boots from a USB stick on UEFI and older BIOS PCs; on-screen diagnostics (F12) and a crash
   screen for reporting problems
 

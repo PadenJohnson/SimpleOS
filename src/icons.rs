@@ -12,6 +12,7 @@ pub fn tile_color(app: App) -> u32 {
         App::Documents => rgb(39, 174, 96),
         App::Printers => rgb(142, 68, 173),
         App::Import => rgb(243, 156, 18),
+        App::Settings => rgb(96, 110, 128),
     }
 }
 
@@ -49,6 +50,15 @@ pub fn draw(c: &mut Canvas, app: App, x: i32, y: i32) {
             c.fill_rect(x + 25, y + 45, 14, 2, bg);
             c.fill_rect(x + 25, y + 49, 10, 2, bg);
             c.circle(x + 46, y + 29, 2, bg);
+        }
+        App::Settings => {
+            // Three sliders.
+            for (i, knob) in [(0, 22), (1, 40), (2, 28)] {
+                let yy = y + 20 + i * 12;
+                c.fill_rect(x + 14, yy, 36, 3, WHITE);
+                c.circle(x + knob, yy + 1, 5, WHITE);
+                c.circle(x + knob, yy + 1, 3, bg);
+            }
         }
         App::Import => {
             c.round_rect(x + 22, y + 22, 20, 32, 4, WHITE); // stick body

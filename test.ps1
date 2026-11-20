@@ -19,7 +19,9 @@ param(
     # place, writable), instead of the development boot folder.
     [string]$BootStick = "",
     [switch]$LegacyBios,      # boot with SeaBIOS (old BIOS PCs) instead of UEFI
-    [string]$Cmdline = ""     # kernel command line (development boot only), e.g. "testprinter=pcl"
+    [string]$Cmdline = "",    # kernel command line (development boot only), e.g. "testprinter=pcl"
+    [string]$Resolution = "", # screen mode (development boot only), e.g. "1920x1080"
+    [switch]$ExpectExit       # the test ends with Solon turning the machine off or restarting
 )
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
@@ -32,7 +34,7 @@ if ($code -ne 0) { $out | Write-Host; throw "cargo build failed" }
 $out | Where-Object { $_ -match "^(warning|error)" } | Write-Host
 
 if ($NoBootPhotos) { $Photos = @("nonexistent-folder") }
-if (-not $BootStick) { & "$PSScriptRoot\tools\make-esp.ps1" -Photos $Photos -Cmdline $Cmdline }
+if (-not $BootStick) { & "$PSScriptRoot\tools\make-esp.ps1" -Photos $Photos -Cmdline $Cmdline -Resolution $Resolution }
 
 New-Item -ItemType Directory -Force test-out | Out-Null
 $log = "test-out\serial.log"
@@ -149,8 +151,17 @@ try {
         }
     }
     Start-Sleep -Milliseconds 500
-    Save-Shot "screen"
-    $script:qmp.c.Close()
+    if ($ExpectExit) {
+        # Solon should have switched the machine off (QEMU exits) or restarted it.
+        Start-Sleep -Seconds 3
+        Write-Host ("QEMU " + $(if ($p.HasExited) { "exited (machine turned off)" } else { "still running" }))
+    } else {
+        Save-Shot "screen"
+        $script:qmp.c.Close()
+    }
+} catch {
+    if (-not $ExpectExit) { throw }
+    Write-Host "QEMU went away during the test (expected: machine turned off)"
 } finally {
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
 }

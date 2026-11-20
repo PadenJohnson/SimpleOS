@@ -195,6 +195,30 @@ impl Storage {
         self.library.as_ref().map(|l| l.vol.size).unwrap_or(0)
     }
 
+    /// Read a small file from the top of the library (e.g. Settings.txt).
+    pub fn read_root_file(&mut self, usb: &mut Usb, name: &str) -> Option<Vec<u8>> {
+        self.with(usb, |vol, d| {
+            let root = vol.root();
+            match vol.find(d, &root, name)? {
+                Some(e) if !e.is_dir => vol.read_file(d, &e).map(Some),
+                _ => Ok(None),
+            }
+        })
+        .ok()
+        .flatten()
+    }
+
+    /// Replace a small file at the top of the library.
+    pub fn write_root_file(&mut self, usb: &mut Usb, name: &str, data: &[u8]) -> Result<(), FsError> {
+        self.with(usb, |vol, d| {
+            let root = vol.root();
+            if let Some(old) = vol.find(d, &root, name)? {
+                vol.delete(d, &old)?;
+            }
+            vol.create_file(d, &root, name, data).map(|_| ())
+        })
+    }
+
     pub fn photos_dir(&mut self, usb: &mut Usb) -> Result<DirEntry, FsError> {
         self.with(usb, |vol, d| {
             let root = vol.root();

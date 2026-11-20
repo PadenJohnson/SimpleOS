@@ -25,11 +25,14 @@ mod msc;
 mod nvme;
 mod pci;
 mod photos;
+mod power;
 mod print;
 mod printui;
 mod ps2;
 mod rtc;
 mod screen;
+mod settings;
+mod settingsui;
 mod usb;
 mod usbprint;
 mod xhci;
@@ -39,14 +42,15 @@ use core::sync::atomic::Ordering::Relaxed;
 
 use alloc::string::String;
 use limine::request::{
-    ExecutableCmdlineRequest, ExecutableFileRequest, FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, RequestsEndMarker, RequestsStartMarker,
+    ExecutableCmdlineRequest, ExecutableFileRequest, FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, RequestsEndMarker, RequestsStartMarker, RsdpRequest,
     StackSizeRequest,
 };
 use limine::BaseRevision;
 use x86_64::instructions::{hlt, interrupts as cpu_irq};
 
 use cursor::Cursor;
-use desktop::Desktop;
+use desktop::{Desktop, PowerRequest};
+use settings::Settings;
 use gfx::Canvas;
 use interrupts::{HZ, TICKS};
 use photos::{Photos, Source};
@@ -82,6 +86,11 @@ static STACK_SIZE_REQUEST: StackSizeRequest = StackSizeRequest::new().with_size(
 #[used]
 #[link_section = ".requests"]
 static EXECUTABLE_CMDLINE_REQUEST: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
+
+/// ACPI tables (for shutting down and restarting).
+#[used]
+#[link_section = ".requests"]
+static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
 
 /// The kernel file itself, which tells us which disk we booted from.
 #[used]
@@ -166,8 +175,26 @@ extern "C" fn kmain() -> ! {
     // USB: controllers, keyboards/mice, and drives already plugged in.
     let t0 = TICKS.load(Relaxed);
     let mut usb = Usb::init(boot_disk);
-    let storage = Storage::init(&mut usb);
+    let mut storage = Storage::init(&mut usb);
     kprintln!("solon: usb ready in {} ms, {} drive(s)", (TICKS.load(Relaxed) - t0) * 1000 / HZ, usb.drives.len());
+
+    // Power off / restart need the ACPI tables.
+    let acpi = RSDP_REQUEST.get_response().and_then(|r| {
+        let a = r.address() as u64;
+        power::init(if a >= hhdm { a - hhdm } else { a })
+    });
+
+    // Settings (saved in the library), then the display scale they ask for.
+    let settings = match storage.read_root_file(&mut usb, "Settings.txt") {
+        Some(t) => Settings::from_text(core::str::from_utf8(&t).unwrap_or(""), w, h),
+        None => Settings::defaults(w, h),
+    };
+    kprintln!("settings: {:?}", settings);
+    ps2::set_speed(settings::MOUSE[settings.mouse].1);
+    let mut scale = settings.scale();
+    let logical = |s: u32| (w * 2 / s as usize, h * 2 / s as usize);
+    let (mut lw, mut lh) = logical(scale);
+    ps2::set_bounds(lw, lh);
 
     // Photos on the boot drive (loaded into memory by the bootloader); decoded in the background.
     let files = MODULE_REQUEST.get_response().map(|r| r.modules()).unwrap_or(&[]);
@@ -185,17 +212,21 @@ extern "C" fn kmain() -> ! {
         photos.set(String::from("Boot drive"), items, None);
     }
 
-    let mut canvas = Canvas::new(w, h);
-    let mut desktop = Desktop::new(w, h, photos, usb, storage);
+    let mut canvas = Canvas::new(lw, lh);
+    let mut desktop = Desktop::new(lw, lh, photos, usb, storage, settings, (w, h));
     desktop.show_library();
     let (hh, mm, _) = rtc::time();
     desktop.set_clock(hh, mm);
     desktop.draw(&mut canvas);
-    screen.blit(&canvas);
+    screen.blit_scaled(&canvas, scale);
 
+    // The mouse moves in desktop (logical) pixels; the cursor is drawn on the real screen.
     let mut cursor = Cursor::new();
+    cursor.set_zoom(if scale >= 3 { 2 } else { 1 });
+    let to_screen = |v: i32, s: u32| v as usize * s as usize / 2;
     let (mut mx, mut my) = ps2::mouse_pos();
-    cursor.show_at(&screen, mx as usize, my as usize);
+    cursor.show_at(&screen, to_screen(mx, scale), to_screen(my, scale));
+    kprintln!("solon: display {}x{}, desktop {}x{} (scale {}%)", w, h, lw, lh, scale * 50);
     kprintln!("solon: desktop ready");
     let crash_test = EXECUTABLE_CMDLINE_REQUEST
         .get_response()
@@ -247,17 +278,59 @@ extern "C" fn kmain() -> ! {
             next_clock_check = now + HZ;
             let (hh, mm, _) = rtc::time();
             redraw |= desktop.set_clock(hh, mm);
+            redraw |= desktop.set_date(rtc::date());
+        }
+
+        match desktop.take_request() {
+            Some(PowerRequest::Rescale) => {
+                // Text size changed: draw the desktop at a new logical size.
+                scale = desktop.settings().scale();
+                (lw, lh) = logical(scale);
+                canvas = Canvas::new(lw, lh);
+                desktop.resize(lw, lh);
+                ps2::set_bounds(lw, lh);
+                (mx, my) = ps2::mouse_pos();
+                cursor.hide(&screen);
+                cursor.set_zoom(if scale >= 3 { 2 } else { 1 });
+                kprintln!("solon: desktop {}x{} (scale {}%)", lw, lh, scale * 50);
+                redraw = true;
+            }
+            Some(req @ (PowerRequest::ShutDown | PowerRequest::Restart)) => {
+                cursor.hide(&screen);
+                let shutting = req == PowerRequest::ShutDown;
+                message(&mut canvas, &screen, scale, if shutting { "Turning off..." } else { "Restarting..." }, "");
+                if shutting {
+                    power::shutdown(acpi.as_ref());
+                    // Still here: the PC didn't switch itself off.
+                    message(&mut canvas, &screen, scale, "It's now safe to turn off your computer.", "Hold the power button for a few seconds.");
+                    halt();
+                }
+                power::restart(acpi.as_ref());
+            }
+            None => {}
         }
 
         if redraw {
             desktop.draw(&mut canvas);
             cursor.hide(&screen);
-            screen.blit(&canvas);
-            cursor.show_at(&screen, mx as usize, my as usize);
-        } else if moved {
-            cursor.show_at(&screen, mx as usize, my as usize);
+            screen.blit_scaled(&canvas, scale);
+            if !desktop.screen_off() {
+                cursor.show_at(&screen, to_screen(mx, scale), to_screen(my, scale));
+            }
+        } else if moved && !desktop.screen_off() {
+            cursor.show_at(&screen, to_screen(mx, scale), to_screen(my, scale));
         }
     }
+}
+
+/// A full-screen message (shutting down, restarting...).
+fn message(c: &mut Canvas, screen: &Screen, scale: u32, title: &str, line: &str) {
+    let (w, h) = (c.w as i32, c.h as i32);
+    c.reset_clip();
+    c.fill_rect(0, 0, w, h, gfx::rgb(14, 20, 28));
+    c.text_centered(w / 2, h / 2 - 30, title, gfx::Size::Large, true, gfx::rgb(240, 242, 245));
+    c.text_centered(w / 2, h / 2 + 20, line, gfx::Size::Small, false, gfx::rgb(170, 180, 190));
+    screen.blit_scaled(c, scale);
 }
 
 fn halt() -> ! {
