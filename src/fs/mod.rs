@@ -185,6 +185,8 @@ pub struct Volume {
     pub kind: FsKind,
     pub label: String,
     pub size: u64,
+    /// `enable_writes` has run (exFAT bitmap loaded).
+    pub writes_ready: bool,
     io: VolumeIo,
     fs: FsImpl,
 }
@@ -198,18 +200,63 @@ impl Volume {
         DirEntry::dir(String::new(), first_cluster)
     }
 
-    /// Allow writing (exFAT only). Callers must only do this for Solon's own partition.
+    /// Prepare for writing (exFAT loads its allocation bitmap; FAT needs nothing).
+    /// The device passed to write calls decides whether writing is actually possible.
     pub fn enable_writes(&mut self, dev: &mut dyn BlockDev) -> Result<(), FsError> {
         match &mut self.fs {
-            FsImpl::ExFat(e) => e.enable_writes(&mut self.io, dev),
-            FsImpl::Fat(_) => Err(FsError::ReadOnly),
+            FsImpl::ExFat(e) => e.enable_writes(&mut self.io, dev)?,
+            FsImpl::Fat(_) => {}
         }
+        self.writes_ready = true;
+        Ok(())
     }
 
     pub fn free_bytes(&self) -> u64 {
         match &self.fs {
             FsImpl::ExFat(e) => e.free_bytes(),
             FsImpl::Fat(_) => 0,
+        }
+    }
+
+    /// Free space, reading the allocation data if needed (may take a moment on big drives).
+    pub fn count_free(&mut self, dev: &mut dyn BlockDev) -> Result<u64, FsError> {
+        match &mut self.fs {
+            FsImpl::ExFat(e) => {
+                if e.free_bytes() == 0 {
+                    e.enable_writes(&mut self.io, dev)?;
+                }
+                Ok(e.free_bytes())
+            }
+            FsImpl::Fat(f) => f.count_free(&mut self.io, dev),
+        }
+    }
+
+    /// First device block of the volume.
+    pub fn start(&self) -> u64 {
+        self.io.start
+    }
+
+    /// Rename and/or move an entry (exFAT: Solon storage).
+    pub fn relink(&mut self, dev: &mut dyn BlockDev, entry: &DirEntry, dest: &DirEntry, name: &str) -> Result<DirEntry, FsError> {
+        match &mut self.fs {
+            FsImpl::ExFat(e) => e.relink(&mut self.io, dev, entry, dest, name),
+            FsImpl::Fat(_) => Err(FsError::ReadOnly),
+        }
+    }
+
+    /// Delete a file or a whole folder (exFAT: Solon storage).
+    pub fn delete_tree(&mut self, dev: &mut dyn BlockDev, entry: &DirEntry) -> Result<(), FsError> {
+        match &mut self.fs {
+            FsImpl::ExFat(e) => e.delete_tree(&mut self.io, dev, entry),
+            FsImpl::Fat(_) => Err(FsError::ReadOnly),
+        }
+    }
+
+    /// Health check (exFAT); `repair` fixes what's safe to fix.
+    pub fn check(&mut self, dev: &mut dyn BlockDev, repair: bool) -> Result<exfat::CheckReport, FsError> {
+        match &mut self.fs {
+            FsImpl::ExFat(e) => e.check(&mut self.io, dev, repair),
+            FsImpl::Fat(_) => Err(FsError::ReadOnly),
         }
     }
 
@@ -221,18 +268,18 @@ impl Volume {
     pub fn create_file(&mut self, dev: &mut dyn BlockDev, dir: &DirEntry, name: &str, data: &[u8]) -> Result<DirEntry, FsError> {
         match &mut self.fs {
             FsImpl::ExFat(e) => e.create(&mut self.io, dev, dir, name, Some(data)),
-            FsImpl::Fat(_) => Err(FsError::ReadOnly),
+            FsImpl::Fat(f) => f.create(&mut self.io, dev, dir, name, Some(data)),
         }
     }
 
     pub fn mkdir(&mut self, dev: &mut dyn BlockDev, dir: &DirEntry, name: &str) -> Result<DirEntry, FsError> {
         match &mut self.fs {
             FsImpl::ExFat(e) => e.create(&mut self.io, dev, dir, name, None),
-            FsImpl::Fat(_) => Err(FsError::ReadOnly),
+            FsImpl::Fat(f) => f.create(&mut self.io, dev, dir, name, None),
         }
     }
 
-        pub fn delete(&mut self, dev: &mut dyn BlockDev, entry: &DirEntry) -> Result<(), FsError> {
+    pub fn delete(&mut self, dev: &mut dyn BlockDev, entry: &DirEntry) -> Result<(), FsError> {
         match &mut self.fs {
             FsImpl::ExFat(e) => e.delete(&mut self.io, dev, entry),
             FsImpl::Fat(_) => Err(FsError::ReadOnly),
@@ -267,13 +314,13 @@ pub fn mount(dev: &mut dyn BlockDev, start: u64, size_hint: u64) -> Option<Volum
     dev.read_blocks(start, &mut boot).ok()?;
     if exfat::is_exfat(&boot) {
         let (fs, io, label, size) = exfat::ExFat::mount(dev, start, &boot)?;
-        return Some(Volume { kind: FsKind::ExFat, label, size, io, fs: FsImpl::ExFat(fs) });
+        return Some(Volume { kind: FsKind::ExFat, label, size, writes_ready: false, io, fs: FsImpl::ExFat(fs) });
     }
     if fat::is_fat(&boot) {
         let (fs, io, label, size) = fat::Fat::mount(dev, start, &boot)?;
         let kind = fs.kind();
         let _ = size_hint;
-        return Some(Volume { kind, label, size, io, fs: FsImpl::Fat(fs) });
+        return Some(Volume { kind, label, size, writes_ready: false, io, fs: FsImpl::Fat(fs) });
     }
     None
 }

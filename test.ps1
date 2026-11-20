@@ -9,6 +9,7 @@ param(
     [string[]]$Events = @(),
     [string[]]$Photos = @(),  # photo folders to put on the boot drive (default: .\samples)
     # USB devices: "kbd", "mouse", "disk:<image file>" (plugged in at boot),
+    # "rwdisk:<image file>" (plugged in at boot, used in place and writable),
     # "hot:<id>=<image file>" (ready to plug in later with the "plug:<id>" event; "unplug:<id>" removes it)
     [string[]]$Usb = @(),
     # Internal disks, used in place (writable, so they persist between runs):
@@ -84,6 +85,12 @@ if ($Usb.Count) {
                 Copy-Item $rest $copy -Force
                 $script:diskChecks += ,@($rest, $copy)
                 $args += @("-drive", "`"if=none,id=disk$n,format=raw,file=$copy`"",
+                           "-device", "usb-storage,bus=xhci.0,drive=disk$n,id=dev-disk$n")
+                $n++
+            }
+            "rwdisk" {
+                # Used in place and writable (for tests where Solon writes to the drive).
+                $args += @("-drive", "`"if=none,id=disk$n,format=raw,file=$rest`"",
                            "-device", "usb-storage,bus=xhci.0,drive=disk$n,id=dev-disk$n")
                 $n++
             }

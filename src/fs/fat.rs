@@ -1,4 +1,5 @@
-//! FAT12 / FAT16 / FAT32, read-only, with long file names.
+//! FAT12 / FAT16 / FAT32 with long file names. Reading, plus adding new files and folders
+//! ("Copy to USB"); existing files are never changed or deleted.
 
 use alloc::string::String;
 use alloc::vec;
@@ -16,6 +17,13 @@ pub struct Fat {
     data_start: u64,    // sector of cluster 2
     clusters: u32,
     root_cluster: u32,  // FAT32
+    num_fats: u64,
+    fat_size: u64,      // sectors per FAT copy
+    /// Where to start looking for free clusters.
+    hint: u32,
+    /// FSInfo free count has been invalidated (FAT32) since mounting.
+    fsinfo_cleared: bool,
+    fsinfo_sector: u64,
 }
 
 /// Does this boot sector look like FAT (any variant)?
@@ -80,6 +88,11 @@ impl Fat {
             data_start,
             clusters,
             root_cluster,
+            num_fats: fats,
+            fat_size,
+            hint: 2,
+            fsinfo_cleared: false,
+            fsinfo_sector: if kind == FsKind::Fat32 { le16(b, 48) as u64 } else { 0 },
         };
         let mut io = VolumeIo::new(start, bps as usize);
         // The label in the root directory wins over the (often stale) boot sector copy.
@@ -298,4 +311,338 @@ fn short_name(e: &[u8]) -> String {
     }
     let _ = vec![0u8; 0];
     s
+}
+
+// ---- writing (add-only) --------------------------------------------------------------
+
+fn is_83_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "!#$%&'()-@^_`{}~".contains(c)
+}
+
+/// Choose the 8.3 short name stored next to a long name.
+/// Returns (short name, needs long-name entries, lowercase flags).
+fn make_short_name(long: &str, used: &[[u8; 11]]) -> ([u8; 11], bool, u8) {
+    let (base, ext) = match long.rfind('.') {
+        Some(i) if i > 0 => (&long[..i], &long[i + 1..]),
+        _ => (long, ""),
+    };
+    let fits = !base.is_empty() && base.len() <= 8 && ext.len() <= 3 && base.chars().chain(ext.chars()).all(is_83_char);
+    if fits {
+        let mut sn = [b' '; 11];
+        for (i, c) in base.to_ascii_uppercase().bytes().enumerate() {
+            sn[i] = c;
+        }
+        for (i, c) in ext.to_ascii_uppercase().bytes().enumerate() {
+            sn[8 + i] = c;
+        }
+        if !used.contains(&sn) {
+            let upper = |s: &str| !s.chars().any(|c| c.is_ascii_lowercase());
+            let lower = |s: &str| !s.chars().any(|c| c.is_ascii_uppercase());
+            if upper(base) && upper(ext) {
+                return (sn, false, 0);
+            }
+            if lower(base) && lower(ext) {
+                let b = if base.chars().any(|c| c.is_ascii_alphabetic()) { 0x08 } else { 0 };
+                let e = if ext.chars().any(|c| c.is_ascii_alphabetic()) { 0x10 } else { 0 };
+                return (sn, false, b | e);
+            }
+        }
+    }
+    let clean = |s: &str, n: usize| -> Vec<u8> {
+        s.chars().filter(|c| c.is_ascii() && is_83_char(c.to_ascii_uppercase())).map(|c| c.to_ascii_uppercase() as u8).take(n).collect()
+    };
+    let (b, e) = (clean(base, 6), clean(ext, 3));
+    for n in 1..100_000u32 {
+        let tail = alloc::format!("~{}", n);
+        let mut sn = [b' '; 11];
+        let keep = (8 - tail.len()).min(b.len());
+        sn[..keep].copy_from_slice(&b[..keep]);
+        sn[keep..keep + tail.len()].copy_from_slice(tail.as_bytes());
+        sn[8..8 + e.len()].copy_from_slice(&e);
+        if !used.contains(&sn) {
+            return (sn, true, 0);
+        }
+    }
+    ([b'_'; 11], true, 0)
+}
+
+/// Long-name entries (last piece first) followed by the short entry.
+fn dir_entries(name: &str, sn: [u8; 11], lfn: bool, flags: u8, attr: u8, cluster: u32, size: u32) -> Vec<[u8; 32]> {
+    let mut out = Vec::new();
+    if lfn {
+        let mut units: Vec<u16> = name.encode_utf16().collect();
+        if units.len() % 13 != 0 {
+            units.push(0);
+        }
+        while units.len() % 13 != 0 {
+            units.push(0xFFFF);
+        }
+        let n = units.len() / 13;
+        let mut sum: u8 = 0;
+        for &c in &sn {
+            sum = (sum >> 1 | sum << 7).wrapping_add(c);
+        }
+        for seq in (1..=n).rev() {
+            let chunk = &units[(seq - 1) * 13..seq * 13];
+            let mut e = [0u8; 32];
+            e[0] = seq as u8 | if seq == n { 0x40 } else { 0 };
+            e[11] = 0x0F;
+            e[13] = sum;
+            for (k, off) in [1usize, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30].iter().enumerate() {
+                e[*off..*off + 2].copy_from_slice(&chunk[k].to_le_bytes());
+            }
+            out.push(e);
+        }
+    }
+    let ts = crate::rtc::fat_timestamp();
+    let (time, date) = ((ts & 0xFFFF) as u16, (ts >> 16) as u16);
+    let mut e = [0u8; 32];
+    e[..11].copy_from_slice(&sn);
+    e[11] = attr;
+    e[12] = flags;
+    e[14..16].copy_from_slice(&time.to_le_bytes());
+    e[16..18].copy_from_slice(&date.to_le_bytes());
+    e[18..20].copy_from_slice(&date.to_le_bytes());
+    e[20..22].copy_from_slice(&((cluster >> 16) as u16).to_le_bytes());
+    e[22..24].copy_from_slice(&time.to_le_bytes());
+    e[24..26].copy_from_slice(&date.to_le_bytes());
+    e[26..28].copy_from_slice(&(cluster as u16).to_le_bytes());
+    e[28..32].copy_from_slice(&size.to_le_bytes());
+    out.push(e);
+    out
+}
+
+impl Fat {
+    fn eoc(&self) -> u32 {
+        match self.kind {
+            FsKind::Fat32 => 0x0FFF_FFFF,
+            FsKind::Fat16 => 0xFFFF,
+            _ => 0xFFF,
+        }
+    }
+
+    /// Raw FAT entry (0 = free).
+    fn fat_get(&self, io: &mut VolumeIo, dev: &mut dyn BlockDev, c: u32) -> Result<u32, FsError> {
+        let base = self.fat_start * self.bps;
+        Ok(match self.kind {
+            FsKind::Fat32 => {
+                let mut b = [0u8; 4];
+                io.read_at(dev, base + c as u64 * 4, &mut b)?;
+                u32::from_le_bytes(b) & 0x0FFF_FFFF
+            }
+            FsKind::Fat16 => {
+                let mut b = [0u8; 2];
+                io.read_at(dev, base + c as u64 * 2, &mut b)?;
+                u16::from_le_bytes(b) as u32
+            }
+            _ => {
+                let mut b = [0u8; 2];
+                io.read_at(dev, base + c as u64 + c as u64 / 2, &mut b)?;
+                let v = u16::from_le_bytes(b) as u32;
+                if c & 1 == 1 {
+                    v >> 4
+                } else {
+                    v & 0xFFF
+                }
+            }
+        })
+    }
+
+    /// Set a FAT entry in every copy of the FAT.
+    fn fat_set(&self, io: &mut VolumeIo, dev: &mut dyn BlockDev, c: u32, v: u32) -> Result<(), FsError> {
+        for k in 0..self.num_fats {
+            let base = (self.fat_start + k * self.fat_size) * self.bps;
+            match self.kind {
+                FsKind::Fat32 => {
+                    let mut b = [0u8; 4];
+                    io.read_at(dev, base + c as u64 * 4, &mut b)?;
+                    let old = u32::from_le_bytes(b);
+                    io.write_at(dev, base + c as u64 * 4, &((old & 0xF000_0000) | (v & 0x0FFF_FFFF)).to_le_bytes())?;
+                }
+                FsKind::Fat16 => io.write_at(dev, base + c as u64 * 2, &(v as u16).to_le_bytes())?,
+                _ => {
+                    let off = base + c as u64 + c as u64 / 2;
+                    let mut b = [0u8; 2];
+                    io.read_at(dev, off, &mut b)?;
+                    let old = u16::from_le_bytes(b);
+                    let new = if c & 1 == 1 { (old & 0x000F) | ((v as u16) << 4) } else { (old & 0xF000) | (v as u16 & 0x0FFF) };
+                    io.write_at(dev, off, &new.to_le_bytes())?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn find_free(&mut self, io: &mut VolumeIo, dev: &mut dyn BlockDev, n: usize) -> Result<Vec<u32>, FsError> {
+        let mut out = Vec::new();
+        let end = self.clusters + 2;
+        let start = self.hint.clamp(2, end - 1);
+        let mut c = start;
+        loop {
+            if self.fat_get(io, dev, c)? == 0 {
+                out.push(c);
+                if out.len() == n {
+                    self.hint = c + 1;
+                    return Ok(out);
+                }
+            }
+            c = if c + 1 >= end { 2 } else { c + 1 };
+            if c == start {
+                return Err(FsError::Full);
+            }
+        }
+    }
+
+    fn link(&self, io: &mut VolumeIo, dev: &mut dyn BlockDev, chain: &[u32]) -> Result<(), FsError> {
+        for (i, &c) in chain.iter().enumerate() {
+            let next = chain.get(i + 1).copied().unwrap_or(self.eoc());
+            self.fat_set(io, dev, c, next)?;
+        }
+        Ok(())
+    }
+
+    fn write_clusters(&self, io: &mut VolumeIo, dev: &mut dyn BlockDev, chain: &[u32], data: &[u8]) -> Result<(), FsError> {
+        let cb = self.cluster_bytes();
+        for (i, &c) in chain.iter().enumerate() {
+            let from = (i * cb).min(data.len());
+            let to = ((i + 1) * cb).min(data.len());
+            if to - from == cb {
+                io.write_sectors(dev, self.cluster_sector(c), &data[from..to])?;
+            } else {
+                let mut buf = vec![0u8; cb];
+                buf[..to - from].copy_from_slice(&data[from..to]);
+                io.write_sectors(dev, self.cluster_sector(c), &buf)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The FSInfo free-space hint would be wrong after we allocate; mark it unknown.
+    fn clear_fsinfo(&mut self, io: &mut VolumeIo, dev: &mut dyn BlockDev) -> Result<(), FsError> {
+        if self.kind == FsKind::Fat32 && !self.fsinfo_cleared && self.fsinfo_sector > 0 {
+            let off = self.fsinfo_sector * self.bps;
+            let mut sig = [0u8; 4];
+            io.read_at(dev, off, &mut sig)?;
+            if u32::from_le_bytes(sig) == 0x4161_5252 {
+                io.write_at(dev, off + 488, &[0xFF; 8])?;
+            }
+            self.fsinfo_cleared = true;
+        }
+        Ok(())
+    }
+
+    /// Byte offset of directory record `i`, or None if past the end of a fixed root.
+    fn record_offset(&self, dir: &DirEntry, chain: &[u32], i: usize) -> Option<u64> {
+        if dir.first_cluster == 0 && self.kind != FsKind::Fat32 {
+            let o = i as u64 * 32;
+            return (o < self.root_sectors * self.bps).then(|| self.root_start * self.bps + o);
+        }
+        let cb = self.cluster_bytes();
+        let byte = i * 32;
+        chain.get(byte / cb).map(|&c| self.cluster_sector(c) * self.bps + (byte % cb) as u64)
+    }
+
+    fn dir_clusters(&self, io: &mut VolumeIo, dev: &mut dyn BlockDev, dir: &DirEntry) -> Result<Vec<u32>, FsError> {
+        if dir.first_cluster == 0 && self.kind != FsKind::Fat32 {
+            return Ok(Vec::new());
+        }
+        self.chain(io, dev, dir.first_cluster, 65536 * 32 / self.cluster_bytes() + 1)
+    }
+
+    fn add_entries(&mut self, io: &mut VolumeIo, dev: &mut dyn BlockDev, dir: &DirEntry, ents: &[[u8; 32]]) -> Result<(), FsError> {
+        for _ in 0..2 {
+            let raw = self.dir_bytes(io, dev, dir)?;
+            let chain = self.dir_clusters(io, dev, dir)?;
+            let mut run = 0;
+            for i in 0..raw.len() / 32 {
+                let b = raw[i * 32];
+                if b == 0x00 || b == 0xE5 {
+                    run += 1;
+                    if run == ents.len() {
+                        let first = i + 1 - ents.len();
+                        for (k, e) in ents.iter().enumerate() {
+                            let off = self.record_offset(dir, &chain, first + k).ok_or(FsError::Corrupt)?;
+                            io.write_at(dev, off, e)?;
+                        }
+                        return Ok(());
+                    }
+                } else {
+                    run = 0;
+                }
+            }
+            // Full: add a cluster (impossible for the fixed FAT12/16 root folder).
+            let last = *chain.last().ok_or(FsError::Full)?;
+            let c = self.find_free(io, dev, 1)?[0];
+            self.write_clusters(io, dev, &[c], &[])?;
+            self.fat_set(io, dev, c, self.eoc())?;
+            self.fat_set(io, dev, last, c)?;
+        }
+        Err(FsError::Full)
+    }
+
+    /// Add a new file (`data` = Some) or folder (None) to `dir`. Nothing existing is changed
+    /// except that `dir` may grow.
+    pub fn create(&mut self, io: &mut VolumeIo, dev: &mut dyn BlockDev, dir: &DirEntry, name: &str, data: Option<&[u8]>) -> Result<DirEntry, FsError> {
+        if name.is_empty() || name.len() > 255 || name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) {
+            return Err(FsError::Exists);
+        }
+        let raw = self.dir_bytes(io, dev, dir)?;
+        if self.list(io, dev, dir)?.iter().any(|e| e.name.eq_ignore_ascii_case(name)) {
+            return Err(FsError::Exists);
+        }
+        let used: Vec<[u8; 11]> = raw
+            .chunks_exact(32)
+            .filter(|e| e[0] != 0 && e[0] != 0xE5 && e[11] != 0x0F)
+            .map(|e| e[..11].try_into().unwrap())
+            .collect();
+        let (sn, lfn, flags) = make_short_name(name, &used);
+        if data.map_or(false, |d| d.len() as u64 > u32::MAX as u64) {
+            return Err(FsError::TooBig);
+        }
+        self.clear_fsinfo(io, dev)?;
+        let cb = self.cluster_bytes();
+        let (chain, size, attr) = match data {
+            Some(d) => {
+                let n = (d.len() + cb - 1) / cb;
+                let chain = if n > 0 { self.find_free(io, dev, n)? } else { Vec::new() };
+                // Data first, then the FAT chain, then the directory entry.
+                self.write_clusters(io, dev, &chain, d)?;
+                dev.flush()?;
+                if !chain.is_empty() {
+                    self.link(io, dev, &chain)?;
+                }
+                (chain, d.len() as u32, 0x20)
+            }
+            None => {
+                let c = self.find_free(io, dev, 1)?[0];
+                let parent = if dir.first_cluster == self.root_cluster && self.kind == FsKind::Fat32 { 0 } else { dir.first_cluster };
+                let mut dot = [b' '; 11];
+                dot[0] = b'.';
+                let mut body = dir_entries(".", dot, false, 0, 0x10, c, 0);
+                dot[1] = b'.';
+                body.extend(dir_entries("..", dot, false, 0, 0x10, parent, 0));
+                let bytes: Vec<u8> = body.concat();
+                self.write_clusters(io, dev, &[c], &bytes)?;
+                dev.flush()?;
+                self.link(io, dev, &[c])?;
+                (alloc::vec![c], 0, 0x10)
+            }
+        };
+        dev.flush()?;
+        let first = chain.first().copied().unwrap_or(0);
+        self.add_entries(io, dev, dir, &dir_entries(name, sn, lfn, flags, attr, first, size))?;
+        dev.flush()?;
+        Ok(DirEntry { name: String::from(name), is_dir: data.is_none(), size: size as u64, first_cluster: first, contiguous: false, loc: Vec::new() })
+    }
+
+    /// Free space in bytes (scans the FAT).
+    pub fn count_free(&self, io: &mut VolumeIo, dev: &mut dyn BlockDev) -> Result<u64, FsError> {
+        let mut free = 0u64;
+        for c in 2..self.clusters + 2 {
+            if self.fat_get(io, dev, c)? == 0 {
+                free += 1;
+            }
+        }
+        Ok(free * self.cluster_bytes() as u64)
+    }
 }

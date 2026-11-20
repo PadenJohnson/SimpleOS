@@ -167,8 +167,8 @@ impl MassStorage {
         Ok(())
     }
 
-    /// Write blocks. Callers must only use this for Solon's own boot stick
-    /// (see `usb::Usb::boot_disk`); every other USB drive stays read-only.
+    /// Write blocks. Only for Solon's own boot stick (`usb::Usb::boot_disk`) and, when the user
+    /// asks, Copy to USB (`usb_create`, add-only) and Erase (`format_drive`, never the boot stick).
     pub fn write(&mut self, hc: &mut Xhci, lba: u64, data: &[u8]) -> Result<(), IoError> {
         let bs = self.block_size as usize;
         let per = MAX_XFER / bs;

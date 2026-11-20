@@ -69,7 +69,9 @@ Solon's desktop should appear within a few seconds.
   and travel with the stick. Import shows it under *This computer → Solon storage*.
 - **Option B sticks** have no library; you can view photos from other drives but not
   import or save edits, unless the PC has free internal disk space for *Set up Solon storage*.
-- **Other USB drives and SD card readers are never written to.** Only Solon's own stick is.
+- **Other USB drives and SD card readers are only written to when you ask.** Files can add
+  copies to them (it never changes or deletes what is already there), and Disks can erase one
+  after two warnings. Solon never erases an internal disk or its own stick.
 - **Internal disks** (NVMe/SATA) are detected but not touched unless you confirm *Set up
   Solon storage*, which only ever uses empty space.
 - To go back to Windows: shut down, remove the stick, and turn the PC on. Turn Secure Boot

@@ -17,6 +17,8 @@ use crate::editor::SaveChoice;
 use crate::photos::{Bytes, PhotoAction, Photos, Source};
 use crate::settings::{self, Settings};
 use crate::settingsui::{SettingsAction, SettingsApp};
+use crate::files::{CopyJob, Files, FilesAction};
+use crate::diskmgr::{DiskAction, DiskMgr};
 use crate::usb::Usb;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -26,6 +28,8 @@ pub enum App {
     Documents,
     Printers,
     Import,
+    Files,
+    Disks,
     Settings,
 }
 
@@ -37,6 +41,8 @@ impl App {
             App::Documents => "Documents",
             App::Printers => "Printers",
             App::Import => "Import",
+            App::Files => "Files",
+            App::Disks => "Disks",
             App::Settings => "Settings",
         }
     }
@@ -49,6 +55,7 @@ impl App {
             App::Printers => ["No printers found.", "Connect a USB printer to this computer."],
             App::Import => ["No USB drives or cameras detected.", "USB support arrives in an upcoming milestone."],
             App::Settings => ["", ""],
+            App::Files | App::Disks => ["", ""],
         }
     }
 }
@@ -130,6 +137,9 @@ pub struct Desktop {
     power_menu: bool,
     confirm: Option<PowerRequest>,
     screen_off: bool,
+    files: Files,
+    disks: DiskMgr,
+    copy: Option<CopyJob>,
     request: Option<PowerRequest>,
 }
 
@@ -185,9 +195,11 @@ impl Desktop {
 
     fn layout_icons(w: i32, h: i32) -> Vec<Icon> {
         let _ = w;
-        let apps = [App::Photos, App::Videos, App::Documents, App::Printers, App::Import, App::Settings];
-        let step = ((h - BAR_H - 24) / apps.len() as i32).min(CELL_H);
-        apps.iter().enumerate().map(|(i, &app)| Icon { app, x: 24, y: BAR_H + 24 + i as i32 * step, h: step }).collect()
+        let apps = [App::Photos, App::Videos, App::Documents, App::Printers, App::Import, App::Files, App::Disks, App::Settings];
+        // Leave room under the last icon for its name.
+        let top = BAR_H + 12;
+        let step = ((h - top - 100) / (apps.len() as i32 - 1)).min(CELL_H);
+        apps.iter().enumerate().map(|(i, &app)| Icon { app, x: 24, y: top + i as i32 * step, h: step }).collect()
     }
 
     /// `w`, `h`: the (possibly scaled-down) desktop size; `screen`: the physical screen size.
@@ -221,6 +233,9 @@ impl Desktop {
             power_menu: false,
             confirm: None,
             screen_off: false,
+            files: Files::new(),
+            disks: DiskMgr::new(),
+            copy: None,
             request: None,
         };
         d.refresh_storage_view();
@@ -369,7 +384,7 @@ impl Desktop {
 
     /// True while there's background work (photos to decode, an import), so the main loop shouldn't sleep.
     pub fn busy(&self) -> bool {
-        self.photos.needs_loading() || self.job.is_some()
+        self.photos.needs_loading() || self.job.is_some() || self.copy.is_some() || self.disks.busy()
     }
 
     fn step_import(&mut self, now: u64) -> bool {
@@ -432,6 +447,10 @@ impl Desktop {
             }
             self.drive_ids = ids;
             self.import.drives_changed(&self.usb);
+            self.files.drives_changed(&mut self.storage, &mut self.usb);
+            if matches!(&self.window, Some(w) if w.app == App::Disks) {
+                self.disks.refresh(&mut self.storage, &mut self.usb);
+            }
             let usb = &self.usb;
             self.photos.drive_removed(&|id| !usb.has_drive(id));
             redraw = true;
@@ -451,7 +470,13 @@ impl Desktop {
             }
             return true;
         }
-        if self.job.is_some() {
+        if let Some(a) = self.disks.step(&mut self.storage, &mut self.usb) {
+            self.disk_action(a, now);
+            return true;
+        }
+        if self.copy.is_some() {
+            redraw |= self.step_copy(now);
+        } else         if self.job.is_some() {
             redraw |= self.step_import(now);
         } else if self.photos.needs_loading() {
             let usb = &mut self.usb;
@@ -683,6 +708,73 @@ impl Desktop {
         Ok(())
     }
 
+    /// Solon storage changed (Files, Disks): refresh what shows it.
+    fn library_changed(&mut self) {
+        self.refresh_storage_view();
+        let o = self.photos.origin();
+        if o == "Solon library" || o.is_empty() || o == "Boot drive" {
+            if !self.show_library() {
+                self.photos.set(String::from("Solon library"), Vec::new(), None);
+            }
+        }
+    }
+
+    fn files_action(&mut self, a: FilesAction, now: u64) -> bool {
+        match a {
+            FilesAction::None => false,
+            FilesAction::Redraw => true,
+            FilesAction::ShowPhotos { origin, items, open_at } => {
+                self.photos.set(origin, items, open_at);
+                self.open(App::Photos);
+                true
+            }
+            FilesAction::Copy(spec) => {
+                kprintln!("files: copy \"{}\" from {:?} to {:?} \"{}\"", spec.item.name, spec.from, spec.to, spec.dest.name);
+                let job = CopyJob::new(spec);
+                self.toast = Some((format!("Copying \"{}\"...", job.top_name), now + 600 * HZ));
+                self.copy = Some(job);
+                true
+            }
+            FilesAction::Changed(msg) => {
+                self.toast = Some((msg, now + 5 * HZ));
+                self.library_changed();
+                true
+            }
+        }
+    }
+
+    fn step_copy(&mut self, now: u64) -> bool {
+        let Some(job) = &mut self.copy else { return false };
+        job.step(&mut self.storage, &mut self.usb);
+        if !job.finished() {
+            return false;
+        }
+        let msg = job.summary();
+        let to = job.to;
+        kprintln!("files: {}", msg);
+        self.copy = None;
+        self.toast = Some((msg, now + 6 * HZ));
+        self.files.refresh(&mut self.storage, &mut self.usb);
+        if to == crate::files::Place::Library {
+            self.library_changed();
+        }
+        true
+    }
+
+    fn disk_action(&mut self, a: DiskAction, now: u64) -> bool {
+        match a {
+            DiskAction::None => false,
+            DiskAction::Redraw => true,
+            DiskAction::Changed(msg) => {
+                self.toast = Some((msg, now + 5 * HZ));
+                self.import.drives_changed(&self.usb);
+                self.files.refresh(&mut self.storage, &mut self.usb);
+                self.library_changed();
+                true
+            }
+        }
+    }
+
     fn apply(&mut self, a: Action) -> bool {
         match a {
             Action::None => false,
@@ -774,6 +866,8 @@ impl Desktop {
                 App::Photos => self.photos.draw(c, body),
                 App::Import => self.import.draw(c, body, &self.usb, &self.storage_view),
                 App::Settings => self.settings_app.draw(c, body, &self.settings, self.screen, self.storage.library.is_some()),
+                App::Files => self.files.draw(c, body, &self.storage, &self.usb),
+                App::Disks => self.disks.draw(c, body, &self.storage),
                 app => draw_placeholder(c, app, body),
             }
             c.reset_clip();
@@ -791,6 +885,12 @@ impl Desktop {
         kprintln!("solon: open {}", app.name());
         if app == App::Settings {
             self.settings_app.reload_time();
+        }
+        if app == App::Files {
+            self.files.refresh(&mut self.storage, &mut self.usb);
+        }
+        if app == App::Disks {
+            self.disks.refresh(&mut self.storage, &mut self.usb);
         }
     }
 
@@ -820,6 +920,8 @@ impl Desktop {
                     match win.app {
                         App::Photos => redraw |= self.photos.on_wheel(wheel, win.body()),
                         App::Import => redraw |= self.import.on_wheel(wheel, win.body(), &self.usb),
+                        App::Files => redraw |= self.files.on_wheel(wheel, win.body()),
+                        App::Disks => redraw |= self.disks.on_wheel(wheel, win.body()),
                         _ => {}
                     }
                 }
@@ -881,6 +983,14 @@ impl Desktop {
                     App::Import => {
                         let a = self.import.on_press(x, y, body, now, &mut self.usb, &self.storage_view);
                         redraw |= self.apply(a);
+                    }
+                    App::Files => {
+                        let a = self.files.on_press(x, y, body, now, &mut self.storage, &mut self.usb);
+                        redraw |= self.files_action(a, now);
+                    }
+                    App::Disks => {
+                        let a = self.disks.on_press(x, y, body, &self.storage);
+                        redraw |= self.disk_action(a, now);
                     }
                     App::Settings => {
                         let screen = self.screen;
@@ -975,6 +1085,16 @@ impl Desktop {
                 App::Import => {
                     if let Some(a) = self.import.on_key(sc, body, &mut self.usb, &self.storage_view) {
                         return self.apply(a);
+                    }
+                }
+                App::Files => {
+                    if let Some(a) = self.files.on_key(sc, body, &mut self.storage, &mut self.usb) {
+                        return self.files_action(a, Self::now());
+                    }
+                }
+                App::Disks => {
+                    if let Some(a) = self.disks.on_key(sc) {
+                        return self.disk_action(a, Self::now());
                     }
                 }
                 _ => {}

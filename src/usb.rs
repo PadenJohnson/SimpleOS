@@ -1,5 +1,5 @@
 //! USB devices on top of xHCI: enumeration, hot-plug, hubs, HID boot keyboards/mice,
-//! and mass-storage drives with their mounted (read-only) volumes.
+//! and mass-storage drives with their mounted volumes (read; written only by Copy to USB and Erase).
 
 use alloc::format;
 use alloc::string::String;
@@ -663,6 +663,56 @@ impl Usb {
         let Usb { hcs, printers, .. } = self;
         let p = printers.iter_mut().find(|p| p.id == id).ok_or("The printer was disconnected")?;
         p.ipp_request(&mut hcs[p.ctrl], request)
+    }
+
+    /// Add a file (`data` = Some) or folder to another USB drive ("Copy to USB"). Only ever
+    /// adds: nothing existing is changed or deleted. Solon's own boot stick is refused.
+    pub fn usb_create(&mut self, drive: u32, vol: usize, dir: &DirEntry, name: &str, data: Option<&[u8]>) -> Result<DirEntry, FsError> {
+        let Usb { hcs, drives, .. } = self;
+        let d = drives.iter_mut().find(|d| d.id == drive).ok_or(FsError::Io)?;
+        if d.is_boot {
+            return Err(FsError::ReadOnly);
+        }
+        let v = d.volumes.get_mut(vol).ok_or(FsError::Io)?;
+        let mut dev = BootDisk { hc: &mut hcs[d.ctrl], ms: &mut d.ms };
+        if !v.writes_ready {
+            v.enable_writes(&mut dev)?;
+        }
+        let r = match data {
+            Some(bytes) => v.create_file(&mut dev, dir, name, bytes),
+            None => v.mkdir(&mut dev, dir, name),
+        };
+        kprintln!("usb: wrote \"{}\" to drive {}: {}", name, drive, if r.is_ok() { "ok" } else { "failed" });
+        r
+    }
+
+    /// Erase a USB drive and format it as one exFAT volume. Never the boot stick.
+    pub fn format_drive(&mut self, drive: u32, label: &str) -> Result<(), FsError> {
+        let Usb { hcs, drives, .. } = self;
+        let d = drives.iter_mut().find(|d| d.id == drive).ok_or(FsError::Io)?;
+        if d.is_boot {
+            return Err(FsError::ReadOnly);
+        }
+        let blocks = d.ms.blocks;
+        {
+            let mut dev = BootDisk { hc: &mut hcs[d.ctrl], ms: &mut d.ms };
+            let (start, len) = fs::part::write_single_mbr(&mut dev, blocks, 0x07)?;
+            let serial = crate::rtc::fat_timestamp() ^ blocks as u32;
+            fs::exfat::format(&mut dev, start, len, label, serial)?;
+        }
+        let mut disk = Disk { hc: &mut hcs[d.ctrl], ms: &mut d.ms };
+        d.volumes = fs::probe(&mut disk, blocks);
+        kprintln!("usb: drive {} erased and formatted, {} volume(s)", drive, d.volumes.len());
+        Ok(())
+    }
+
+    /// Free space on a USB drive volume.
+    pub fn volume_free(&mut self, drive: u32, vol: usize) -> Option<u64> {
+        let Usb { hcs, drives, .. } = self;
+        let d = drives.iter_mut().find(|d| d.id == drive)?;
+        let v = d.volumes.get_mut(vol)?;
+        let mut disk = Disk { hc: &mut hcs[d.ctrl], ms: &mut d.ms };
+        v.count_free(&mut disk).ok()
     }
 
     /// The id of Solon's boot stick, if it's plugged in.

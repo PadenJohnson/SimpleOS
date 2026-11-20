@@ -17,6 +17,38 @@ use crate::usb::Usb;
 
 const MIN_SIZE: u64 = 64 * 1024 * 1024;
 const LABEL: &str = "SOLON";
+/// Recycle bin folder (at the top of the library) and its index of where items came from.
+pub const BIN: &str = "Recycle bin";
+const BIN_INDEX: &str = "RecycleBin.txt";
+
+/// A partition, for the Disk manager.
+pub struct PartView {
+    pub start: u64,
+    pub blocks: u64,
+    pub format: String,
+    pub label: String,
+    pub free: Option<u64>,
+    /// Solon library partition.
+    pub solon: bool,
+    /// The Solon storage in use right now.
+    pub active: bool,
+}
+
+/// A disk, for the Disk manager.
+pub struct DiskView {
+    pub internal: Option<usize>,
+    pub usb: Option<u32>,
+    pub name: String,
+    pub kind: &'static str,
+    pub bytes: u64,
+    pub blocks: u64,
+    pub block: usize,
+    pub parts: Vec<PartView>,
+    /// Free space Solon storage could be set up in.
+    pub can_setup: Option<u64>,
+    /// Solon's own boot stick.
+    pub boot: bool,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Backend {
@@ -188,11 +220,159 @@ impl Storage {
         }
     }
 
+    /// If the library is on Solon's boot stick: (drive id, first block of its volume).
+    pub fn on_boot_stick(&self) -> Option<(u32, u64)> {
+        match self.library.as_ref()?.backend {
+            Backend::BootStick(id) => Some((id, self.library.as_ref()?.vol.start())),
+            Backend::Internal(_) => None,
+        }
+    }
+
     pub fn free_bytes(&self) -> u64 {
         self.library.as_ref().map(|l| l.vol.free_bytes()).unwrap_or(0)
     }
     pub fn size(&self) -> u64 {
         self.library.as_ref().map(|l| l.vol.size).unwrap_or(0)
+    }
+
+    // ---- Files app operations -----------------------------------------------------------
+
+    pub fn root(&mut self, usb: &mut Usb) -> Result<DirEntry, FsError> {
+        self.with(usb, |vol, _| Ok(vol.root()))
+    }
+
+    pub fn mkdir_in(&mut self, usb: &mut Usb, parent: &DirEntry, name: &str) -> Result<DirEntry, FsError> {
+        self.with(usb, |vol, d| vol.mkdir(d, parent, name))
+    }
+
+    /// Rename an item in place (`parent` = the folder it's in).
+    pub fn rename(&mut self, usb: &mut Usb, e: &DirEntry, parent: &DirEntry, new_name: &str) -> Result<DirEntry, FsError> {
+        self.with(usb, |vol, d| vol.relink(d, e, parent, new_name))
+    }
+
+    /// Move an item into another folder (renamed " (2)" etc. if the name is taken).
+    pub fn move_to(&mut self, usb: &mut Usb, e: &DirEntry, dest: &DirEntry) -> Result<DirEntry, FsError> {
+        let existing = self.names_in(usb, dest)?;
+        let name = unique_name(&existing, &e.name, u64::MAX).ok_or(FsError::Exists)?;
+        self.with(usb, |vol, d| vol.relink(d, e, dest, &name))
+    }
+
+    fn bin_dir(&mut self, usb: &mut Usb, create: bool) -> Result<Option<DirEntry>, FsError> {
+        self.with(usb, |vol, d| {
+            let root = vol.root();
+            match vol.find(d, &root, BIN)? {
+                Some(e) => Ok(Some(e)),
+                None if create => vol.mkdir(d, &root, BIN).map(Some),
+                None => Ok(None),
+            }
+        })
+    }
+
+    /// Recycle bin index: lines of "name in the bin<TAB>folder it came from".
+    fn bin_index(&mut self, usb: &mut Usb) -> Vec<(String, String)> {
+        let text = self.read_root_file(usb, BIN_INDEX).unwrap_or_default();
+        core::str::from_utf8(&text)
+            .unwrap_or("")
+            .lines()
+            .filter_map(|l| l.split_once('\t').map(|(a, b)| (String::from(a), String::from(b))))
+            .collect()
+    }
+
+    fn save_bin_index(&mut self, usb: &mut Usb, idx: &[(String, String)]) -> Result<(), FsError> {
+        let text: String = idx.iter().map(|(a, b)| format!("{}\t{}\n", a, b)).collect();
+        self.write_root_file(usb, BIN_INDEX, text.as_bytes())
+    }
+
+    /// Move an item to the Recycle bin. `from` is the path of the folder it was in
+    /// (e.g. "Photos/2026-11-20 VACATION"), used to put it back.
+    pub fn recycle(&mut self, usb: &mut Usb, e: &DirEntry, from: &str) -> Result<(), FsError> {
+        let bin = self.bin_dir(usb, true)?.ok_or(FsError::Io)?;
+        let moved = self.move_to(usb, e, &bin)?;
+        let mut idx = self.bin_index(usb);
+        idx.retain(|(n, _)| !n.eq_ignore_ascii_case(&moved.name));
+        idx.push((moved.name.clone(), String::from(from)));
+        self.save_bin_index(usb, &idx)
+    }
+
+    /// What's in the Recycle bin: (item, folder it came from).
+    pub fn bin_items(&mut self, usb: &mut Usb) -> Vec<(DirEntry, String)> {
+        let Ok(Some(bin)) = self.bin_dir(usb, false) else { return Vec::new() };
+        let idx = self.bin_index(usb);
+        let items = self.list(usb, &bin).unwrap_or_default();
+        items
+            .into_iter()
+            .map(|e| {
+                let from = idx.iter().find(|(n, _)| n.eq_ignore_ascii_case(&e.name)).map(|(_, p)| p.clone()).unwrap_or_default();
+                (e, from)
+            })
+            .collect()
+    }
+
+    /// Put an item back where it came from (recreating folders if needed).
+    pub fn restore(&mut self, usb: &mut Usb, e: &DirEntry, from: &str) -> Result<String, FsError> {
+        let mut dir = self.root(usb)?;
+        for part in from.split('/').filter(|p| !p.is_empty()) {
+            let next = self.with(usb, |vol, d| match vol.find(d, &dir, part)? {
+                Some(x) if x.is_dir => Ok(x),
+                _ => vol.mkdir(d, &dir, part),
+            })?;
+            dir = next;
+        }
+        let moved = self.move_to(usb, e, &dir)?;
+        let mut idx = self.bin_index(usb);
+        idx.retain(|(n, _)| !n.eq_ignore_ascii_case(&e.name));
+        self.save_bin_index(usb, &idx)?;
+        Ok(moved.name)
+    }
+
+    /// Permanently delete one item from the Recycle bin.
+    pub fn delete_forever(&mut self, usb: &mut Usb, e: &DirEntry) -> Result<(), FsError> {
+        self.with(usb, |vol, d| vol.delete_tree(d, e))?;
+        let mut idx = self.bin_index(usb);
+        idx.retain(|(n, _)| !n.eq_ignore_ascii_case(&e.name));
+        self.save_bin_index(usb, &idx)
+    }
+
+    pub fn empty_bin(&mut self, usb: &mut Usb) -> Result<usize, FsError> {
+        let items = self.bin_items(usb);
+        for (e, _) in &items {
+            self.with(usb, |vol, d| vol.delete_tree(d, e))?;
+        }
+        self.save_bin_index(usb, &[])?;
+        Ok(items.len())
+    }
+
+    /// Storage health check; `repair` fixes what's safe to fix.
+    pub fn check(&mut self, usb: &mut Usb, repair: bool) -> Result<fs::exfat::CheckReport, FsError> {
+        self.with(usb, |vol, d| vol.check(d, repair))
+    }
+
+    /// Internal disks for the Disk manager.
+    pub fn disk_views(&mut self) -> Vec<DiskView> {
+        let lib = self.library.as_ref().map(|l| (l.backend, l.vol.start(), l.vol.free_bytes()));
+        let mut out = Vec::new();
+        for (i, d) in self.disks.iter_mut().enumerate() {
+            let (total, bs) = (d.blocks, d.block_size);
+            let solon: Vec<u64> = part::solon_partitions(d, total).iter().map(|p| p.0).collect();
+            let mut parts = Vec::new();
+            for (start, len) in part::partitions(d, total) {
+                let active = matches!(lib, Some((Backend::Internal(li), ls, _)) if li == i && ls == start);
+                let mut pv = PartView { start, blocks: len, format: String::from("Unknown"), label: String::new(), free: None, solon: solon.contains(&start), active };
+                if let Some(mut v) = fs::mount(d, start, len) {
+                    pv.format = String::from(v.kind.name());
+                    pv.label = v.label.clone();
+                    pv.free = match lib {
+                        Some((Backend::Internal(li), ls, lf)) if li == i && ls == start => Some(lf),
+                        _ => v.count_free(d).ok(),
+                    };
+                }
+                parts.push(pv);
+            }
+            let lay = part::layout(d, total);
+            let setup = part::largest_free(&lay, total, bs, 0).map(|(_, l)| l * bs as u64).filter(|&b| b >= MIN_SIZE);
+            out.push(DiskView { internal: Some(i), usb: None, name: d.name.clone(), kind: d.kind, bytes: d.size_bytes(), blocks: total, block: bs, parts, can_setup: setup, boot: false });
+        }
+        out
     }
 
     /// Read a small file from the top of the library (e.g. Settings.txt).
@@ -264,23 +444,36 @@ impl Storage {
         self.with(usb, |vol, d| vol.delete(d, e))
     }
 
-    /// Every photo in the library as (folder, file), newest import folder first.
+    /// Every photo in Solon storage as (folder, file), except the Recycle bin and the
+    /// hidden originals of edited photos. The Photos folder comes first, newest import first.
     pub fn all_photos(&mut self, usb: &mut Usb) -> Vec<(DirEntry, DirEntry)> {
         let mut out = Vec::new();
-        let Ok(photos) = self.photos_dir(usb) else { return out };
-        let Ok(mut folders) = self.list(usb, &photos) else { return out };
-        folders.retain(|f| f.is_dir);
-        folders.reverse(); // names start with the date
-        for f in folders {
-            if let Ok(files) = self.list(usb, &f) {
-                for e in files {
-                    if !e.is_dir && crate::import::is_photo(&e.name) {
-                        out.push((f.clone(), e));
-                    }
-                }
-            }
+        let Ok(root) = self.root(usb) else { return out };
+        let Ok(mut top) = self.list(usb, &root) else { return out };
+        top.retain(|e| e.is_dir && !e.name.eq_ignore_ascii_case(BIN) && !e.name.eq_ignore_ascii_case("Originals"));
+        top.sort_by_key(|e| !e.name.eq_ignore_ascii_case("Photos"));
+        for d in top {
+            self.collect_photos(usb, &d, 0, &mut out);
         }
         out
+    }
+
+    fn collect_photos(&mut self, usb: &mut Usb, dir: &DirEntry, depth: u32, out: &mut Vec<(DirEntry, DirEntry)>) {
+        let Ok(entries) = self.list(usb, dir) else { return };
+        let mut subdirs = Vec::new();
+        for e in entries {
+            if e.is_dir {
+                subdirs.push(e);
+            } else if crate::import::is_photo(&e.name) {
+                out.push((dir.clone(), e));
+            }
+        }
+        if depth < 8 {
+            subdirs.reverse(); // import folder names start with the date: newest first
+            for d in subdirs {
+                self.collect_photos(usb, &d, depth + 1, out);
+            }
+        }
     }
 
     // ---- edited photos ----------------------------------------------------------------

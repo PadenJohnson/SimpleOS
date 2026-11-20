@@ -347,3 +347,38 @@ pub fn boot_stick_min_start(lay: &Layout, bs: usize) -> u64 {
         _ => 0,
     }
 }
+
+/// Erase a (USB) drive's partition table and create one MBR partition covering it,
+/// starting at 1 MiB. Returns (first block, block count). Everything on the drive is lost.
+pub fn write_single_mbr(dev: &mut dyn BlockDev, total: u64, part_type: u8) -> Result<(u64, u64), FsError> {
+    let bs = dev.block_size();
+    let start = (1024 * 1024 / bs) as u64;
+    let len = (total - start).min(0xFFFF_FFFF);
+    if len < (16 * 1024 * 1024 / bs) as u64 {
+        return Err(FsError::Full);
+    }
+    // Wipe the first MiB (old partition tables, GPT, boot sectors) and the backup GPT.
+    let zero = vec![0u8; 64 * 1024];
+    let per = (zero.len() / bs) as u64;
+    let mut b = 0;
+    while b < start {
+        let n = per.min(start - b) as usize * bs;
+        dev.write_blocks(b, &zero[..n])?;
+        b += per;
+    }
+    if total > 34 {
+        dev.write_blocks(total - 33, &vec![0u8; 33 * bs])?;
+    }
+    let mut mbr = vec![0u8; bs];
+    let e = &mut mbr[446..462];
+    e[1..4].copy_from_slice(&[0xFE, 0xFF, 0xFF]);
+    e[4] = part_type;
+    e[5..8].copy_from_slice(&[0xFE, 0xFF, 0xFF]);
+    e[8..12].copy_from_slice(&(start as u32).to_le_bytes());
+    e[12..16].copy_from_slice(&(len as u32).to_le_bytes());
+    mbr[510] = 0x55;
+    mbr[511] = 0xAA;
+    dev.write_blocks(0, &mbr)?;
+    dev.flush()?;
+    Ok((start, len))
+}

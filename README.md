@@ -8,14 +8,21 @@ SimpleOS (internally "Solon") is a small operating system written from scratch i
 nothing to download.
 
 **Working now**
-- Desktop with Photos, Videos, Documents, Printers and Import
+- Desktop with Photos, Videos, Documents, Printers, Import, Files, Disks and Settings
 - Photos: thumbnail grid, full-screen viewer, and an editor (rotate, crop with print shapes,
   brightness/contrast/saturation/warmth, Auto-fix, filters, undo, save as copy or replace
   with revert)
 - USB: keyboards, mice, hubs, USB drives and SD card readers (FAT12/16/32 and exFAT).
-  Drives are only ever read; nothing on them is changed.
+  USB drives are only changed when you ask: Files can add copies to them (never changing or
+  deleting what is already there), and Disks can erase one after two warnings.
 - Storage: a "Solon Library" partition on the SimpleOS USB stick itself or in free space on
   an internal NVMe/SATA disk. Windows and other partitions are never touched.
+- Files: browse Solon storage and USB drives; new folder, rename, move; Delete goes to a
+  Recycle bin (restore, delete forever, empty); copy folders and files from USB drives into
+  Solon and from Solon onto USB drives. Photos shows every photo in Solon storage.
+- Disks: every disk inside the PC and plugged in, with its partitions, sizes and free space;
+  set up Solon storage; a storage health check with a safe repair; erase and format a USB
+  drive (never an internal disk or the SimpleOS stick).
 - Settings: background colour, text and icon size (Normal / Large / Extra large; the whole
   desktop is scaled, which also helps on 4K screens), 12/24-hour clock, date in the top bar,
   setting the time and date, mouse speed. Saved in the library.
@@ -55,14 +62,14 @@ QEMU for Windows.
 | `.\tools\make-samples.ps1` | Regenerate the sample photos |
 | `tools\mkimg` | Host tool: builds FAT/exFAT/GPT test disks, checks partition tables, decodes print jobs |
 
-`test.ps1` options include `-Usb` (keyboard, mouse, USB drives, hot-plugging), `-Internal`
+`test.ps1` options include `-Usb` (keyboard, mouse, read-only or writable USB drives, hot-plugging), `-Internal`
 (NVMe/SATA disk images), `-BootStick` / `-LegacyBios` (boot from a USB image like a real PC)
 and `-Cmdline "testprinter=pcl"` (a fake printer whose jobs are captured for checking).
 
 ## Layout
 
-- `src/`: the kernel. `main.rs` boots; `desktop.rs`, `photos.rs`, `editor.rs`, `import.rs`
-  and `printui.rs` are the apps; `xhci.rs`, `usb.rs`, `msc.rs`, `usbprint.rs`, `nvme.rs` and
+- `src/`: the kernel. `main.rs` boots; `desktop.rs`, `photos.rs`, `editor.rs`, `import.rs`,
+  `files.rs`, `diskmgr.rs`, `settingsui.rs` and `printui.rs` are the apps; `xhci.rs`, `usb.rs`, `msc.rs`, `usbprint.rs`, `nvme.rs` and
   `ahci.rs` are drivers; `fs/` holds partition tables, FAT and exFAT; `library.rs` is the
   photo library; `print.rs` lays out pages and speaks PCL / IPP.
 - `tools/`: build, image and test helpers. `docs/`: guide and screenshots. `samples/`:

@@ -21,6 +21,8 @@ struct WriteState {
     bitmap: Vec<u8>,
     bitmap_chain: Vec<u32>,
     upcase: Vec<u16>,
+    /// Clusters of the up-case table (in use, but not reachable from any directory).
+    upcase_chain: Vec<u32>,
     free: u64,
     hint: u32,
 }
@@ -283,9 +285,11 @@ impl ExFat {
         bitmap.truncate(need as usize);
 
         let mut upcase = default_upcase();
+        let mut upcase_chain = Vec::new();
         if let Some((uc_first, uc_len)) = upcase_at {
             let n = ((uc_len + cb - 1) / cb) as usize;
             let chain = self.chain(io, dev, uc_first, false, n)?;
+            upcase_chain = chain.clone();
             let mut raw = Vec::new();
             self.read_clusters(io, dev, &chain, &mut raw)?;
             raw.truncate(uc_len as usize);
@@ -307,7 +311,7 @@ impl ExFat {
             }
         }
         let used: u64 = (0..self.clusters as usize).filter(|&c| bitmap[c / 8] & (1 << (c % 8)) != 0).count() as u64;
-        self.rw = Some(WriteState { bitmap, bitmap_chain, upcase, free: self.clusters as u64 - used, hint: 2 });
+        self.rw = Some(WriteState { bitmap, bitmap_chain, upcase, upcase_chain, free: self.clusters as u64 - used, hint: 2 });
         Ok(())
     }
 
@@ -647,8 +651,140 @@ impl ExFat {
         Ok(DirEntry { name: String::from(name), is_dir, size: len, first_cluster: first, contiguous: n > 0 && contiguous, loc })
     }
 
+    /// Rename and/or move an entry into `dest`, keeping its data where it is: a new
+    /// directory entry set is written first, then the old one is hidden. (exFAT folders have
+    /// no "." / ".." entries, so folders move the same way as files.)
+    pub fn relink(&mut self, io: &mut VolumeIo, dev: &mut dyn BlockDev, e: &DirEntry, dest: &DirEntry, new_name: &str) -> Result<DirEntry, FsError> {
+        if self.rw.is_none() {
+            return Err(FsError::ReadOnly);
+        }
+        if e.loc.len() < 2 {
+            return Err(FsError::Corrupt);
+        }
+        let units: Vec<u16> = new_name.encode_utf16().collect();
+        if units.is_empty() || units.len() > 255 || new_name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) {
+            return Err(FsError::Exists);
+        }
+        let up: Vec<u16> = units.iter().map(|&u| self.up(u)).collect();
+        for other in self.list(io, dev, dest)? {
+            let o: Vec<u16> = other.name.encode_utf16().map(|u| self.up(u)).collect();
+            // Renaming to a different case of the same name is fine.
+            if o == up && other.loc != e.loc {
+                return Err(FsError::Exists);
+            }
+        }
+        // Read the current stream extension to keep the exact lengths.
+        let mut s = [0u8; 32];
+        io.read_at(dev, e.loc[1], &mut s)?;
+        let len = le64(&s, 24);
+        let valid = le64(&s, 8);
+        self.set_dirty(io, dev, true)?;
+        let mut set = self.entry_set(&units, e.is_dir, e.first_cluster, len, e.contiguous);
+        set[1][1] = s[1]; // same allocation flags
+        set[1][8..16].copy_from_slice(&valid.to_le_bytes());
+        Self::fix_checksum(&mut set);
+        let loc = self.add_to_dir(io, dev, dest, &set)?;
+        dev.flush()?;
+        for &o in &e.loc {
+            let mut t = [0u8; 1];
+            io.read_at(dev, o, &mut t)?;
+            io.write_at(dev, o, &[t[0] & 0x7F])?;
+        }
+        dev.flush()?;
+        self.set_dirty(io, dev, false)?;
+        dev.flush()?;
+        Ok(DirEntry { name: String::from(new_name), loc, ..e.clone() })
+    }
+
+    /// Delete a file, or a folder and everything in it.
+    pub fn delete_tree(&mut self, io: &mut VolumeIo, dev: &mut dyn BlockDev, e: &DirEntry) -> Result<(), FsError> {
+        if e.is_dir {
+            for child in self.list(io, dev, e)? {
+                self.delete_tree(io, dev, &child)?;
+            }
+        }
+        self.delete(io, dev, e)
+    }
+
+    /// Check the volume: every cluster a file or folder uses must be marked in use, and
+    /// clusters marked in use must belong to something. With `repair`, space nothing uses
+    /// (left behind by a power cut mid-write) is freed and unmarked used space is marked.
+    pub fn check(&mut self, io: &mut VolumeIo, dev: &mut dyn BlockDev, repair: bool) -> Result<CheckReport, FsError> {
+        let (bitmap_chain, upcase_chain) = {
+            let w = self.rw.as_ref().ok_or(FsError::ReadOnly)?;
+            (w.bitmap_chain.clone(), w.upcase_chain.clone())
+        };
+        let n = self.clusters as usize + 2;
+        let mut owner = alloc::vec![false; n];
+        let mut rep = CheckReport::default();
+        let cb = self.cluster_bytes();
+        let mark = |c: u32, what: &str, rep: &mut CheckReport, owner: &mut Vec<bool>| {
+            if (c as usize) < n {
+                if owner[c as usize] && rep.problems.len() < 20 {
+                    rep.problems.push(alloc::format!("{} shares space with another item", what));
+                }
+                owner[c as usize] = true;
+            }
+        };
+        for &c in bitmap_chain.iter().chain(upcase_chain.iter()) {
+            mark(c, "system data", &mut rep, &mut owner);
+        }
+        let root = DirEntry::dir(String::new(), self.root_cluster);
+        for c in self.dir_chain(io, dev, &root)? {
+            mark(c, "the top folder", &mut rep, &mut owner);
+        }
+        let mut stack = alloc::vec![root];
+        while let Some(dir) = stack.pop() {
+            for e in self.list(io, dev, &dir)? {
+                let need = ((e.size + cb - 1) / cb) as usize;
+                if need > 0 {
+                    let chain = self.chain(io, dev, e.first_cluster, e.contiguous, need)?;
+                    if chain.len() < need && rep.problems.len() < 20 {
+                        rep.problems.push(alloc::format!("\"{}\" is shorter than it should be", e.name));
+                    }
+                    for c in chain {
+                        mark(c, &e.name, &mut rep, &mut owner);
+                    }
+                }
+                if e.is_dir {
+                    rep.folders += 1;
+                    stack.push(e);
+                } else {
+                    rep.files += 1;
+                }
+            }
+        }
+        let (mut leaked, mut unmarked) = (Vec::new(), Vec::new());
+        {
+            let w = self.rw.as_ref().unwrap();
+            for c in 2..n as u32 {
+                let used = Self::is_used(w, c);
+                match (used, owner[c as usize]) {
+                    (true, false) => leaked.push(c),
+                    (false, true) => unmarked.push(c),
+                    _ => {}
+                }
+            }
+        }
+        rep.leaked_bytes = leaked.len() as u64 * cb;
+        rep.unmarked = unmarked.len();
+        if repair && (!leaked.is_empty() || !unmarked.is_empty()) {
+            self.set_dirty(io, dev, true)?;
+            if !leaked.is_empty() {
+                self.set_bits(io, dev, &leaked, false)?;
+            }
+            if !unmarked.is_empty() {
+                self.set_bits(io, dev, &unmarked, true)?;
+            }
+            dev.flush()?;
+            self.set_dirty(io, dev, false)?;
+            dev.flush()?;
+            rep.repaired = true;
+        }
+        Ok(rep)
+    }
+
     /// Delete a file or empty folder.
-    #[allow(dead_code)]
     pub fn delete(&mut self, io: &mut VolumeIo, dev: &mut dyn BlockDev, e: &DirEntry) -> Result<(), FsError> {
         if self.rw.is_none() {
             return Err(FsError::ReadOnly);
@@ -806,4 +942,24 @@ pub fn format(dev: &mut dyn BlockDev, start: u64, blocks: u64, label: &str, seri
     dev.flush()?;
     kprintln!("exfat: formatted {} clusters of {} KiB, label \"{}\"", clusters, cluster_bytes / 1024, label);
     Ok(())
+}
+
+/// Result of a storage health check.
+#[derive(Debug, Default, Clone)]
+pub struct CheckReport {
+    pub files: usize,
+    pub folders: usize,
+    /// Space marked in use that no file or folder owns (freed by a repair).
+    pub leaked_bytes: u64,
+    /// Clusters files use that weren't marked in use (marked by a repair).
+    pub unmarked: usize,
+    /// Things a repair can't safely fix automatically.
+    pub problems: Vec<String>,
+    pub repaired: bool,
+}
+
+impl CheckReport {
+    pub fn healthy(&self) -> bool {
+        self.leaked_bytes == 0 && self.unmarked == 0 && self.problems.is_empty()
+    }
 }

@@ -12,6 +12,8 @@ pub fn tile_color(app: App) -> u32 {
         App::Documents => rgb(39, 174, 96),
         App::Printers => rgb(142, 68, 173),
         App::Import => rgb(243, 156, 18),
+        App::Files => rgb(22, 160, 133),
+        App::Disks => rgb(52, 73, 94),
         App::Settings => rgb(96, 110, 128),
     }
 }
@@ -59,6 +61,20 @@ pub fn draw(c: &mut Canvas, app: App, x: i32, y: i32) {
                 c.circle(x + knob, yy + 1, 5, WHITE);
                 c.circle(x + knob, yy + 1, 3, bg);
             }
+        }
+        App::Files => {
+            // A folder.
+            c.round_rect(x + 12, y + 17, 18, 10, 3, WHITE);
+            c.round_rect(x + 12, y + 22, 40, 26, 4, WHITE);
+            c.fill_rect(x + 12, y + 28, 40, 2, bg);
+        }
+        App::Disks => {
+            // A disk drive with its light, and a pie of used space.
+            c.round_rect(x + 12, y + 34, 40, 16, 4, WHITE);
+            c.circle(x + 44, y + 42, 2, bg);
+            c.fill_rect(x + 17, y + 41, 16, 2, bg);
+            c.circle(x + 32, y + 22, 10, WHITE);
+            c.triangle([(x + 32, y + 22), (x + 32, y + 12), (x + 42, y + 22)], bg);
         }
         App::Import => {
             c.round_rect(x + 22, y + 22, 20, 32, 4, WHITE); // stick body

@@ -1177,6 +1177,9 @@ fn main() {
             windows_like(Path::new(&args[2]), args[3].parse().unwrap(), Path::new(&args[4]));
             return;
         }
+        Some("fatcheck") if args.len() == 3 => {
+            std::process::exit(if fat_check(Path::new(&args[2])) { 0 } else { 1 });
+        }
         Some("check") if args.len() == 3 => {
             std::process::exit(if check_disk(Path::new(&args[2])) { 0 } else { 1 });
         }
@@ -1187,6 +1190,7 @@ fn main() {
         eprintln!("       mkimg blank <file> <MiB>");
         eprintln!("       mkimg windows-like <file> <MiB> <samples folder>");
         eprintln!("       mkimg check <disk image>");
+        eprintln!("       mkimg fatcheck <disk image>");
         std::process::exit(2);
     }
     let src = Path::new(&args[1]);
@@ -1272,4 +1276,189 @@ fn main() {
     man.dedup();
     fs::write(out.join("manifest.txt"), man.join("\n") + "\n").unwrap();
     println!("wrote 4 images + manifest.txt to {}", out.display());
+}
+
+// ---- FAT consistency check (for drives Solon wrote to) ----------------------------
+
+fn le16f(b: &[u8], o: usize) -> u32 {
+    u16::from_le_bytes([b[o], b[o + 1]]) as u32
+}
+
+/// Check a FAT12/16/32 volume (whole disk with MBR, or a bare volume): FAT copies agree,
+/// every chain is valid and the right length, nothing cross-linked or lost, long names
+/// match their short names. Prints every file with its size and FNV-1a hash.
+fn fat_check(path: &Path) -> bool {
+    let img = fs::read(path).unwrap();
+    let mut base = 0usize;
+    let bpb_ok = |o: usize| o + 512 <= img.len() && img[o + 510] == 0x55 && img[o + 511] == 0xAA && le16f(&img, o + 11) == 512 && img[o + 13] != 0;
+    if !bpb_ok(0) || (img[0] != 0xEB && img[0] != 0xE9) {
+        let start = le32(&img, 446 + 8) as usize * SECTOR;
+        if !bpb_ok(start) {
+            println!("FAIL no FAT volume found");
+            return false;
+        }
+        base = start;
+    }
+    let b = &img[base..];
+    let bps = le16f(b, 11) as usize;
+    let spc = b[13] as usize;
+    let reserved = le16f(b, 14) as usize;
+    let nfats = b[16] as usize;
+    let root_entries = le16f(b, 17) as usize;
+    let total = if le16f(b, 19) != 0 { le16f(b, 19) as usize } else { le32(b, 32) as usize };
+    let fat_sz = if le16f(b, 22) != 0 { le16f(b, 22) as usize } else { le32(b, 36) as usize };
+    let root_secs = (root_entries * 32 + bps - 1) / bps;
+    let data_start = reserved + nfats * fat_sz + root_secs;
+    let clusters = (total - data_start) / spc;
+    let bits = if clusters < 4085 { 12 } else if clusters < 65525 { 16 } else { 32 };
+    let csize = bps * spc;
+    println!("FAT{}: {} clusters of {} bytes, {} FAT copies", bits, clusters, csize, nfats);
+    let mut ok = true;
+    let fail = |m: String, ok: &mut bool| {
+        println!("FAIL {}", m);
+        *ok = false;
+    };
+    let fat0 = &b[reserved * bps..(reserved + fat_sz) * bps];
+    for k in 1..nfats {
+        let f = &b[(reserved + k * fat_sz) * bps..(reserved + (k + 1) * fat_sz) * bps];
+        if f != fat0 {
+            fail(format!("FAT copy {} differs from FAT 1", k + 1), &mut ok);
+        }
+    }
+    let get = |c: usize| -> u32 {
+        match bits {
+            12 => {
+                let o = c + c / 2;
+                let v = le16f(fat0, o);
+                if c & 1 == 1 { v >> 4 } else { v & 0xFFF }
+            }
+            16 => le16f(fat0, c * 2),
+            _ => le32(fat0, c * 4) & 0x0FFF_FFFF,
+        }
+    };
+    let eoc = |v: u32| match bits {
+        12 => v >= 0xFF8,
+        16 => v >= 0xFFF8,
+        _ => v >= 0x0FFF_FFF8,
+    };
+    let mut owner: Vec<bool> = vec![false; clusters + 2];
+    let cl_off = |c: usize| (data_start + (c - 2) * spc) * bps;
+    // Follow a chain; returns its clusters.
+    let chain = |first: usize, what: &str, owner: &mut Vec<bool>, ok: &mut bool| -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut c = first;
+        loop {
+            if c < 2 || c >= clusters + 2 {
+                fail(format!("{}: chain points to cluster {}", what, c), ok);
+                return out;
+            }
+            if owner[c] {
+                fail(format!("{}: cluster {} is used twice (cross-linked)", what, c), ok);
+                return out;
+            }
+            owner[c] = true;
+            out.push(c);
+            let v = get(c);
+            if eoc(v) {
+                return out;
+            }
+            if v == 0 {
+                fail(format!("{}: chain runs into a free cluster after {}", what, c), ok);
+                return out;
+            }
+            c = v as usize;
+        }
+    };
+    let short_sum = |e: &[u8]| -> u8 { e[..11].iter().fold(0u8, |s, &x| s.rotate_right(1).wrapping_add(x)) };
+    let root_bytes: Vec<u8> = if bits == 32 {
+        let rc = le32(b, 44) as usize;
+        let cs = chain(rc, "root folder", &mut owner, &mut ok);
+        cs.iter().flat_map(|&c| b[cl_off(c)..cl_off(c) + csize].to_vec()).collect()
+    } else {
+        b[(reserved + nfats * fat_sz) * bps..data_start * bps].to_vec()
+    };
+    // (directory bytes, path, own cluster, parent cluster)
+    let mut stack = vec![(root_bytes, String::new(), 0usize, 0usize)];
+    let (mut files, mut dirs) = (0, 0);
+    while let Some((bytes, path, me, parent)) = stack.pop() {
+        let mut lfn: Vec<(u8, Vec<u16>)> = Vec::new();
+        for (i, e) in bytes.chunks(32).enumerate() {
+            if e[0] == 0 {
+                break;
+            }
+            if e[0] == 0xE5 {
+                lfn.clear();
+                continue;
+            }
+            if e[11] == 0x0F {
+                let mut u = Vec::new();
+                for o in [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30] {
+                    u.push(u16::from_le_bytes([e[o], e[o + 1]]));
+                }
+                lfn.push((e[13], u));
+                continue;
+            }
+            if e[11] & 0x08 != 0 {
+                lfn.clear();
+                continue; // volume label
+            }
+            let short: String = {
+                let n = String::from_utf8_lossy(&e[0..8]).trim_end().to_string();
+                let x = String::from_utf8_lossy(&e[8..11]).trim_end().to_string();
+                if x.is_empty() { n } else { format!("{}.{}", n, x) }
+            };
+            let first = (le16f(e, 26) | (le16f(e, 20) << 16)) as usize;
+            if me != 0 && i < 2 {
+                let want = if i == 0 { (".", me) } else { ("..", parent) };
+                if short != want.0 || first != want.1 {
+                    fail(format!("{}: entry {} is \"{}\"->{}, expected \"{}\"->{}", path, i, short, first, want.0, want.1), &mut ok);
+                }
+                lfn.clear();
+                continue;
+            }
+            let name = if lfn.is_empty() {
+                short.clone()
+            } else {
+                let sum = short_sum(e);
+                if lfn.iter().any(|(s, _)| *s != sum) {
+                    fail(format!("{}/{}: long name checksum mismatch", path, short), &mut ok);
+                }
+                let units: Vec<u16> = lfn.iter().rev().flat_map(|(_, u)| u.clone()).take_while(|&u| u != 0 && u != 0xFFFF).collect();
+                String::from_utf16_lossy(&units)
+            };
+            lfn.clear();
+            let full = format!("{}/{}", path, name);
+            let size = le32(e, 28) as usize;
+            if e[11] & 0x10 != 0 {
+                dirs += 1;
+                let cs = chain(first, &full, &mut owner, &mut ok);
+                let data: Vec<u8> = cs.iter().flat_map(|&c| b[cl_off(c)..cl_off(c) + csize].to_vec()).collect();
+                println!("  {}/", full);
+                stack.push((data, full, first, me));
+            } else {
+                files += 1;
+                if size == 0 {
+                    if first != 0 {
+                        fail(format!("{}: empty file owns cluster {}", full, first), &mut ok);
+                    }
+                    println!("  {} 0 bytes", full);
+                    continue;
+                }
+                let cs = chain(first, &full, &mut owner, &mut ok);
+                let need = (size + csize - 1) / csize;
+                if cs.len() != need {
+                    fail(format!("{}: {} bytes needs {} clusters, chain has {}", full, size, need, cs.len()), &mut ok);
+                    continue;
+                }
+                let data: Vec<u8> = cs.iter().flat_map(|&c| b[cl_off(c)..cl_off(c) + csize].to_vec()).collect();
+                println!("  {} {} bytes fnv {:08x}", full, size, fnv(&data[..size]));
+            }
+        }
+    }
+    let lost = (2..clusters + 2).filter(|&c| get(c) != 0 && !owner[c]).count();
+    if lost > 0 {
+        fail(format!("{} lost cluster(s) marked used but owned by nothing", lost), &mut ok);
+    }
+    println!("{} files, {} folders: {}", files, dirs, if ok { "FAT OK" } else { "PROBLEMS FOUND" });
+    ok
 }
