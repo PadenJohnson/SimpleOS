@@ -241,6 +241,10 @@ extern "C" fn kmain() -> ! {
     if let Some(kind) = cmdline.split_whitespace().find_map(|w| w.strip_prefix("testprinter=")) {
         desktop.set_test_printer(print::test_printer(kind));
     }
+    // Boot option "selftest=originals": check edited-photo originals survive rename/move/bin.
+    if cmdline.split_whitespace().any(|w| w == "selftest=originals") {
+        desktop.self_test_originals();
+    }
 
     let mut buttons = 0u8;
     let mut next_clock_check = 0u64;

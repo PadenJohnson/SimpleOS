@@ -532,7 +532,7 @@ impl Desktop {
             PhotoAction::Edit(i) => {
                 let can_save = self.storage.library.is_some();
                 let (can_replace, has_original) = match self.photos.source(i).cloned() {
-                    Some(Source::Library { dir, entry }) => (true, self.storage.backup_of(&mut self.usb, &dir, &entry.name).is_some()),
+                    Some(Source::Library { dir, entry }) => (true, self.storage.backup_of(&mut self.usb, &dir, &entry).is_some()),
                     _ => (false, false),
                 };
                 self.photos.start_edit(i, can_save, can_save && can_replace, has_original);
@@ -717,6 +717,17 @@ impl Desktop {
                 self.photos.set(String::from("Solon library"), Vec::new(), None);
             }
         }
+    }
+
+    /// Test hook (boot option "selftest=originals"): replace a library photo, then rename,
+    /// move, recycle and restore it, checking its original stays linked; then revert.
+    pub fn self_test_originals(&mut self) {
+        let r = self.storage.self_test_originals(&mut self.usb);
+        kprintln!("selftest: originals {}", if r.is_ok() { "PASSED" } else { "FAILED" });
+        if let Err(e) = r {
+            kprintln!("selftest: {}", e);
+        }
+        self.library_changed();
     }
 
     fn files_action(&mut self, a: FilesAction, now: u64) -> bool {

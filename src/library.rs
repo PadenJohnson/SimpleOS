@@ -327,6 +327,7 @@ impl Storage {
 
     /// Permanently delete one item from the Recycle bin.
     pub fn delete_forever(&mut self, usb: &mut Usb, e: &DirEntry) -> Result<(), FsError> {
+        self.drop_backups(usb, e);
         self.with(usb, |vol, d| vol.delete_tree(d, e))?;
         let mut idx = self.bin_index(usb);
         idx.retain(|(n, _)| !n.eq_ignore_ascii_case(&e.name));
@@ -336,6 +337,7 @@ impl Storage {
     pub fn empty_bin(&mut self, usb: &mut Usb) -> Result<usize, FsError> {
         let items = self.bin_items(usb);
         for (e, _) in &items {
+            self.drop_backups(usb, e);
             self.with(usb, |vol, d| vol.delete_tree(d, e))?;
         }
         self.save_bin_index(usb, &[])?;
@@ -482,29 +484,70 @@ impl Storage {
         Ok(self.list(usb, dir)?.into_iter().map(|e| (e.name, e.size)).collect())
     }
 
-    /// /Originals/<folder> (created when `create`).
-    fn originals_for(&mut self, usb: &mut Usb, folder: &str, create: bool) -> Result<Option<DirEntry>, FsError> {
+    /// /Originals (created when `create`).
+    fn originals_dir(&mut self, usb: &mut Usb, create: bool) -> Result<Option<DirEntry>, FsError> {
         self.with(usb, |vol, d| {
             let root = vol.root();
-            let originals = match vol.find(d, &root, "Originals")? {
-                Some(e) => e,
-                None if create => vol.mkdir(d, &root, "Originals")?,
-                None => return Ok(None),
-            };
-            match vol.find(d, &originals, folder)? {
+            match vol.find(d, &root, "Originals")? {
                 Some(e) => Ok(Some(e)),
-                None if create => vol.mkdir(d, &originals, folder).map(Some),
+                None if create => vol.mkdir(d, &root, "Originals").map(Some),
                 None => Ok(None),
             }
         })
     }
 
-    /// The hidden original of a replaced photo, if there is one.
-    pub fn backup_of(&mut self, usb: &mut Usb, folder: &DirEntry, name: &str) -> Option<(DirEntry, DirEntry)> {
-        let dir = self.originals_for(usb, &folder.name, false).ok()??;
-        let s = stem(name);
-        let found = self.list(usb, &dir).ok()?.into_iter().find(|e| stem(&e.name).eq_ignore_ascii_case(s))?;
-        Some((dir, found))
+    /// Older libraries kept originals in /Originals/<folder name>/<file name>.
+    fn legacy_originals(&mut self, usb: &mut Usb, folder: &str) -> Option<DirEntry> {
+        let dir = self.originals_dir(usb, false).ok()??;
+        self.with(usb, |vol, d| vol.find(d, &dir, folder)).ok()?.filter(|e| e.is_dir)
+    }
+
+    /// The hidden original of a replaced photo: (folder it's kept in, file), if there is one.
+    ///
+    /// Originals are kept in /Originals as "<cluster>-<size> <original name>", keyed by
+    /// where the edited photo's data lives on disk. Renaming or moving the photo (also into
+    /// the Recycle bin and back) doesn't change that, so the link survives.
+    pub fn backup_of(&mut self, usb: &mut Usb, folder: &DirEntry, entry: &DirEntry) -> Option<(DirEntry, DirEntry)> {
+        let dir = self.originals_dir(usb, false).ok()??;
+        let items = self.list(usb, &dir).ok()?;
+        let key = backup_key(entry);
+        if let Some(b) = items.iter().find(|e| !e.is_dir && e.name.starts_with(&key)) {
+            return Some((dir, b.clone()));
+        }
+        // Older layout, matched by folder and file name.
+        let old = self.legacy_originals(usb, &folder.name)?;
+        let s = stem(&entry.name);
+        let found = self.list(usb, &old).ok()?.into_iter().find(|e| !e.is_dir && stem(&e.name).eq_ignore_ascii_case(s))?;
+        Some((old, found))
+    }
+
+    /// Give a backup the key of the (new) edited photo, moving it into /Originals.
+    fn rekey_backup(&mut self, usb: &mut Usb, backup: &DirEntry, original: &str, edited: &DirEntry) -> Result<(), FsError> {
+        let dir = self.originals_dir(usb, true)?.ok_or(FsError::Io)?;
+        let name = format!("{}{}", backup_key(edited), original);
+        self.with(usb, |vol, d| vol.relink(d, backup, &dir, &name)).map(|_| ())
+    }
+
+    /// Drop the hidden originals of everything inside `e` (a file or folder being deleted
+    /// for good), so a later file can never be matched with them.
+    fn drop_backups(&mut self, usb: &mut Usb, e: &DirEntry) {
+        let Ok(Some(dir)) = self.originals_dir(usb, false) else { return };
+        let mut keys = Vec::new();
+        let mut stack = Vec::from([e.clone()]);
+        while let Some(x) = stack.pop() {
+            if x.is_dir {
+                stack.extend(self.list(usb, &x).unwrap_or_default());
+            } else {
+                keys.push(backup_key(&x));
+            }
+        }
+        let backups = self.list(usb, &dir).unwrap_or_default();
+        for b in backups.iter().filter(|b| !b.is_dir && keys.iter().any(|k| b.name.starts_with(k.as_str()))) {
+            match self.delete(usb, b) {
+                Ok(()) => kprintln!("library: dropped original \"{}\"", b.name),
+                Err(err) => kprintln!("library: couldn't drop original \"{}\": {:?}", b.name, err),
+            }
+        }
     }
 
     /// Save an edited copy next to the original (or in "<date> Edited" for photos from
@@ -524,27 +567,54 @@ impl Storage {
     /// Replace a library photo with its edited version, keeping the first original hidden
     /// in /Originals so it can be restored.
     pub fn replace(&mut self, usb: &mut Usb, folder: &DirEntry, entry: &DirEntry, jpeg: &[u8]) -> Result<DirEntry, FsError> {
-        if self.backup_of(usb, folder, &entry.name).is_none() {
-            let original = self.read_file(usb, entry)?;
-            let backups = self.originals_for(usb, &folder.name, true)?.ok_or(FsError::Io)?;
-            self.create_in(usb, &backups, &entry.name, &original)?;
-        }
+        // Keep the original safe first (under a temporary name), then swap the photo.
+        let (backup, original_as) = match self.backup_of(usb, folder, entry) {
+            Some((_, b)) => {
+                let n = String::from(original_name(&b.name));
+                (b, n)
+            }
+            None => {
+                let original = self.read_file(usb, entry)?;
+                let dir = self.originals_dir(usb, true)?.ok_or(FsError::Io)?;
+                let existing = self.names_in(usb, &dir)?;
+                let tmp = unique_name(&existing, &format!("pending {}", entry.name), u64::MAX).ok_or(FsError::Exists)?;
+                (self.create_in(usb, &dir, &tmp, &original)?, entry.name.clone())
+            }
+        };
         self.delete(usb, entry)?;
         let existing = self.names_in(usb, folder)?;
         let name = unique_name(&existing, &format!("{}.jpg", stem(&entry.name)), u64::MAX).ok_or(FsError::Exists)?;
-        self.create_in(usb, folder, &name, jpeg)
+        let edited = self.create_in(usb, folder, &name, jpeg)?;
+        self.rekey_backup(usb, &backup, &original_as, &edited)?;
+        Ok(edited)
     }
 
     /// Put the hidden original back in place of the edited photo.
     pub fn revert(&mut self, usb: &mut Usb, folder: &DirEntry, entry: &DirEntry) -> Result<DirEntry, FsError> {
-        let (_, backup) = self.backup_of(usb, folder, &entry.name).ok_or(FsError::Io)?;
+        let (_, backup) = self.backup_of(usb, folder, entry).ok_or(FsError::Io)?;
         let data = self.read_file(usb, &backup)?;
         self.delete(usb, entry)?;
         let existing = self.names_in(usb, folder)?;
-        let name = unique_name(&existing, &backup.name, u64::MAX).ok_or(FsError::Exists)?;
+        let name = unique_name(&existing, original_name(&backup.name), u64::MAX).ok_or(FsError::Exists)?;
         let restored = self.create_in(usb, folder, &name, &data)?;
         self.delete(usb, &backup)?;
         Ok(restored)
+    }
+}
+
+/// "<cluster>-<size> " for a library file (see `Storage::backup_of`).
+fn backup_key(e: &DirEntry) -> String {
+    format!("{}-{} ", e.first_cluster, e.size)
+}
+
+/// A backup's original file name, without its key or "pending " prefix.
+fn original_name(backup: &str) -> &str {
+    if let Some(rest) = backup.strip_prefix("pending ") {
+        return rest;
+    }
+    match backup.split_once(' ') {
+        Some((key, rest)) if !rest.is_empty() && key.split_once('-').is_some_and(|(a, b)| !a.is_empty() && !b.is_empty() && a.bytes().chain(b.bytes()).all(|c| c.is_ascii_digit())) => rest,
+        _ => backup,
     }
 }
 
@@ -571,5 +641,75 @@ pub fn stem(name: &str) -> &str {
     match name.rfind('.') {
         Some(i) if i > 0 => &name[..i],
         _ => name,
+    }
+}
+
+impl Storage {
+    /// Test hook (boot option "selftest=originals"). Uses the first library photo and
+    /// leaves it as it was.
+    pub fn self_test_originals(&mut self, usb: &mut Usb) -> Result<(), String> {
+        let fail = |what: &str| Err(format!("{}", what));
+        let e2s = |e: FsError| format!("{:?}", e);
+        let Some((dir, photo)) = self.all_photos(usb).into_iter().next() else { return fail("no photo in the library") };
+        let original = self.read_file(usb, &photo).map_err(e2s)?;
+        let mut edited_bytes = original.clone();
+        edited_bytes.extend_from_slice(b"selftest edit");
+        kprintln!("selftest: using \"{}\" in \"{}\"", photo.name, dir.name);
+
+        let edited = self.replace(usb, &dir, &photo, &edited_bytes).map_err(e2s)?;
+        if self.backup_of(usb, &dir, &edited).is_none() {
+            return fail("no original after replace");
+        }
+        let renamed = self.rename(usb, &edited, &dir, "selftest renamed.jpg").map_err(e2s)?;
+        if self.backup_of(usb, &dir, &renamed).is_none() {
+            return fail("original lost after rename");
+        }
+        let root = self.root(usb).map_err(e2s)?;
+        let folder = self.mkdir_in(usb, &root, "selftest folder").map_err(e2s)?;
+        let moved = self.move_to(usb, &renamed, &folder).map_err(e2s)?;
+        if self.backup_of(usb, &folder, &moved).is_none() {
+            return fail("original lost after move");
+        }
+        self.recycle(usb, &moved, "selftest folder").map_err(e2s)?;
+        let bin = self.bin_dir(usb, false).map_err(e2s)?.ok_or("no bin")?;
+        let (in_bin, from) = self.bin_items(usb).into_iter().find(|(e, _)| e.name == moved.name).ok_or("not in the bin")?;
+        if self.backup_of(usb, &bin, &in_bin).is_none() {
+            return fail("original lost in the Recycle bin");
+        }
+        let back_name = self.restore(usb, &in_bin, &from).map_err(e2s)?;
+        let folder = self.with(usb, |vol, d| vol.find(d, &root, "selftest folder")).map_err(e2s)?.ok_or("folder gone")?;
+        let back = self.list(usb, &folder).map_err(e2s)?.into_iter().find(|e| e.name == back_name).ok_or("restored file missing")?;
+        if self.backup_of(usb, &folder, &back).is_none() {
+            return fail("original lost after restore");
+        }
+        let reverted = self.revert(usb, &folder, &back).map_err(e2s)?;
+        if reverted.name != photo.name {
+            return Err(format!("reverted name is \"{}\"", reverted.name));
+        }
+        if self.read_file(usb, &reverted).map_err(e2s)? != original {
+            return fail("reverted photo differs from the original");
+        }
+        if self.backup_of(usb, &folder, &reverted).is_some() {
+            return fail("original still kept after revert");
+        }
+
+        // Deleting an edited photo for good drops its original too.
+        let copy = self.create_in(usb, &folder, "selftest copy.jpg", &original).map_err(e2s)?;
+        let copy_edited = self.replace(usb, &folder, &copy, &edited_bytes).map_err(e2s)?;
+        let key = backup_key(&copy_edited);
+        self.recycle(usb, &copy_edited, "selftest folder").map_err(e2s)?;
+        let (c, _) = self.bin_items(usb).into_iter().find(|(e, _)| e.name == copy_edited.name).ok_or("copy not in the bin")?;
+        self.delete_forever(usb, &c).map_err(e2s)?;
+        let odir = self.originals_dir(usb, false).map_err(e2s)?.ok_or("no Originals")?;
+        if self.list(usb, &odir).map_err(e2s)?.iter().any(|b| b.name.starts_with(&key)) {
+            return fail("original kept after delete forever");
+        }
+
+        // Put the photo back where it was.
+        let home = self.move_to(usb, &reverted, &dir).map_err(e2s)?;
+        let folder = self.with(usb, |vol, d| vol.find(d, &root, "selftest folder")).map_err(e2s)?.ok_or("folder gone")?;
+        self.delete(usb, &folder).map_err(e2s)?;
+        kprintln!("selftest: \"{}\" back in \"{}\"", home.name, dir.name);
+        Ok(())
     }
 }
