@@ -19,7 +19,11 @@ nothing to download.
 - Boots from a USB stick on UEFI and older BIOS PCs; on-screen diagnostics (F12) and a crash
   screen for reporting problems
 
-**In progress:** printing to USB printers (IPP over USB and PCL, aimed at HP printers).
+- Printing to USB printers: IPP over USB with PWG Raster (most printers since about 2015)
+  and PCL (older HP printers). Letter, A4, 4x6 and 5x7; fit or fill; 1, 4 or 9 photos per
+  page; colour or black & white; copies. Checked with a test printer and GhostPCL; not yet
+  tried on a real printer.
+
 **Planned:** videos, documents, installing to the internal disk.
 
 ## Making a USB stick
