@@ -9,7 +9,8 @@ use core::sync::atomic::Ordering::Relaxed;
 use crate::interrupts::{HZ, TICKS};
 use crate::memory::Dma;
 use crate::print::{self, IppInfo};
-use crate::xhci::{dma_buf, UsbError, Xhci};
+use crate::hc::Hc;
+use crate::xhci::{dma_buf, UsbError};
 
 pub struct UsbPrinter {
     pub id: u32,
@@ -43,7 +44,7 @@ fn parse_device_id(s: &str) -> (String, String, Vec<String>) {
 
 impl UsbPrinter {
     /// Set up a printer interface that has already had its endpoints configured.
-    pub fn new(hc: &mut Xhci, id: u32, ctrl: usize, slot: u8, iface: u8, alt: u8, proto: u8, ep_out: u8, ep_in: Option<u8>, product: &str) -> UsbPrinter {
+    pub fn new(hc: &mut Hc, id: u32, ctrl: usize, slot: u8, iface: u8, alt: u8, proto: u8, ep_out: u8, ep_in: Option<u8>, product: &str) -> UsbPrinter {
         // IEEE 1284 device ID: who the printer is and which languages it speaks.
         let buf = dma_buf(1024);
         let mut idstr = String::new();
@@ -143,7 +144,7 @@ impl UsbPrinter {
     }
 
     /// Send bytes to the printer's bulk OUT endpoint.
-    pub fn send(&mut self, hc: &mut Xhci, data: &[u8]) -> Result<(), UsbError> {
+    pub fn send(&mut self, hc: &mut Hc, data: &[u8]) -> Result<(), UsbError> {
         for chunk in data.chunks(64 * 1024) {
             self.buf.bytes_mut()[..chunk.len()].copy_from_slice(chunk);
             // A printer that's busy (warming up, buffer full) just makes us wait.
@@ -153,7 +154,7 @@ impl UsbPrinter {
     }
 
     /// One HTTP/IPP exchange over USB. Returns the IPP response body.
-    pub fn ipp_request(&mut self, hc: &mut Xhci, ipp: &[u8]) -> Result<Vec<u8>, &'static str> {
+    pub fn ipp_request(&mut self, hc: &mut Hc, ipp: &[u8]) -> Result<Vec<u8>, &'static str> {
         let din = self.dci_in.ok_or("printer can't answer")?;
         self.send(hc, &print::http_post(ipp)).map_err(|_| "couldn't send to the printer")?;
         let mut resp = Vec::new();

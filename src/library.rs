@@ -129,8 +129,8 @@ fn create_on(dev: &mut dyn BlockDev, total: u64, name: &str, min_start: u64) -> 
 impl Storage {
     /// Find the library: Solon's own boot stick first (setting it up on first boot),
     /// then internal disks.
-    pub fn init(usb: &mut Usb) -> Storage {
-        let mut disks = disk::scan();
+    pub fn init(usb: &mut Usb, disks: Vec<InternalDisk>) -> Storage {
+        let mut disks = disks;
         let mut library = None;
 
         if let Some(id) = usb.boot_drive() {

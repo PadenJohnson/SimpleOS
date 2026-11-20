@@ -24,6 +24,25 @@ impl LogBuf {
     }
 
     /// Call `f` with each of the last `max` lines, oldest first.
+    /// Every line still in the log, oldest first.
+    pub fn lines(&self) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
+        let len = self.written.min(LOG_SIZE);
+        let mut out = alloc::vec::Vec::new();
+        let mut cur = alloc::vec::Vec::new();
+        for k in self.written - len..self.written {
+            let b = self.buf[k % LOG_SIZE];
+            if b == b'\n' {
+                out.push(core::mem::take(&mut cur));
+            } else if cur.len() < 160 {
+                cur.push(b);
+            }
+        }
+        if len == LOG_SIZE && !out.is_empty() {
+            out.remove(0); // probably cut off at the start
+        }
+        out
+    }
+
     pub fn last_lines(&self, max: usize, mut f: impl FnMut(&[u8])) {
         let len = self.written.min(LOG_SIZE);
         let start = self.written - len;

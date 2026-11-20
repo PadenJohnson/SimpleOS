@@ -4,7 +4,8 @@
 use alloc::string::String;
 
 use crate::memory::Dma;
-use crate::xhci::{dma_buf, UsbError, Xhci};
+use crate::hc::Hc;
+use crate::xhci::{dma_buf, UsbError};
 
 /// Largest single READ: one DMA buffer, which must not cross a 64 KiB boundary.
 pub const MAX_XFER: usize = 64 * 1024;
@@ -67,7 +68,7 @@ impl MassStorage {
     }
 
     /// Identify the drive and wait until it's ready.
-    pub fn start(&mut self, hc: &mut Xhci) -> Result<(), IoError> {
+    pub fn start(&mut self, hc: &mut Hc) -> Result<(), IoError> {
         // INQUIRY: vendor + product names.
         let mut cb = [0u8; 6];
         cb[0] = 0x12;
@@ -117,7 +118,7 @@ impl MassStorage {
         Ok(())
     }
 
-    fn request_sense(&mut self, hc: &mut Xhci) {
+    fn request_sense(&mut self, hc: &mut Hc) {
         let mut cb = [0u8; 6];
         cb[0] = 0x03;
         cb[4] = 18;
@@ -125,7 +126,7 @@ impl MassStorage {
     }
 
     /// Read `out.len() / block_size` blocks starting at `lba`.
-    pub fn read(&mut self, hc: &mut Xhci, lba: u64, out: &mut [u8]) -> Result<(), IoError> {
+    pub fn read(&mut self, hc: &mut Hc, lba: u64, out: &mut [u8]) -> Result<(), IoError> {
         let bs = self.block_size as usize;
         let per = MAX_XFER / bs;
         let mut done = 0usize;
@@ -169,7 +170,7 @@ impl MassStorage {
 
     /// Write blocks. Only for Solon's own boot stick (`usb::Usb::boot_disk`) and, when the user
     /// asks, Copy to USB (`usb_create`, add-only) and Erase (`format_drive`, never the boot stick).
-    pub fn write(&mut self, hc: &mut Xhci, lba: u64, data: &[u8]) -> Result<(), IoError> {
+    pub fn write(&mut self, hc: &mut Hc, lba: u64, data: &[u8]) -> Result<(), IoError> {
         let bs = self.block_size as usize;
         let per = MAX_XFER / bs;
         let total = data.len() / bs;
@@ -211,7 +212,7 @@ impl MassStorage {
     }
 
     /// SYNCHRONIZE CACHE: make sure written data is really on the stick.
-    pub fn flush(&mut self, hc: &mut Xhci) -> Result<(), IoError> {
+    pub fn flush(&mut self, hc: &mut Hc) -> Result<(), IoError> {
         let mut cb = [0u8; 10];
         cb[0] = 0x35;
         match self.command(hc, &cb, false, 0) {
@@ -222,7 +223,7 @@ impl MassStorage {
 
     /// One Bulk-Only Transport command: CBW out, optional data in, CSW in.
     /// Returns the number of data bytes received.
-    fn command(&mut self, hc: &mut Xhci, cb: &[u8], dir_in: bool, len: usize) -> Result<usize, IoError> {
+    fn command(&mut self, hc: &mut Hc, cb: &[u8], dir_in: bool, len: usize) -> Result<usize, IoError> {
         if !hc.has_slot(self.slot) {
             return Err(IoError::Usb(UsbError::NoDevice));
         }
@@ -291,13 +292,13 @@ impl MassStorage {
         }
     }
 
-    fn clear_halt(&mut self, hc: &mut Xhci, dci: u8, ep_addr: u8) {
+    fn clear_halt(&mut self, hc: &mut Hc, dci: u8, ep_addr: u8) {
         let _ = hc.recover_endpoint(self.slot, dci);
         let _ = hc.control(self.slot, 0x02, 0x01, 0, ep_addr as u16, None); // CLEAR_FEATURE(ENDPOINT_HALT)
     }
 
     /// Bulk-Only Mass Storage Reset, then clear both endpoints.
-    fn reset_recovery(&mut self, hc: &mut Xhci) {
+    fn reset_recovery(&mut self, hc: &mut Hc) {
         if !hc.has_slot(self.slot) {
             return;
         }

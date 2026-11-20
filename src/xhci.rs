@@ -788,6 +788,21 @@ fn intel_route_ports(dev: &pci::Device, to_xhci: bool) -> bool {
 }
 
 impl Xhci {
+    pub fn ports(&self) -> u8 {
+        self.max_ports
+    }
+
+    /// Give moved Intel ports back to the USB 2 controller.
+    pub fn unswitch_ports(&mut self) {
+        if self.switched_ports {
+            intel_route_ports(&self.pci, false);
+            self.switched_ports = false;
+            kprintln!("xhci: Intel ports given back to the USB 2 controller");
+        }
+    }
+}
+
+impl Xhci {
     /// Before switching off: stop the controller, give Intel ports back to the USB 2
     /// controller, stop it waking the PC, and put it to sleep (D3).
     pub fn shutdown(&mut self) {

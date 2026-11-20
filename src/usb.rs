@@ -14,6 +14,8 @@ use crate::usbprint::UsbPrinter;
 use crate::phone::Phone;
 use crate::pci;
 use crate::ps2;
+use crate::ehci::Ehci;
+use crate::hc::Hc;
 use crate::xhci::{dma_buf, EpConfig, EpType, Speed, UsbError, Xhci, CC_SHORT, CC_SUCCESS};
 
 pub struct Drive {
@@ -71,7 +73,7 @@ struct Hub {
 }
 
 pub struct Usb {
-    hcs: Vec<Xhci>,
+    hcs: Vec<Hc>,
     devs: Vec<Dev>,
     hubs: Vec<Hub>,
     hids: Vec<Hid>,
@@ -86,7 +88,7 @@ pub struct Usb {
 
 /// A drive as a block device for the file system code.
 struct Disk<'a> {
-    hc: &'a mut Xhci,
+    hc: &'a mut Hc,
     ms: &'a mut MassStorage,
 }
 
@@ -105,7 +107,7 @@ impl BlockDev for Disk<'_> {
 /// Solon's own boot stick as a *writable* block device. This is the only way to write to
 /// any USB drive, and it can only be obtained for the drive Solon booted from.
 pub struct BootDisk<'a> {
-    hc: &'a mut Xhci,
+    hc: &'a mut Hc,
     ms: &'a mut MassStorage,
 }
 
@@ -218,35 +220,44 @@ const PORT_POWER: u16 = 8;
 const C_PORT_CONNECTION: u16 = 16;
 const C_PORT_RESET: u16 = 20;
 
-fn hub_port_status(hc: &mut Xhci, slot: u8, port: u8) -> Option<(u16, u16)> {
+fn hub_port_status(hc: &mut Hc, slot: u8, port: u8) -> Option<(u16, u16)> {
     let buf = dma_buf(4);
     hc.control(slot, HUB_PORT_STATUS, 0, 0, port as u16, Some((&buf, 4))).ok()?;
     let b = buf.bytes();
     Some((u16::from_le_bytes([b[0], b[1]]), u16::from_le_bytes([b[2], b[3]])))
 }
 
-fn hub_clear(hc: &mut Xhci, slot: u8, port: u8, feature: u16) {
+fn hub_clear(hc: &mut Hc, slot: u8, port: u8, feature: u16) {
     let _ = hc.control(slot, HUB_SET_PORT_FEATURE, 1, feature, port as u16, None);
 }
 
 impl Usb {
-    pub fn init(boot_disk: Option<[u8; 16]>) -> Usb {
+    /// `expect_stick`: Solon started from a USB stick (not an internal disk), so wait for it.
+    pub fn init(boot_disk: Option<[u8; 16]>, expect_stick: bool) -> Usb {
         let mut hcs = Vec::new();
+        let mut ehcis = Vec::new();
         for d in pci::scan() {
             if d.class == 0x0C && d.subclass == 0x03 {
                 match d.prog_if {
                     0x30 => match Xhci::init(&d) {
-                        Some(hc) => hcs.push(hc),
+                        Some(hc) => hcs.push(Hc::X(hc)),
                         None => kprintln!("usb: xHCI {:04x}:{:04x} failed to start", d.vendor, d.device),
                     },
-                    0x20 => kprintln!("usb: EHCI (USB 2) controller found; not supported yet"),
+                    0x20 => ehcis.push(d),
                     0x00 | 0x10 => kprintln!("usb: UHCI/OHCI (USB 1) controller found; not supported yet"),
                     _ => {}
                 }
             }
         }
+        // USB 2 controllers after the USB 3 ones (which may have taken some of their ports).
+        for d in ehcis {
+            match Ehci::init(&d) {
+                Some(hc) => hcs.push(Hc::E(hc)),
+                None => kprintln!("usb: EHCI {:04x}:{:04x} failed to start", d.vendor, d.device),
+            }
+        }
         if hcs.is_empty() {
-            kprintln!("usb: no xHCI controller");
+            kprintln!("usb: no USB controller Solon can use");
         }
         let mut usb = Usb {
             hcs,
@@ -261,16 +272,6 @@ impl Usb {
             boot_disk,
         };
         usb.poll();
-        // Ports moved over from the USB 2 controller reconnect a moment later: wait for them
-        // (up to 2 s), so Solon's own stick is found before its storage is looked for.
-        if usb.hcs.iter().any(|h| h.switched_ports) {
-            let end = TICKS.load(Relaxed) + 2 * HZ;
-            while TICKS.load(Relaxed) < end && !(usb.boot_disk.is_some() && usb.boot_drive().is_some()) {
-                crate::interrupts::sleep_ms(50);
-                usb.poll();
-            }
-            kprintln!("usb: {} drive(s) after moving ports", usb.drives.len());
-        }
         // Devices behind hubs need a few rounds of hub polling to appear.
         for _ in 0..3 {
             if usb.hubs.is_empty() {
@@ -279,6 +280,10 @@ impl Usb {
             usb.next_hub_poll = 0;
             usb.poll();
         }
+        if expect_stick {
+            usb.find_stick();
+        }
+        usb.log_ports();
         usb
     }
 
@@ -818,7 +823,7 @@ fn keyboard_report(prev: &[u8; 8], now: &[u8; 8]) {
     }
 }
 
-fn string_descriptor(hc: &mut Xhci, slot: u8, index: u8) -> String {
+fn string_descriptor(hc: &mut Hc, slot: u8, index: u8) -> String {
     if index == 0 {
         return String::new();
     }
@@ -917,5 +922,50 @@ impl Usb {
     /// The ID of the disk Solon started from (from the bootloader), if it has one.
     pub fn boot_disk_id(&self) -> Option<[u8; 16]> {
         self.boot_disk
+    }
+}
+
+impl Usb {
+    /// Keep polling (devices behind hubs, ports that were just moved) until Solon's own stick
+    /// shows up or `secs` pass.
+    fn wait_for_stick(&mut self, secs: u64) -> bool {
+        let end = TICKS.load(Relaxed) + secs * HZ;
+        while self.boot_drive().is_none() && TICKS.load(Relaxed) < end {
+            crate::interrupts::sleep_ms(50);
+            self.poll();
+        }
+        self.boot_drive().is_some()
+    }
+
+    /// Solon started from a USB stick: find it before Solon storage is looked for.
+    fn find_stick(&mut self) {
+        if self.wait_for_stick(3) {
+            kprintln!("usb: found Solon's stick");
+            return;
+        }
+        // On Intel chipsets the stick may only work through the USB 2 controller: give the
+        // moved ports back and look again there.
+        if self.hcs.iter().any(|h| h.switched_ports()) {
+            for hc in &mut self.hcs {
+                hc.unswitch_ports();
+            }
+            if self.wait_for_stick(4) {
+                kprintln!("usb: found Solon's stick after giving ports back to USB 2");
+                return;
+            }
+        }
+        kprintln!("usb: Solon's stick wasn't found on any USB controller");
+    }
+
+    /// For the diagnostics screen: every controller and what's plugged into its ports.
+    fn log_ports(&self) {
+        for (i, hc) in self.hcs.iter().enumerate() {
+            let used: Vec<u8> = (1..=hc.ports()).filter(|&p| hc.portsc(p) & 1 != 0).collect();
+            kprintln!("usb: controller {} ({} {}): {} ports, connected: {:?}", i, hc.kind(), hc.name(), hc.ports(), used);
+            for p in used {
+                kprintln!("usb:   port {} status {:#010x}", p, hc.portsc(p));
+            }
+        }
+        kprintln!("usb: {} device(s), {} drive(s), {} hub(s)", self.devs.len(), self.drives.len(), self.hubs.len());
     }
 }

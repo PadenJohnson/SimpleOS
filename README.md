@@ -12,7 +12,8 @@ nothing to download.
 - Photos: thumbnail grid, full-screen viewer, and an editor (rotate, crop with print shapes,
   brightness/contrast/saturation/warmth, Auto-fix, filters, undo, save as copy or replace
   with revert)
-- USB: keyboards, mice, hubs, USB drives and SD card readers (FAT12/16/32 and exFAT).
+- USB: USB 3 (xHCI) and USB 2 (EHCI) controllers: USB drives, SD card readers (FAT12/16/32
+  and exFAT), hubs, printers and phones on either; keyboards and mice on USB 3 ports.
   USB drives are only changed when you ask: Files can add copies to them (never changing or
   deleting what is already there), and Disks can erase one after two warnings.
 - Storage: a "Solon Library" partition on the SimpleOS USB stick itself or in free space on

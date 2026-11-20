@@ -16,9 +16,11 @@ mod diskmgr;
 mod documents;
 mod editor;
 mod edit;
+mod ehci;
 mod files;
 mod fs;
 mod gfx;
+mod hc;
 mod icons;
 mod import;
 mod image;
@@ -200,12 +202,20 @@ extern "C" fn kmain() -> ! {
 
     // USB: controllers, keyboards/mice, and drives already plugged in.
     let t0 = TICKS.load(Relaxed);
-    let mut usb = Usb::init(boot_disk);
+    // Internal disks first: if Solon started from one, it isn't waiting for a USB stick.
+    let mut disks = disk::scan();
+    let boot_internal = boot_disk.is_some_and(|id| {
+        disks.iter_mut().any(|d| {
+            let total = d.blocks;
+            fs::part::disk_guid(d, total) == Some(id)
+        })
+    });
+    let mut usb = Usb::init(boot_disk, boot_disk.is_some() && !boot_internal);
     // Boot option "testphone": a pretend phone (QEMU can't emulate one here).
     if EXECUTABLE_CMDLINE_REQUEST.get_response().and_then(|r| r.cmdline().to_str().ok()).is_some_and(|c| c.split_whitespace().any(|w| w == "testphone")) {
         usb.add_test_phone();
     }
-    let mut storage = Storage::init(&mut usb);
+    let mut storage = Storage::init(&mut usb, disks);
     kprintln!("solon: usb ready in {} ms, {} drive(s)", (TICKS.load(Relaxed) - t0) * 1000 / HZ, usb.drives.len());
 
     // Power off / restart need the ACPI tables.

@@ -128,6 +128,8 @@ pub struct Desktop {
     capture: bool,
     /// F12 diagnostics overlay.
     show_log: bool,
+    /// Diagnostics: how many lines up from the newest.
+    log_scroll: usize,
     test_printer: Option<PrinterInfo>,
     pending_print: Option<(Vec<Source>, Layout, PrinterInfo)>,
     settings: Settings,
@@ -247,6 +249,7 @@ impl Desktop {
             job: None,
             capture: false,
             show_log: false,
+            log_scroll: 0,
             test_printer: None,
             pending_print: None,
             settings,
@@ -686,11 +689,17 @@ impl Desktop {
         let (w, h) = (self.w, self.h);
         c.fill_rect_alpha(0, 0, w, h, rgb(10, 12, 16), 235);
         c.text(24, 16, "Solon diagnostics", Size::Medium, true, rgb(255, 255, 255));
-        let info = format!("Screen {}x{}   |   F12 or Esc to close", w, h);
-        c.text(24, 44, &info, Size::Small, false, rgb(160, 170, 180));
+        let lines = crate::serial::LOG.lock().lines();
         let max = ((h - 90) / 18).max(1) as usize;
+        let end = lines.len() - self.log_scroll.min(lines.len().saturating_sub(max.min(lines.len())));
+        let start = end.saturating_sub(max);
+        let info = format!(
+            "Screen {}x{}   |   Build {}   |   Lines {}-{} of {}   |   Up/Down, Page Up/Down, Home/End to scroll   |   F12 or Esc to close",
+            w, h, env!("SOLON_BUILD"), start + 1, end, lines.len()
+        );
+        c.text(24, 44, &info, Size::Small, false, rgb(160, 170, 180));
         let mut y = 76;
-        crate::serial::LOG.lock().last_lines(max, |line| {
+        for line in &lines[start..end] {
             let s = core::str::from_utf8(line).unwrap_or("?");
             let color = if s.contains("fail") || s.contains("error") || s.contains("FAIL") || s.contains("PANIC") {
                 rgb(255, 140, 120)
@@ -699,7 +708,7 @@ impl Desktop {
             };
             c.text(24, y, s, Size::Small, false, color);
             y += 18;
-        });
+        }
     }
 
     fn fetch(&mut self, src: &Source) -> Result<Bytes, &'static str> {
@@ -1371,14 +1380,22 @@ impl Desktop {
         if sc == 0x58 {
             // F12: diagnostics (kernel log)
             self.show_log = !self.show_log;
+            self.log_scroll = 0;
             return true;
         }
         if self.show_log {
-            if sc == 0x01 {
-                self.show_log = false;
-                return true;
+            let page = ((self.h - 90) / 18).max(1) as usize;
+            match sc {
+                0x01 => self.show_log = false,
+                0x48 => self.log_scroll += 1,
+                0x50 => self.log_scroll = self.log_scroll.saturating_sub(1),
+                0x49 => self.log_scroll += page - 1,
+                0x51 => self.log_scroll = self.log_scroll.saturating_sub(page - 1),
+                0x47 => self.log_scroll = usize::MAX / 2,
+                0x4F => self.log_scroll = 0,
+                _ => return false,
             }
-            return false;
+            return true;
         }
         if self.screen_off {
             if sc & 0x80 == 0 {

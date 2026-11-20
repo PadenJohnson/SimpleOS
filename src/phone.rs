@@ -12,7 +12,8 @@ use alloc::vec::Vec;
 
 use crate::fs::{DirEntry, FsError};
 use crate::memory::Dma;
-use crate::xhci::{UsbError, Xhci};
+use crate::hc::Hc;
+use crate::xhci::UsbError;
 
 // Operation codes
 const GET_DEVICE_INFO: u16 = 0x1001;
@@ -212,7 +213,7 @@ impl Phone {
         }
     }
 
-    fn send(&mut self, hcs: &mut [Xhci], data: &[u8]) -> Result<(), &'static str> {
+    fn send(&mut self, hcs: &mut [Hc], data: &[u8]) -> Result<(), &'static str> {
         match &mut self.link {
             Link::Usb { ctrl, slot, dout, buf, .. } => {
                 let hc = &mut hcs[*ctrl];
@@ -234,7 +235,7 @@ impl Phone {
     }
 
     /// One container from the phone.
-    fn recv_container(&mut self, hcs: &mut [Xhci]) -> Result<Vec<u8>, &'static str> {
+    fn recv_container(&mut self, hcs: &mut [Hc]) -> Result<Vec<u8>, &'static str> {
         match &mut self.link {
             Link::Usb { ctrl, slot, din, buf, .. } => {
                 let hc = &mut hcs[*ctrl];
@@ -272,7 +273,7 @@ impl Phone {
     }
 
     /// One operation: returns (response code, response parameters, data from the phone).
-    fn transact(&mut self, hcs: &mut [Xhci], code: u16, p: &[u32]) -> Result<(u16, Vec<u32>, Vec<u8>), &'static str> {
+    fn transact(&mut self, hcs: &mut [Hc], code: u16, p: &[u32]) -> Result<(u16, Vec<u32>, Vec<u8>), &'static str> {
         let tid = self.tid;
         self.tid = self.tid.wrapping_add(1);
         self.send(hcs, &container(1, code, tid, &params(p)))?;
@@ -295,7 +296,7 @@ impl Phone {
         }
     }
 
-    fn op(&mut self, hcs: &mut [Xhci], code: u16, p: &[u32]) -> Result<Vec<u8>, &'static str> {
+    fn op(&mut self, hcs: &mut [Hc], code: u16, p: &[u32]) -> Result<Vec<u8>, &'static str> {
         let (resp, _, data) = self.transact(hcs, code, p)?;
         match resp {
             OK => Ok(data),
@@ -312,7 +313,7 @@ impl Phone {
 
     /// Who the phone is, open a session and find its storage. Called once when it's plugged in
     /// (and again by `retry` when it had nothing to share).
-    pub fn start(&mut self, hcs: &mut [Xhci]) {
+    pub fn start(&mut self, hcs: &mut [Hc]) {
         if self.ops.is_empty() {
             match self.op(hcs, GET_DEVICE_INFO, &[]) {
                 Ok(d) => {
@@ -399,7 +400,7 @@ impl Phone {
     }
 
     /// Ask again (after the user unlocked the phone or allowed access).
-    pub fn retry(&mut self, hcs: &mut [Xhci]) -> bool {
+    pub fn retry(&mut self, hcs: &mut [Hc]) -> bool {
         let before = self.storages.len();
         self.start(hcs);
         self.storages.len() != before
@@ -415,7 +416,7 @@ impl Phone {
     }
 
     /// Files and folders in a folder (`first_cluster` holds the phone's object handle).
-    pub fn list(&mut self, hcs: &mut [Xhci], vol: usize, dir: &DirEntry) -> Result<Vec<DirEntry>, FsError> {
+    pub fn list(&mut self, hcs: &mut [Hc], vol: usize, dir: &DirEntry) -> Result<Vec<DirEntry>, FsError> {
         let storage = self.storages.get(vol).ok_or(FsError::Io)?.id;
         let handles = match self.op(hcs, GET_OBJECT_HANDLES, &[storage, 0, dir.first_cluster]) {
             Ok(d) => Rd { b: &d, p: 0 }.array32(),
@@ -448,7 +449,7 @@ impl Phone {
     }
 
     /// A whole file.
-    pub fn read_file(&mut self, hcs: &mut [Xhci], file: &DirEntry) -> Result<Vec<u8>, FsError> {
+    pub fn read_file(&mut self, hcs: &mut [Hc], file: &DirEntry) -> Result<Vec<u8>, FsError> {
         if file.size > PIECE as u64 && (self.supports(GET_PARTIAL_OBJECT) || self.supports(GET_PARTIAL_OBJECT_64)) {
             let mut out = Vec::with_capacity(file.size as usize);
             let mut off = 0u64;
@@ -469,7 +470,7 @@ impl Phone {
     }
 
     /// Up to `len` bytes of a file starting at `offset` (for big files, a piece at a time).
-    pub fn read_part(&mut self, hcs: &mut [Xhci], file: &DirEntry, offset: u64, len: usize) -> Result<Vec<u8>, FsError> {
+    pub fn read_part(&mut self, hcs: &mut [Hc], file: &DirEntry, offset: u64, len: usize) -> Result<Vec<u8>, FsError> {
         let len = len.min((file.size - offset.min(file.size)) as usize);
         let r = if self.supports(GET_PARTIAL_OBJECT_64) {
             self.op(hcs, GET_PARTIAL_OBJECT_64, &[file.first_cluster, offset as u32, (offset >> 32) as u32, len as u32])
