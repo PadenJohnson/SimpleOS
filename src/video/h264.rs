@@ -79,7 +79,7 @@ impl Bits {
 // ---- tables ------------------------------------------------------------------------------
 
 /// coeff_token lengths/codes for nC 0-1, 2-3, 4-7, 8+; index total_coeff*4 + trailing_ones.
-const CT_LEN: [[u8; 68]; 4] = [
+pub(crate) const CT_LEN: [[u8; 68]; 4] = [
     [
         1, 0, 0, 0, 6, 2, 0, 0, 8, 6, 3, 0, 9, 8, 7, 5, 10, 9, 8, 6, 11, 10, 9, 7, 13, 11, 10, 8, 13, 13, 11, 9, 13, 13, 13, 10, 14, 14, 13, 11, 14, 14, 14, 13, 15, 15, 14, 14, 15, 15,
         15, 14, 16, 15, 15, 15, 16, 16, 16, 15, 16, 16, 16, 16, 16, 16, 16, 16,
@@ -94,7 +94,7 @@ const CT_LEN: [[u8; 68]; 4] = [
     ],
     [6; 68],
 ];
-const CT_BITS: [[u8; 68]; 4] = [
+pub(crate) const CT_BITS: [[u8; 68]; 4] = [
     [
         1, 0, 0, 0, 5, 1, 0, 0, 7, 4, 1, 0, 7, 6, 5, 3, 7, 6, 5, 3, 7, 6, 5, 4, 15, 6, 5, 4, 11, 14, 5, 4, 8, 10, 13, 4, 15, 14, 9, 4, 11, 10, 13, 12, 15, 14, 9, 12, 11, 10, 13, 8,
         15, 1, 9, 12, 11, 14, 13, 8, 7, 10, 9, 12, 4, 6, 5, 8,
@@ -113,11 +113,11 @@ const CT_BITS: [[u8; 68]; 4] = [
     ],
 ];
 /// Chroma DC (nC = -1).
-const CDC_LEN: [u8; 20] = [2, 0, 0, 0, 6, 1, 0, 0, 6, 6, 3, 0, 6, 7, 7, 6, 6, 8, 8, 7];
-const CDC_BITS: [u8; 20] = [1, 0, 0, 0, 7, 1, 0, 0, 4, 6, 1, 0, 3, 3, 2, 5, 2, 3, 2, 0];
+pub(crate) const CDC_LEN: [u8; 20] = [2, 0, 0, 0, 6, 1, 0, 0, 6, 6, 3, 0, 6, 7, 7, 6, 6, 8, 8, 7];
+pub(crate) const CDC_BITS: [u8; 20] = [1, 0, 0, 0, 7, 1, 0, 0, 4, 6, 1, 0, 3, 3, 2, 5, 2, 3, 2, 0];
 
 /// total_zeros, indexed [total_coeff - 1][total_zeros].
-const TZ_LEN: [&[u8]; 15] = [
+pub(crate) const TZ_LEN: [&[u8]; 15] = [
     &[1, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 9],
     &[3, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 6, 6, 6, 6],
     &[4, 3, 3, 3, 4, 4, 3, 3, 4, 5, 5, 6, 5, 6],
@@ -134,7 +134,7 @@ const TZ_LEN: [&[u8]; 15] = [
     &[2, 2, 1],
     &[1, 1],
 ];
-const TZ_BITS: [&[u8]; 15] = [
+pub(crate) const TZ_BITS: [&[u8]; 15] = [
     &[1, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 1],
     &[7, 6, 5, 4, 3, 5, 4, 3, 2, 3, 2, 3, 2, 1, 0],
     &[5, 7, 6, 5, 4, 3, 4, 3, 2, 3, 2, 1, 1, 0],
@@ -152,19 +152,19 @@ const TZ_BITS: [&[u8]; 15] = [
     &[0, 1],
 ];
 /// Chroma DC total_zeros, [total_coeff - 1][total_zeros].
-const CTZ_LEN: [&[u8]; 3] = [&[1, 2, 3, 3], &[1, 2, 2], &[1, 1]];
-const CTZ_BITS: [&[u8]; 3] = [&[1, 1, 1, 0], &[1, 1, 0], &[1, 0]];
+pub(crate) const CTZ_LEN: [&[u8]; 3] = [&[1, 2, 3, 3], &[1, 2, 2], &[1, 1]];
+pub(crate) const CTZ_BITS: [&[u8]; 3] = [&[1, 1, 1, 0], &[1, 1, 0], &[1, 0]];
 /// run_before, [min(zeros_left, 7) - 1][run_before].
-const RUN_LEN: [&[u8]; 7] = [&[1, 1], &[1, 2, 2], &[2, 2, 2, 2], &[2, 2, 2, 3, 3], &[2, 2, 3, 3, 3, 3], &[2, 3, 3, 3, 3, 3, 3], &[3, 3, 3, 3, 3, 3, 3, 4, 5, 6, 7, 8, 9, 10, 11]];
-const RUN_BITS: [&[u8]; 7] = [&[1, 0], &[1, 1, 0], &[3, 2, 1, 0], &[3, 2, 1, 1, 0], &[3, 2, 3, 2, 1, 0], &[3, 0, 1, 3, 2, 5, 4], &[7, 6, 5, 4, 3, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1]];
+pub(crate) const RUN_LEN: [&[u8]; 7] = [&[1, 1], &[1, 2, 2], &[2, 2, 2, 2], &[2, 2, 2, 3, 3], &[2, 2, 3, 3, 3, 3], &[2, 3, 3, 3, 3, 3, 3], &[3, 3, 3, 3, 3, 3, 3, 4, 5, 6, 7, 8, 9, 10, 11]];
+pub(crate) const RUN_BITS: [&[u8]; 7] = [&[1, 0], &[1, 1, 0], &[3, 2, 1, 0], &[3, 2, 1, 1, 0], &[3, 2, 3, 2, 1, 0], &[3, 0, 1, 3, 2, 5, 4], &[7, 6, 5, 4, 3, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1]];
 
 /// Exp-Golomb code number -> coded_block_pattern, for inter macroblocks.
-const GOLOMB_TO_INTER_CBP: [u8; 48] = [
+pub(crate) const GOLOMB_TO_INTER_CBP: [u8; 48] = [
     0, 16, 1, 2, 4, 8, 32, 3, 5, 10, 12, 15, 47, 7, 11, 13, 14, 6, 9, 31, 35, 37, 42, 44, 33, 34, 36, 40, 39, 43, 45, 46, 17, 18, 20, 24, 19, 21, 26, 28, 23, 27, 29, 30, 22, 25, 38, 41,
 ];
 
 /// 4x4 zigzag: scan position -> raster index.
-const ZIGZAG: [usize; 16] = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];
+pub(crate) const ZIGZAG: [usize; 16] = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];
 
 /// Forward quantization multipliers and inverse scales by (qp % 6, position class).
 const MF: [[i32; 3]; 6] = [[13107, 5243, 8066], [11916, 4660, 7490], [10082, 4194, 6554], [9362, 3647, 5825], [8192, 3355, 5243], [7282, 2893, 4559]];
@@ -480,6 +480,11 @@ impl Encoder {
         }
     }
 
+    /// What a decoder should show for the last frame (for tests).
+    pub fn recon(&self) -> Option<&Yuv> {
+        self.reference.as_ref()
+    }
+
     pub fn sps(&self) -> Vec<u8> {
         let mut b = Bits::new();
         b.put(0x67, 8); // NAL header: ref_idc 3, type 7
@@ -503,7 +508,31 @@ impl Encoder {
             b.ue(0);
             b.ue(cb as u32 / 2);
         }
-        b.flag(false); // no VUI
+        // VUI: say the colours are BT.601 (what from_rgb uses), and that frames come out
+        // in order (no reordering), so players show them straight away.
+        b.flag(true);
+        b.flag(false); // aspect ratio
+        b.flag(false); // overscan
+        b.flag(true); // video signal type
+        b.put(5, 3); // video_format: unspecified
+        b.flag(false); // limited range
+        b.flag(true); // colour description
+        b.put(6, 8); // primaries: SMPTE 170M
+        b.put(6, 8); // transfer
+        b.put(6, 8); // matrix: BT.601
+        b.flag(false); // chroma location
+        b.flag(false); // timing
+        b.flag(false); // NAL HRD
+        b.flag(false); // VCL HRD
+        b.flag(false); // pic_struct
+        b.flag(true); // bitstream restriction
+        b.flag(true); // motion vectors over picture boundaries
+        b.ue(2); // max_bytes_per_pic_denom
+        b.ue(1); // max_bits_per_mb_denom
+        b.ue(16); // log2_max_mv_length_horizontal
+        b.ue(16); // log2_max_mv_length_vertical
+        b.ue(0); // max_num_reorder_frames
+        b.ue(1); // max_dec_frame_buffering
         b.finish()
     }
 

@@ -11,6 +11,7 @@ use crate::gfx::Size;
 use crate::image::Image;
 use crate::photos::Source;
 use crate::video::avi::{Avi, Sound};
+use crate::video::mp4src::{frame_rgb, Mp4Source};
 use crate::video::{flac, h264, mp4};
 
 pub const RATE: u32 = 48_000;
@@ -39,6 +40,7 @@ pub struct Media {
     /// Length (videos, music), in ms.
     pub len_ms: u64,
     pub avi: Option<Avi>,
+    pub mp4: Option<Mp4Source>,
     pub sound: Option<Sound>,
     pub thumb: Option<Image>,
     /// Couldn't be read.
@@ -47,7 +49,7 @@ pub struct Media {
 
 impl Media {
     pub fn new(kind: Kind, name: String, path: String, src: Source, size: u64) -> Media {
-        Media { kind, name, path, src, size, len_ms: 0, avi: None, sound: None, thumb: None, broken: None }
+        Media { kind, name, path, src, size, len_ms: 0, avi: None, mp4: None, sound: None, thumb: None, broken: None }
     }
 
     /// Read the index of a video / music file (once).
@@ -57,7 +59,7 @@ impl Media {
         }
         let ready = match self.kind {
             Kind::Photo => true,
-            Kind::Video => self.avi.is_some(),
+            Kind::Video => self.avi.is_some() || self.mp4.is_some(),
             Kind::Music => self.sound.is_some(),
         };
         if ready {
@@ -67,11 +69,21 @@ impl Media {
         let size = self.size;
         let mut read = |off: u64, len: usize| io.read(&src, off, len);
         match self.kind {
-            Kind::Video => match Avi::parse(&mut read, size) {
+            Kind::Video if self.name.to_ascii_lowercase().ends_with(".avi") => match Avi::parse(&mut read, size) {
                 Ok(a) => {
                     self.len_ms = a.duration_ms();
                     self.sound = a.sound.clone();
                     self.avi = Some(a);
+                }
+                Err(e) => self.broken = Some(e),
+            },
+            Kind::Video => match Mp4Source::open(&mut read, size) {
+                Ok(m) => {
+                    self.len_ms = m.duration_ms;
+                    match m.problem {
+                        Some(p) => self.broken = Some(p),
+                        None => self.mp4 = Some(m),
+                    }
                 }
                 Err(e) => self.broken = Some(e),
             },
@@ -86,6 +98,21 @@ impl Media {
         }
         self.broken.is_none()
     }
+
+    /// Sound at the file's own rate: (rate, frames [from, from + n) interleaved stereo).
+    pub fn sound_frames(&mut self, io: &mut dyn Io, from: u64, n: usize) -> Option<(u32, Vec<i16>)> {
+        let src = self.src.clone();
+        let mut read = |off: u64, len: usize| io.read(&src, off, len);
+        if let Some(m) = self.mp4.as_mut() {
+            if m.audio_rate == 0 {
+                return None;
+            }
+            return Some((m.audio_rate, m.audio(&mut read, from, n)));
+        }
+        let s = self.sound.as_ref()?;
+        Some((s.rate, s.read_frames(&mut read, from, n)))
+    }
+
 }
 
 /// Is this a file the editor can use, and as what?
@@ -93,7 +120,7 @@ pub fn media_kind(name: &str) -> Option<Kind> {
     let n = name.to_ascii_lowercase();
     if crate::import::is_photo(&n) {
         Some(Kind::Photo)
-    } else if n.ends_with(".avi") {
+    } else if [".avi", ".mp4", ".mov", ".m4v", ".3gp"].iter().any(|e| n.ends_with(e)) {
         Some(Kind::Video)
     } else if n.ends_with(".wav") {
         Some(Kind::Music)
@@ -390,6 +417,7 @@ impl Clone for Media {
             size: self.size,
             len_ms: self.len_ms,
             avi: self.avi.clone(),
+            mp4: None,
             sound: self.sound.clone(),
             thumb: None,
             broken: self.broken,
@@ -471,6 +499,28 @@ impl Renderer {
         }
         self.photos.push((m, small));
         Some(self.photos.len() - 1)
+    }
+
+    /// The picture of a phone video at `ms`, converted to dw x dh (cached by frame).
+    fn mp4_frame(&mut self, p: &mut Project, m: usize, ms: u64, dw: usize, dh: usize, io: &mut dyn Io) -> Option<usize> {
+        let media = &mut p.media[m];
+        let src = media.src.clone();
+        let mp4 = media.mp4.as_mut()?;
+        let rot = mp4.rotation;
+        let mut read = |off: u64, len: usize| io.read(&src, off, len);
+        mp4.frame_at(&mut read, ms, 100_000)?;
+        let key = mp4.current_pts().unwrap_or(0) as usize;
+        if let Some(i) = self.frames.iter().position(|e| e.0 == m && e.1 == key && e.2.w == dw && e.2.h == dh) {
+            return Some(i);
+        }
+        let px = frame_rgb(mp4.frame_at(&mut read, ms, 0)?, rot, dw, dh);
+        let img = Image { w: dw, h: dh, px: px.iter().map(|v| v | 0xFF00_0000).collect(), opaque: true };
+        self.frames.retain(|e| e.0 != m);
+        if self.frames.len() >= 4 {
+            self.frames.remove(0);
+        }
+        self.frames.push((m, key, img));
+        Some(self.frames.len() - 1)
     }
 
     fn video_frame(&mut self, p: &Project, m: usize, n: usize, io: &mut dyn Io) -> Option<usize> {
@@ -555,6 +605,15 @@ impl Renderer {
             }
             Kind::Video => {
                 if !p.media[m].open(io) {
+                    return;
+                }
+                if let Some(mm) = p.media[m].mp4.as_ref() {
+                    let (vw, vh) = (mm.width.max(1) as i64, mm.height.max(1) as i64);
+                    let fit = (w * 1000 / vw).min(h * 1000 / vh);
+                    let (dw, dh) = ((vw * fit / 1000).max(1), (vh * fit / 1000).max(1));
+                    let Some(i) = self.mp4_frame(p, m, c.offset + local, dw as usize, dh as usize, io) else { return };
+                    let img = &self.frames[i].2;
+                    self.blit(img, (w - dw) / 2, (h - dh) / 2, dw, dh, out, alpha, bright);
                     return;
                 }
                 let Some(a) = p.media[m].avi.as_ref() else { return };
@@ -720,8 +779,11 @@ pub fn mix(p: &mut Project, from: u64, n: usize, io: &mut dyn Io) -> Vec<i16> {
         if !p.media[m].open(io) {
             continue;
         }
-        let Some(snd) = p.media[m].sound.clone() else { continue };
-        let src = p.media[m].src.clone();
+        let srate = match (&p.media[m].mp4, &p.media[m].sound) {
+            (Some(mm), _) if mm.audio_rate > 0 => mm.audio_rate as u64,
+            (_, Some(s)) => s.rate.max(1) as u64,
+            _ => continue,
+        };
         // Output frames covered by this clip.
         let cs = c.start * RATE as u64 / 1000;
         let ce = c.end() * RATE as u64 / 1000;
@@ -731,12 +793,10 @@ pub fn mix(p: &mut Project, from: u64, n: usize, io: &mut dyn Io) -> Vec<i16> {
             continue;
         }
         // Source frames needed (at the source's own rate).
-        let srate = snd.rate.max(1) as u64;
         let pos = |k: u64| -> u64 { (c.offset * RATE as u64 / 1000 + (k - cs)) * srate * 256 / RATE as u64 };
         let s0 = pos(a) >> 8;
         let s1 = (pos(b) >> 8) + 2;
-        let mut read = |off: u64, len: usize| io.read(&src, off, len);
-        let pcm = snd.read_frames(&mut read, s0, (s1 - s0) as usize);
+        let Some((_, pcm)) = p.media[m].sound_frames(io, s0, (s1 - s0) as usize) else { continue };
         // Gain envelope (x1024): volume, crossfades, music fades.
         let vol = c.volume as i64 * 1024 / 100;
         let pos_in_vids = vids.iter().position(|&v| v == ci);

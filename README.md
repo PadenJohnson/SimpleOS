@@ -30,14 +30,19 @@ nothing to download.
   you type), bold, text and fill colours, number formats (money, percent, dates), column
   widths, several sheets, undo, copy/paste, fill down, and printing. Charts, pictures and
   merged cells in Excel files aren't kept when saving.
-- Video Editor: a simple Kdenlive-style editor. Photos, camera videos (Motion-JPEG .avi)
-  and music (.wav) on the left, a preview with Play/Pause, and a timeline with Video, Titles
+- Videos: every video in Solon storage with a picture of each; plays phone and camera
+  videos with sound (play/pause, drag along the bar to jump, arrow keys for 5 seconds).
+  Solon's own decoders: H.264 (Baseline, Main and High profile, as phones and cameras record
+  it) and AAC sound in MP4/MOV, and Motion-JPEG AVI. iPhone videos in HEVC ("High
+  Efficiency") can't be played yet; the app says how to switch the iPhone to "Most
+  Compatible".
+- Video Editor: a simple Kdenlive-style editor. Photos, phone and camera videos (.mp4, .mov,
+  .avi) and music (.wav) on the left, a preview with Play/Pause, and a timeline with Video, Titles
   and two Music tracks. Add, drag to reorder or move, drag the ends to shorten, split at the
   red line, delete, undo/redo; crossfade or dip-to-black between clips; slow zoom and pan on
   photos; titles in the middle, at the bottom or on black; volume and fades. The project
   saves itself. "Export video" makes an MP4 (H.264 picture, FLAC sound, 480p / 720p / 1080p)
-  in the Videos folder, written by Solon's own encoders. Phone videos (.mp4) can't be used
-  yet: that needs an H.264 decoder, which is next.
+  in the Videos folder, written by Solon's own encoders.
 - Sound: Intel High Definition Audio (the sound chip in nearly every PC since about 2005),
   through the speakers, headphones and line out. Checked in QEMU; not yet on a real PC.
 - Phones over USB: Android phones (MTP, "File transfer") and iPhones and cameras (PTP) show up
@@ -68,7 +73,7 @@ nothing to download.
   page; colour or black & white; copies. Checked with a test printer and GhostPCL; not yet
   tried on a real printer.
 
-**Planned:** playing phone videos (H.264 decoding), in Videos and the Video Editor.
+**Planned:** HEVC (iPhone "High Efficiency") videos; faster decoding of 1080p and 4K video.
 
 ## Making a USB stick
 
@@ -94,7 +99,7 @@ QEMU for Windows.
 | `.\tools\make-usb.ps1` | Build the real-PC USB files and disk image into `dist\` |
 | `.\tools\make-samples.ps1` | Regenerate the sample photos |
 | `tools\mkimg` | Host tool: builds FAT/exFAT/GPT test disks, checks partition tables, decodes print jobs, copies files out of disk images (`exfat-get`) |
-| `tools\videotest` | Host tool: checks the H.264, FLAC, MP4 and AVI code; its MP4s can be checked with Windows' own player |
+| `tools\videotest` | Host tool: checks the H.264 encoder and decoder, AAC, FLAC, MP4 and AVI code against Windows' own encoders and decoders |
 
 `test.ps1` options include `-Usb` (keyboard, mouse, read-only or writable USB drives, hot-plugging), `-Internal`
 (NVMe/SATA disk images), `-BootStick` / `-LegacyBios` (boot from a USB image like a real PC)
@@ -106,7 +111,7 @@ card whose output is saved to `test-outsound.wav`; with `-Cmdline "soundtest"` i
 
 - `src/`: the kernel. `main.rs` boots; `desktop.rs`, `photos.rs`, `editor.rs`, `import.rs`,
   `files.rs`, `diskmgr.rs`, `documents.rs`, `sheetui.rs`, `movieui.rs`, `settingsui.rs` and `printui.rs` are
-  the apps; `movie.rs` is the video editor's engine; `video/` holds the H.264, FLAC, MP4 and AVI/WAV code;
+  the apps; `movie.rs` is the video editor's engine; `video/` holds the H.264 encoder and decoder (CAVLC and CABAC), AAC, FLAC, MP4 and AVI/WAV code (`tables.rs`: standard tables from FFmpeg); `videos.rs` is the player;
   `doc/` reads and writes spreadsheets (zip, XML, formulas, xlsx, csv); `xhci.rs`, `ehci.rs`, `usb.rs`, `msc.rs`, `usbprint.rs`, `nvme.rs`, `hda.rs` and
   `ahci.rs` are drivers; `fs/` holds partition tables, FAT and exFAT; `library.rs` is the
   photo library; `print.rs` lays out pages and speaks PCL / IPP.

@@ -615,6 +615,20 @@ impl MovieApp {
                 }
                 let src = m.src.clone();
                 let mut read = |off: u64, len: usize| io.read(&src, off, len);
+                if let Some(mm) = m.mp4.as_mut() {
+                    // Phone video: decode the first picture.
+                    let (vw, vh) = (mm.width.max(1), mm.height.max(1));
+                    let (w, h) = crate::image::fit(vw, vh, 132, 84);
+                    let rot = mm.rotation;
+                    let px = mm.frame_at(&mut read, 0, 8).map(|f| crate::video::mp4src::frame_rgb(f, rot, w.max(1), h.max(1)));
+                    match px {
+                        Some(px) => m.thumb = Some(crate::image::Image { w: w.max(1), h: h.max(1), px: px.iter().map(|v| v | 0xFF00_0000).collect(), opaque: true }),
+                        None => m.broken = Some("Couldn't read it"),
+                    }
+                    // The bin keeps only the picture; the editor opens the video again when used.
+                    m.mp4 = None;
+                    return;
+                }
                 m.avi.as_ref().and_then(|a| a.frame_jpeg(&mut read, 0))
             }
             Kind::Music => return,
@@ -721,7 +735,7 @@ impl MovieApp {
         if shown.is_empty() {
             let msg = match self.bin_tab {
                 Kind::Photo => ["No photos in Solon yet.", "Use Import to bring some in."],
-                Kind::Video => ["No camera videos (.avi).", "Phone videos (.mp4) come later."],
+                Kind::Video => ["No videos yet.", "Import them from a phone or camera."],
                 Kind::Music => ["No music (.wav files).", "Copy some in with Files."],
             };
             c.text_centered(g.x + g.w / 2, g.y + 40, msg[0], Size::Small, false, DIM);

@@ -88,8 +88,10 @@ Solon's desktop should appear within a few seconds.
 - **Sound** works with Intel High Definition Audio, the sound chip in nearly every PC since
   about 2005. Sound over HDMI to a TV isn't supported yet. If the Video Editor says
   "(no sound card)", F12 shows what Solon found (lines starting with `hda:`).
-- **Videos**: the Video Editor uses photos, camera videos in Motion-JPEG .avi and .wav music.
-  Phone videos (.mp4, .mov) are kept safely but can't be played or edited yet.
+- **Videos**: phone videos in H.264 (most Android phones, and iPhones set to "Most
+  Compatible") and camera .avi videos play in Videos and work in the Video Editor. iPhone
+  videos in HEVC ("High Efficiency", the iPhone default) can't be played yet. Big 1080p and 4K
+  videos may play jerkily on slower PCs: Solon decodes them on one processor core.
 - Exported movies (in the Videos folder) are MP4 with H.264 picture and FLAC sound. They
   play in Windows' own player (checked). Most recent phones and web browsers handle FLAC
   sound in MP4 too, but some players and TVs may show the picture without sound.

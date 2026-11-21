@@ -49,6 +49,7 @@ mod textfield;
 mod usb;
 mod update;
 mod usbprint;
+mod videos;
 mod video;
 mod xhci;
 

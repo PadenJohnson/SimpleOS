@@ -21,6 +21,7 @@ use crate::files::{CopyJob, Files, FilesAction};
 use crate::diskmgr::{DiskAction, DiskMgr};
 use crate::documents::{DocSrc, DocsAction, DocsApp};
 use crate::movieui::{MovieAction, MovieApp};
+use crate::videos::{VideosAction, VideosApp};
 use crate::usb::Usb;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -158,6 +159,7 @@ pub struct Desktop {
     copy: Option<CopyJob>,
     docs: DocsApp,
     movie: MovieApp,
+    videos: VideosApp,
     /// Spreadsheet pages waiting to be printed (on the next tick, after the notice shows).
     pending_sheet_print: Option<(Vec<Canvas>, Layout, PrinterInfo)>,
     /// A phone import to start on the next tick (after the "looking" notice shows).
@@ -268,6 +270,7 @@ impl Desktop {
             copy: None,
             docs: DocsApp::new(),
             movie: MovieApp::new(),
+            videos: VideosApp::new(),
             pending_sheet_print: None,
             pending_phone_import: None,
             pending_save: None,
@@ -643,6 +646,10 @@ impl Desktop {
             let visible = !win.minimized;
             let a = self.movie.tick(now, &mut self.storage, &mut self.usb, visible);
             redraw |= self.movie_action(a, now);
+        }
+        if let Some(win) = self.windows.iter().find(|w| w.app == App::Videos) {
+            let visible = !win.minimized;
+            redraw |= matches!(self.videos.tick(now, &mut self.storage, &mut self.usb, visible), VideosAction::Redraw);
         }
         if let Some((i, choice, edits)) = self.pending_save.take() {
             match self.save_edit(i, choice, edits) {
@@ -1222,7 +1229,7 @@ impl Desktop {
         self.windows.push(Window { app, x, y, w, h, minimized: false, restore: None });
         self.order.push(app);
         // The editors want all the room they can get.
-        if matches!(app, App::Photos | App::Documents | App::Movie) {
+        if matches!(app, App::Photos | App::Documents | App::Movie | App::Videos) {
             self.set_maximized(app, true);
         }
         kprintln!("solon: open {}", app.name());
@@ -1241,6 +1248,9 @@ impl Desktop {
         if app == App::Movie {
             self.movie.opened(&mut self.storage, &mut self.usb);
         }
+        if app == App::Videos {
+            self.videos.opened(&mut self.storage, &mut self.usb);
+        }
     }
 
     fn close_app(&mut self, app: App) {
@@ -1250,6 +1260,9 @@ impl Desktop {
                 return;
             }
             self.movie.closed(&mut self.storage, &mut self.usb);
+        }
+        if app == App::Videos {
+            self.videos.closed();
         }
         self.windows.retain(|w| w.app != app);
         self.order.retain(|a| *a != app);
@@ -1388,6 +1401,7 @@ impl Desktop {
                 App::Disks => self.disks.draw(c, body, &self.storage),
                 App::Documents => self.docs.draw(c, body),
                 App::Movie => self.movie.draw(c, body),
+                App::Videos => self.videos.draw(c, body),
                 app => draw_placeholder(c, app, body),
             }
             c.reset_clip();
@@ -1421,6 +1435,7 @@ impl Desktop {
             App::Disks => self.disks.on_wheel(wheel, body),
             App::Documents => self.docs.on_wheel(wheel, body),
             App::Movie => self.movie.on_wheel(wheel, x, y, body),
+            App::Videos => self.videos.on_wheel(wheel, body),
             _ => false,
         }
     }
@@ -1454,6 +1469,11 @@ impl Desktop {
                 let a = self.movie.on_press(x, y, body, now, &mut self.storage, &mut self.usb);
                 self.capture = true;
                 redraw |= self.movie_action(a, now);
+            }
+            App::Videos => {
+                let a = self.videos.on_press(x, y, body, now, &mut self.storage, &mut self.usb);
+                self.capture = true;
+                redraw |= matches!(a, VideosAction::Redraw);
             }
             App::Settings => {
                 let screen = self.screen;
@@ -1498,6 +1518,7 @@ impl Desktop {
             App::Disks => self.disks.on_key(sc).map(|a| self.disk_action(a, Self::now())),
             App::Documents => self.docs.on_key(sc, body, &mut self.storage, &mut self.usb).map(|a| self.docs_action(a, Self::now())),
             App::Movie => self.movie.on_key(sc).map(|a| self.movie_action(a, Self::now())),
+            App::Videos => self.videos.on_key(sc).map(|a| matches!(a, VideosAction::Redraw)),
             _ => None,
         }
     }
@@ -1532,6 +1553,7 @@ impl Desktop {
                     return redraw | match app {
                         App::Documents => self.docs.on_release(),
                         App::Movie => self.movie.on_release(),
+                        App::Videos => self.videos.on_release(),
                         _ => self.photos.on_release(),
                     };
                 }
@@ -1539,6 +1561,7 @@ impl Desktop {
                     return redraw | match app {
                         App::Documents => self.docs.on_drag(x, y, body),
                         App::Movie => self.movie.on_drag(x, y, body),
+                        App::Videos => self.videos.on_drag(x, y, body),
                         _ => self.photos.on_drag(x, y, body),
                     };
                 }
