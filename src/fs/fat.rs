@@ -266,7 +266,7 @@ impl Fat {
             }
             let first_cluster = (le16(e, 20) as u32) << 16 | le16(e, 26) as u32;
             let is_dir = attr & 0x10 != 0;
-            out.push(DirEntry { name, is_dir, size: if is_dir { 0 } else { le32(e, 28) as u64 }, first_cluster, contiguous: false, loc: Vec::new() });
+            out.push(DirEntry { name, is_dir, size: if is_dir { 0 } else { le32(e, 28) as u64 }, first_cluster, contiguous: false, loc: Vec::new(), mtime: (le16(e, 24) as u32) << 16 | le16(e, 22) as u32 });
         }
         Ok(out)
     }
@@ -682,7 +682,7 @@ impl Fat {
         let first = chain.first().copied().unwrap_or(0);
         self.add_entries(io, dev, dir, &dir_entries(name, sn, lfn, flags, attr, first, size))?;
         dev.flush()?;
-        Ok(DirEntry { name: String::from(name), is_dir: data.is_none(), size: size as u64, first_cluster: first, contiguous: false, loc: Vec::new() })
+        Ok(DirEntry { name: String::from(name), is_dir: data.is_none(), size: size as u64, first_cluster: first, contiguous: false, loc: Vec::new(), mtime: crate::rtc::fat_timestamp() })
     }
 
     /// Free space in bytes (scans the FAT).

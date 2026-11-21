@@ -6,6 +6,7 @@ extern crate alloc;
 
 #[macro_use]
 mod serial; // must come first so kprintln! is visible to later modules
+mod backup;
 mod calculator;
 mod calendar;
 mod crash;

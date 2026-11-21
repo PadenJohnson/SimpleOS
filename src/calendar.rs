@@ -81,7 +81,7 @@ pub fn to_text(events: &[Event]) -> String {
     s
 }
 
-fn day_number(y: u16, m: u8, d: u8) -> i64 {
+pub fn day_number(y: u16, m: u8, d: u8) -> i64 {
     // Days since a fixed point (for comparing dates).
     let (y, m) = if m <= 2 { (y as i64 - 1, m as i64 + 12) } else { (y as i64, m as i64) };
     365 * y + y / 4 - y / 100 + y / 400 + (153 * (m - 3) + 2) / 5 + d as i64

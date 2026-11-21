@@ -1163,6 +1163,14 @@ fn main() {
             fs::write(&args[2], mbr_image(vol, 0x0C, 2048)).unwrap();
             return;
         }
+        Some("library") if args.len() == 5 => {
+            // A Solon storage disk (GPT "Solon Library" partition, exFAT) with a folder's files.
+            let mib: usize = args[4].parse().unwrap();
+            let total = mib * 1024 * 1024 / SECTOR;
+            let vol = ExFat::new(total - 2048 - 2048).build(&tree_from(Path::new(&args[3])), "Solon", 2048);
+            fs::write(&args[2], gpt_image_multi(total, &[("5010A1B5-2026-4A4C-9C4E-534F4C4F4E4C", 2048, vol, "Solon Library")])).unwrap();
+            return;
+        }
         Some("usbimg") if args.len() == 4 => {
             usb_image(Path::new(&args[2]), Path::new(&args[3]));
             println!("wrote {}", args[2]);

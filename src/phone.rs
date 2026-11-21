@@ -442,7 +442,7 @@ impl Phone {
             }
             let is_dir = info.format == FORMAT_FOLDER;
             self.sizes.insert(h, size);
-            out.push(DirEntry { name: info.name, is_dir, size: if is_dir { 0 } else { size }, first_cluster: h, contiguous: false, loc: Vec::new() });
+            out.push(DirEntry { name: info.name, is_dir, size: if is_dir { 0 } else { size }, first_cluster: h, contiguous: false, loc: Vec::new(), mtime: 0 });
         }
         out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| crate::fs::natural_cmp(&a.name, &b.name)));
         Ok(out)

@@ -12,6 +12,7 @@ pub fn tile_color(app: App) -> u32 {
         App::Movie => rgb(211, 84, 0),
         App::Documents => rgb(39, 174, 96),
         App::Printers => rgb(142, 68, 173),
+        App::Backup => rgb(0, 150, 170),
         App::Import => rgb(243, 156, 18),
         App::Files => rgb(22, 160, 133),
         App::Disks => rgb(52, 73, 94),
@@ -62,6 +63,15 @@ pub fn draw(c: &mut Canvas, app: App, x: i32, y: i32) {
             c.circle(x + 40, y + 26, 4, WHITE);
             c.triangle([(x + 15, y + 44), (x + 27, y + 28), (x + 39, y + 44)], WHITE);
             c.triangle([(x + 31, y + 44), (x + 39, y + 34), (x + 48, y + 44)], WHITE);
+        }
+        App::Backup => {
+            // A circular arrow around a clock: copies kept over time.
+            c.circle(x + 32, y + 33, 19, WHITE);
+            c.circle(x + 32, y + 33, 15, bg);
+            c.triangle([(x + 10, y + 33), (x + 32, y + 33), (x + 10, y + 52)], bg); // gap at lower left
+            c.triangle([(x + 6, y + 30), (x + 20, y + 30), (x + 13, y + 40)], WHITE); // arrow head
+            c.fill_rect(x + 31, y + 22, 3, 13, WHITE);
+            c.fill_rect(x + 31, y + 32, 10, 3, WHITE);
         }
         App::Videos => {
             c.circle(x + 32, y + 32, 19, WHITE);

@@ -79,11 +79,14 @@ pub struct DirEntry {
     pub contiguous: bool,
     /// Volume byte offsets of this entry's directory records (exFAT; used to update/delete it).
     pub loc: Vec<u64>,
+    /// Last-modified time, packed like FAT timestamps (0 if unknown). Solon never rewrites a
+    /// file in place, so a changed file always has a new time.
+    pub mtime: u32,
 }
 
 impl DirEntry {
     pub fn dir(name: String, first_cluster: u32) -> DirEntry {
-        DirEntry { name, is_dir: true, size: 0, first_cluster, contiguous: false, loc: Vec::new() }
+        DirEntry { name, is_dir: true, size: 0, first_cluster, contiguous: false, loc: Vec::new(), mtime: 0 }
     }
 }
 

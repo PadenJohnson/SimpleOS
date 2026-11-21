@@ -31,6 +31,7 @@ pub enum App {
     Movie,
     Documents,
     Printers,
+    Backup,
     Import,
     Files,
     Disks,
@@ -63,6 +64,7 @@ impl App {
             App::Calendar => "Calendar",
             App::Paint => "Paint",
             App::Printers => "Printers",
+            App::Backup => "Backup",
             App::Import => "Import",
             App::Files => "Files",
             App::Disks => "Disks",
@@ -117,7 +119,7 @@ const INK_DIM: u32 = rgb(96, 104, 116);
 const WIN_BG: u32 = rgb(251, 251, 253);
 
 /// The Applications menu, in order (folders open in place).
-const APPS: [MenuEntry; 13] = [
+const APPS: [MenuEntry; 14] = [
     MenuEntry::App(App::Photos),
     MenuEntry::Folder(Folder::Documents),
     MenuEntry::App(App::Files),
@@ -129,6 +131,7 @@ const APPS: [MenuEntry; 13] = [
     MenuEntry::App(App::Calendar),
     MenuEntry::App(App::Calculator),
     MenuEntry::App(App::Printers),
+    MenuEntry::App(App::Backup),
     MenuEntry::App(App::Disks),
     MenuEntry::App(App::Settings),
 ];
@@ -301,6 +304,7 @@ pub struct Desktop {
     movie: MovieApp,
     calculator: crate::calculator::Calculator,
     printers_app: crate::printers::PrintersApp,
+    backup: crate::backup::BackupApp,
     calendar: crate::calendar::CalendarApp,
     videos: VideosApp,
     /// Spreadsheet pages waiting to be printed (on the next tick, after the notice shows).
@@ -423,6 +427,7 @@ impl Desktop {
             movie: MovieApp::new(),
             calculator: crate::calculator::Calculator::new(),
             printers_app: crate::printers::PrintersApp::new(),
+            backup: crate::backup::BackupApp::new(),
             calendar: crate::calendar::CalendarApp::new(),
             videos: VideosApp::new(),
             pending_sheet_print: None,
@@ -566,7 +571,7 @@ impl Desktop {
 
     /// True while there's background work (photos to decode, an import), so the main loop shouldn't sleep.
     pub fn busy(&self) -> bool {
-        self.photos.needs_loading() || self.job.is_some() || self.copy.is_some() || self.disks.busy() || self.movie.exporting()
+        self.photos.needs_loading() || self.job.is_some() || self.copy.is_some() || self.disks.busy() || self.movie.exporting() || self.backup.busy()
     }
 
     fn step_import(&mut self, now: u64) -> bool {
@@ -767,6 +772,17 @@ impl Desktop {
             if self.is_open(App::Disks) {
                 self.disks.refresh(&mut self.storage, &mut self.usb);
             }
+            if !self.backup.busy() {
+                let before: Vec<(u32, usize)> = self.backup.drives.iter().map(|d| (d.drive, d.vol)).collect();
+                self.backup.refresh(&mut self.storage, &mut self.usb);
+                // A backup drive was plugged in and the last backup is a week old: suggest one.
+                let due = self.backup.last.as_ref().map_or(true, |l| l.age(self.date) >= 7);
+                if let Some(d) = self.backup.drives.iter().find(|d| !d.backups.is_empty() && !before.contains(&(d.drive, d.vol))) {
+                    if due && self.storage.library.is_some() && !self.is_open(App::Backup) {
+                        self.toast = Some((format!("{} has your backups - open Backup to back up again", d.name), now + 10 * HZ));
+                    }
+                }
+            }
             if self.is_open(App::Documents) && !self.docs.editing() {
                 self.docs.refresh(&mut self.storage, &mut self.usb);
             }
@@ -794,6 +810,14 @@ impl Desktop {
             let t = self.storage.read_root_file(&mut self.usb, "Calendar.txt");
             self.calendar.load(t.as_deref().and_then(|b| core::str::from_utf8(b).ok()));
             redraw = true;
+        }
+        if !self.backup.last_loaded && self.storage.library.is_some() {
+            self.backup.load_last(&mut self.storage, &mut self.usb);
+            redraw = true;
+        }
+        if self.backup.busy() {
+            let a = self.backup.step(&mut self.storage, &mut self.usb, now);
+            redraw |= self.backup_action(a, now);
         }
         if !self.display_checked {
             self.display_checked = true;
@@ -1160,6 +1184,46 @@ impl Desktop {
                 true
             }
         }
+    }
+
+    fn backup_action(&mut self, a: crate::backup::BackupAction, now: u64) -> bool {
+        use crate::backup::BackupAction;
+        match a {
+            BackupAction::None => false,
+            BackupAction::Redraw => true,
+            BackupAction::Finished { storage_changed, calendar_changed, message } => {
+                self.toast = Some((message, now + 8 * HZ));
+                if storage_changed {
+                    self.library_changed();
+                    self.files.refresh(&mut self.storage, &mut self.usb);
+                }
+                if calendar_changed {
+                    let t = self.storage.read_root_file(&mut self.usb, "Calendar.txt");
+                    self.calendar.load(t.as_deref().and_then(|b| core::str::from_utf8(b).ok()));
+                }
+                true
+            }
+        }
+    }
+
+    /// The backup reminder on the desktop, under the clock: (text, where).
+    fn backup_nudge(&self) -> Option<(String, Rect)> {
+        if self.storage.library.is_none() || !self.backup.last_loaded || self.backup.busy() {
+            return None;
+        }
+        // Don't nag about an empty Solon.
+        if !self.backup.has_data {
+            return None;
+        }
+        let msg = crate::backup::reminder(self.backup.last.as_ref(), self.date)?;
+        let (w, h) = (self.w, self.h);
+        let big = (h / 9).clamp(56, 120);
+        let top = h / 5 + big;
+        let dpx = (big / 4).max(18);
+        let (y, m, d) = self.date;
+        let n = crate::calendar::today_lines(&self.calendar.events, y, m, d, &self.settings).len().min(4) as i32;
+        let lw = text_width(&msg, Size::Small, true) + 54;
+        Some((msg, Rect::new(w / 2 - lw / 2, top + dpx * 2 + 24 + n * 40 + 8, lw, 34)))
     }
 
     fn step_copy(&mut self, now: u64) -> bool {
@@ -1572,6 +1636,9 @@ impl Desktop {
         if app == App::Disks {
             self.disks.refresh(&mut self.storage, &mut self.usb);
         }
+        if app == App::Backup && !self.backup.busy() {
+            self.backup.refresh(&mut self.storage, &mut self.usb);
+        }
         if let Some(k) = self.doc_index(app) {
             if !self.doc_apps[k].1.editing() {
                 self.doc_apps[k].1.refresh(&mut self.storage, &mut self.usb);
@@ -1602,6 +1669,10 @@ impl Desktop {
         }
         if app == App::Videos {
             self.videos.closed();
+        }
+        if app == App::Backup && self.backup.busy() {
+            self.toast = Some((String::from("Still working - press Stop first if you want to close Backup"), Self::now() + 4 * HZ));
+            return;
         }
         if let Some(g) = app.game() {
             self.games.closed(g);
@@ -1844,6 +1915,11 @@ impl Desktop {
                 c.text_centered(w / 2, ly + 6, &l, Size::Medium, false, ink);
                 ly += 40;
             }
+            if let Some((msg, b)) = self.backup_nudge() {
+                c.round_rect_alpha(b.x, b.y, b.w, b.h, 17, 0xFF_FFFF, 225);
+                c.circle(b.x + 20, b.y + 17, 5, rgb(214, 120, 20));
+                c.text(b.x + 34, b.y + 7, &msg, Size::Small, true, rgb(40, 44, 52));
+            }
             if self.windows.is_empty() {
                 let hint = "Click the blue button at the bottom to see all your apps";
                 c.text_centered(w / 2, h - BAR_H - 48, hint, Size::Small, false, ink);
@@ -1885,6 +1961,7 @@ impl Desktop {
                     self.calendar.set_today(self.date);
                     self.calendar.draw(c, body, &self.settings)
                 }
+                App::Backup => self.backup.draw(c, body, &self.settings, self.date),
                 app if app.game().is_some() => self.games.draw(app.game().unwrap(), c, body),
                 app => draw_placeholder(c, app, body),
             }
@@ -1987,6 +2064,10 @@ impl Desktop {
                 let a = self.calendar.on_press(x, y, body, now);
                 redraw |= self.cal_action(a);
             }
+            App::Backup => {
+                let a = self.backup.on_press(x, y, body, &mut self.storage, &mut self.usb);
+                redraw |= self.backup_action(a, now);
+            }
             app if app.game().is_some() => {
                 redraw |= self.games.press(app.game().unwrap(), x, y, body, now, false);
                 self.capture = true;
@@ -2056,6 +2137,7 @@ impl Desktop {
                 self.printers_app.on_key(sc, n)
             }
             App::Calendar => self.calendar.on_key(sc).map(|a| self.cal_action(a)),
+            App::Backup => self.backup.on_key(sc, &mut self.storage, &mut self.usb).map(|a| self.backup_action(a, Self::now())),
             app if app.game().is_some() => self.games.key(app.game().unwrap(), sc, Self::now()),
             _ => None,
         }
@@ -2223,6 +2305,14 @@ impl Desktop {
                 _ => {}
             }
             return true;
+        }
+
+        // The backup reminder on the desktop.
+        if !self.windows.iter().any(|w| !w.minimized && (w.restore.is_some() || w.rect().contains(x, y))) {
+            if matches!(self.backup_nudge(), Some((_, b)) if b.contains(x, y)) {
+                self.open(App::Backup);
+                return true;
+            }
         }
 
         // Windows, top first.

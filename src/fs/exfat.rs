@@ -231,6 +231,7 @@ impl ExFat {
                         first_cluster,
                         contiguous: flags & FLAG_NOFATCHAIN != 0,
                         loc,
+                        mtime: le32(e, 12),
                     });
                     i += 1 + secondary;
                 }
@@ -667,7 +668,7 @@ impl ExFat {
         dev.flush()?;
         self.set_dirty(io, dev, false)?;
         dev.flush()?;
-        Ok(DirEntry { name: String::from(name), is_dir, size: len, first_cluster: first, contiguous: n > 0 && contiguous, loc })
+        Ok(DirEntry { name: String::from(name), is_dir, size: len, first_cluster: first, contiguous: n > 0 && contiguous, loc, mtime: crate::rtc::fat_timestamp() })
     }
 
     /// Start writing a big file in pieces: reserve its space now (marked in use so nothing
@@ -726,7 +727,7 @@ impl ExFat {
         dev.flush()?;
         self.set_dirty(io, dev, false)?;
         dev.flush()?;
-        Ok(DirEntry { name: p.name, is_dir: false, size: p.len, first_cluster: first, contiguous: nofat, loc })
+        Ok(DirEntry { name: p.name, is_dir: false, size: p.len, first_cluster: first, contiguous: nofat, loc, mtime: crate::rtc::fat_timestamp() })
     }
 
     /// Give back the space of a file that won't be finished.

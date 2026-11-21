@@ -766,6 +766,52 @@ impl Usb {
         r
     }
 
+    /// Run `f` on a writable volume of another USB drive (never the boot stick).
+    fn with_writable<R>(&mut self, drive: u32, vol: usize, f: impl FnOnce(&mut Volume, &mut dyn BlockDev) -> Result<R, FsError>) -> Result<R, FsError> {
+        let Usb { hcs, drives, .. } = self;
+        let d = drives.iter_mut().find(|d| d.id == drive).ok_or(FsError::Io)?;
+        if d.is_boot {
+            return Err(FsError::ReadOnly);
+        }
+        let v = d.volumes.get_mut(vol).ok_or(FsError::Io)?;
+        let mut dev = BootDisk { hc: &mut hcs[d.ctrl], ms: &mut d.ms };
+        if !v.writes_ready {
+            v.enable_writes(&mut dev)?;
+        }
+        f(v, &mut dev)
+    }
+
+    /// Start adding a big file to another USB drive in pieces (exFAT drives only). Like
+    /// `usb_create` it only adds: the name must be new.
+    pub fn usb_begin_file(&mut self, drive: u32, vol: usize, dir: &DirEntry, name: &str, len: u64) -> Result<fs::exfat::Pending, FsError> {
+        self.with_writable(drive, vol, |v, dev| v.begin_file(dev, dir, name, len))
+    }
+    pub fn usb_write_part(&mut self, drive: u32, vol: usize, p: &fs::exfat::Pending, offset: u64, data: &[u8]) -> Result<(), FsError> {
+        self.with_writable(drive, vol, |v, dev| v.write_part(dev, p, offset, data))
+    }
+    pub fn usb_finish_file(&mut self, drive: u32, vol: usize, p: fs::exfat::Pending) -> Result<DirEntry, FsError> {
+        let r = self.with_writable(drive, vol, |v, dev| v.finish_file(dev, p));
+        kprintln!("usb: wrote big file to drive {}: {}", drive, if r.is_ok() { "ok" } else { "failed" });
+        r
+    }
+    pub fn usb_abort_file(&mut self, drive: u32, vol: usize, p: fs::exfat::Pending) -> Result<(), FsError> {
+        self.with_writable(drive, vol, |v, dev| v.abort_file(dev, p))
+    }
+
+    /// Part of a file on a USB drive (exFAT reads just that part).
+    pub fn drive_read_part(&mut self, drive: u32, vol: usize, file: &DirEntry, offset: u64, len: usize) -> Result<Vec<u8>, FsError> {
+        let Usb { hcs, drives, .. } = self;
+        let d = drives.iter_mut().find(|d| d.id == drive).ok_or(FsError::Io)?;
+        let v = d.volumes.get_mut(vol).ok_or(FsError::Io)?;
+        let mut disk = Disk { hc: &mut hcs[d.ctrl], ms: &mut d.ms };
+        v.read_part(&mut disk, file, offset, len)
+    }
+
+    /// The kind of file system on a USB drive volume.
+    pub fn volume_kind(&self, drive: u32, vol: usize) -> Option<fs::FsKind> {
+        self.drives.iter().find(|d| d.id == drive)?.volumes.get(vol).map(|v| v.kind)
+    }
+
     /// Erase a USB drive and format it as one exFAT volume. Never the boot stick.
     pub fn format_drive(&mut self, drive: u32, label: &str) -> Result<(), FsError> {
         let Usb { hcs, drives, .. } = self;

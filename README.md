@@ -9,7 +9,7 @@ nothing to download.
 
 **Working now**
 - Desktop with Photos, Videos, Video Editor, Documents (Writer, Spreadsheets, PDF, Text Editor),
-  Paint, Calendar, Calculator, Printers, Import, Files, Disks, Settings and Games
+  Paint, Calendar, Calculator, Printers, Backup, Import, Files, Disks, Settings and Games
 - Desktop: light wallpapers with a big clock, a floating dock (Applications button, pinned
   apps and folders, open apps, clock, power) and a centred Applications launcher; several
   apps open at once in rounded windows that move, minimize and maximize. Smooth Noto Sans
@@ -112,6 +112,13 @@ nothing to download.
   zoom, undo/redo; opens and saves PNG and JPEG, and prints.
 - Calculator: big buttons, x and / before + and -, percent, square root, squares, 1/x,
   a history of sums, and the keyboard.
+- Backup: one button copies everything in Solon storage to a USB drive, into a "Solon Backup"
+  folder that opens on any computer. Only new and changed files are copied; changed files are
+  added beside the old copy with the date in the name, so older versions stay. Every copy is
+  read back and checked, and nothing already on the drive is changed or deleted. Restore
+  copies a chosen backup back into Solon without replacing anything (a changed file comes
+  back as "Name (restored)"). The desktop reminds you when the last backup is over 30 days
+  old, and when a backup drive is plugged in.
 
 **Planned:** HEVC (iPhone "High Efficiency") videos; faster decoding of 1080p and 4K video.
 
