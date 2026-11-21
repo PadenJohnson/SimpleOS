@@ -8,6 +8,7 @@ const WHITE: u32 = rgb(255, 255, 255);
 pub fn tile_color(app: App) -> u32 {
     match app {
         App::Photos => rgb(46, 134, 222),
+        App::PhotoFrame => rgb(196, 120, 64),
         App::Videos => rgb(231, 76, 60),
         App::Movie => rgb(211, 84, 0),
         App::Documents => rgb(39, 174, 96),
@@ -63,6 +64,15 @@ pub fn draw(c: &mut Canvas, app: App, x: i32, y: i32) {
             c.circle(x + 40, y + 26, 4, WHITE);
             c.triangle([(x + 15, y + 44), (x + 27, y + 28), (x + 39, y + 44)], WHITE);
             c.triangle([(x + 31, y + 44), (x + 39, y + 34), (x + 48, y + 44)], WHITE);
+        }
+        App::PhotoFrame => {
+            // A framed picture on a little stand.
+            c.triangle([(x + 26, y + 46), (x + 38, y + 46), (x + 32, y + 54)], WHITE);
+            c.round_rect(x + 10, y + 12, 44, 36, 4, WHITE);
+            c.fill_rect(x + 15, y + 17, 34, 26, rgb(120, 180, 230));
+            c.circle(x + 41, y + 24, 4, rgb(255, 214, 90));
+            c.triangle([(x + 15, y + 43), (x + 26, y + 27), (x + 37, y + 43)], rgb(70, 150, 90));
+            c.triangle([(x + 29, y + 43), (x + 38, y + 32), (x + 49, y + 43)], rgb(50, 120, 70));
         }
         App::Backup => {
             // A circular arrow around a clock: copies kept over time.

@@ -20,6 +20,13 @@ pub const SIZES: [(&str, u32); 3] = [("Normal", 2), ("Large", 3), ("Extra large"
 /// Mouse speeds (percent of normal).
 pub const MOUSE: [(&str, i32); 3] = [("Slow", 50), ("Normal", 100), ("Fast", 180)];
 
+/// What the screen shows when the computer isn't used.
+pub const SAVERS: [&str; 3] = ["Show photos", "Show the clock", "Do nothing"];
+/// Minutes without use before it starts.
+pub const SAVER_WAIT: [(&str, u64); 6] = [("1 minute", 1), ("5 minutes", 5), ("10 minutes", 10), ("15 minutes", 15), ("30 minutes", 30), ("1 hour", 60)];
+/// Seconds each photo stays on screen.
+pub const SLIDE_TIME: [(&str, u64); 5] = [("5 seconds", 5), ("10 seconds", 10), ("20 seconds", 20), ("30 seconds", 30), ("1 minute", 60)];
+
 /// The desktop needs at least this many (scaled) pixels for every window to fit.
 pub const MIN_W: usize = 1000;
 pub const MIN_H: usize = 620;
@@ -33,12 +40,18 @@ pub struct Settings {
     pub mouse: usize,
     /// The "install Solon on this computer" notice was shown.
     pub install_notice: bool,
+    /// Screensaver: index into SAVERS.
+    pub saver: usize,
+    pub saver_wait: usize,
+    pub slide_time: usize,
+    /// Photos in a mixed-up order (else in folder order).
+    pub shuffle: bool,
 }
 
 impl Settings {
     /// First-boot defaults: bigger text on very high-resolution screens.
     pub fn defaults(screen_w: usize, screen_h: usize) -> Settings {
-        let mut s = Settings { background: 0, size: 0, clock24: false, show_date: true, mouse: 1, install_notice: false };
+        let mut s = Settings { background: 0, size: 0, clock24: false, show_date: true, mouse: 1, install_notice: false, saver: 0, saver_wait: 1, slide_time: 1, shuffle: true };
         for i in (0..SIZES.len()).rev() {
             if screen_w >= 2400 && s.size_fits(i, screen_w, screen_h) {
                 s.size = i;
@@ -60,8 +73,8 @@ impl Settings {
 
     pub fn to_text(&self) -> String {
         format!(
-            "background={}\nsize={}\nclock24={}\nshow_date={}\nmouse={}\ninstall_notice={}\n",
-            self.background, self.size, self.clock24 as u8, self.show_date as u8, self.mouse, self.install_notice as u8
+            "background={}\nsize={}\nclock24={}\nshow_date={}\nmouse={}\ninstall_notice={}\nsaver={}\nsaver_wait={}\nslide_time={}\nshuffle={}\n",
+            self.background, self.size, self.clock24 as u8, self.show_date as u8, self.mouse, self.install_notice as u8, self.saver, self.saver_wait, self.slide_time, self.shuffle as u8
         )
     }
 
@@ -77,6 +90,10 @@ impl Settings {
                 "show_date" if n <= 1 => s.show_date = n == 1,
                 "mouse" if n < MOUSE.len() => s.mouse = n,
                 "install_notice" if n <= 1 => s.install_notice = n == 1,
+                "saver" if n < SAVERS.len() => s.saver = n,
+                "saver_wait" if n < SAVER_WAIT.len() => s.saver_wait = n,
+                "slide_time" if n < SLIDE_TIME.len() => s.slide_time = n,
+                "shuffle" if n <= 1 => s.shuffle = n == 1,
                 _ => {}
             }
         }

@@ -198,6 +198,11 @@ impl MovieApp {
         }
     }
 
+    /// A preview is playing (the screensaver waits).
+    pub fn playing(&self) -> bool {
+        self.play.is_some()
+    }
+
     pub fn exporting(&self) -> bool {
         self.export.is_some()
     }

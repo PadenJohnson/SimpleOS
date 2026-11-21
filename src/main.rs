@@ -25,6 +25,7 @@ mod edit;
 mod ehci;
 mod files;
 mod font;
+mod frame;
 mod fs;
 mod games;
 mod gfx;
@@ -401,10 +402,10 @@ extern "C" fn kmain() -> ! {
             desktop.draw(&mut canvas);
             cursor.hide(&screen);
             screen.blit_scaled(&canvas, scale);
-            if !desktop.screen_off() {
+            if !desktop.hide_pointer() {
                 cursor.show_at(&screen, to_screen(mx, scale), to_screen(my, scale));
             }
-        } else if moved && !desktop.screen_off() {
+        } else if moved && !desktop.hide_pointer() {
             cursor.show_at(&screen, to_screen(mx, scale), to_screen(my, scale));
         }
     }

@@ -21,6 +21,8 @@ pub enum SettingsAction {
     SetClock { y: u16, mo: u8, d: u8, h: u8, mi: u8 },
     /// Restart in this resolution (None = the firmware's choice).
     Resolution(Option<(u32, u32)>),
+    /// Open the Photo Frame app (screensaver settings).
+    Screensaver,
 }
 
 pub struct SettingsApp {
@@ -150,12 +152,10 @@ impl SettingsApp {
         label(c, 5, "Screen");
         self.draw_screen_row(c, r);
 
-        let note = if saved {
-            "Changes are saved and kept after a restart."
-        } else {
-            "Changes last until the computer is turned off (no Solon storage to save them in)."
-        };
-        c.text(r.x + 24, Self::row_y(r, 5) + 64, note, Size::Small, false, DIM);
+        c.text(r.x + 24, Self::row_y(r, 5) + 62, "Screensaver", Size::Small, true, DIM);
+        button(c, Self::saver_btn(r), "Photo Frame settings", false, true);
+        let note = if saved { "Changes are saved and kept after a restart." } else { "Changes last until the computer is turned off." };
+        c.text(Self::saver_btn(r).x + Self::saver_btn(r).w + 16, Self::row_y(r, 5) + 62, note, Size::Small, false, DIM);
         if self.picker {
             self.draw_picker(c, r);
         }
@@ -197,6 +197,9 @@ impl SettingsApp {
                 }
             }
             return SettingsAction::None;
+        }
+        if Self::saver_btn(r).contains(x, y) {
+            return SettingsAction::Screensaver;
         }
         if Self::res_btn(r).contains(x, y) {
             self.picker = true;
@@ -253,6 +256,9 @@ impl SettingsApp {
 // ---- screen resolution ----------------------------------------------------------------
 
 impl SettingsApp {
+    fn saver_btn(r: Rect) -> Rect {
+        Rect::new(Self::x0(r), Self::row_y(r, 5) + 54, 210, 34)
+    }
     fn res_btn(r: Rect) -> Rect {
         Rect::new(Self::x0(r), Self::row_y(r, 5) + 4, 190, 36)
     }

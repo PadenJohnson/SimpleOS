@@ -8,7 +8,7 @@ SimpleOS (internally "Solon") is a small operating system written from scratch i
 nothing to download.
 
 **Working now**
-- Desktop with Photos, Videos, Video Editor, Documents (Writer, Spreadsheets, PDF, Text Editor),
+- Desktop with Photos, Photo Frame, Videos, Video Editor, Documents (Writer, Spreadsheets, PDF, Text Editor),
   Paint, Calendar, Calculator, Printers, Backup, Import, Files, Disks, Settings and Games
 - Desktop: light wallpapers with a big clock, a floating dock (Applications button, pinned
   apps and folders, open apps, clock, power) and a centred Applications launcher; several
@@ -112,6 +112,11 @@ nothing to download.
   zoom, undo/redo; opens and saves PNG and JPEG, and prints.
 - Calculator: big buttons, x and / before + and -, percent, square root, squares, 1/x,
   a history of sums, and the keyboard.
+- Photo Frame and screensaver: your photos full screen, one after another, fading into each
+  other over a blurred copy of the photo, with the time and date (photos taken sideways are
+  turned upright). Start it from the Photo Frame app, or let it start by itself when the
+  computer isn't used for a while (1 minute to 1 hour; photos or just a clock; 5 seconds
+  to 1 minute per photo; mixed up or in order). Move the mouse or press a key to stop.
 - Backup: one button copies everything in Solon storage to a USB drive, into a "Solon Backup"
   folder that opens on any computer. Only new and changed files are copied; changed files are
   added beside the old copy with the date in the name, so older versions stay. Every copy is

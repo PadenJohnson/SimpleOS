@@ -27,6 +27,7 @@ use crate::usb::Usb;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum App {
     Photos,
+    PhotoFrame,
     Videos,
     Movie,
     Documents,
@@ -54,6 +55,7 @@ impl App {
     pub fn name(self) -> &'static str {
         match self {
             App::Photos => "Photos",
+            App::PhotoFrame => "Photo Frame",
             App::Videos => "Videos",
             App::Movie => "Video Editor",
             App::Documents => "Spreadsheets",
@@ -119,8 +121,9 @@ const INK_DIM: u32 = rgb(96, 104, 116);
 const WIN_BG: u32 = rgb(251, 251, 253);
 
 /// The Applications menu, in order (folders open in place).
-const APPS: [MenuEntry; 14] = [
+const APPS: [MenuEntry; 15] = [
     MenuEntry::App(App::Photos),
+    MenuEntry::App(App::PhotoFrame),
     MenuEntry::Folder(Folder::Documents),
     MenuEntry::App(App::Files),
     MenuEntry::App(App::Import),
@@ -305,6 +308,12 @@ pub struct Desktop {
     calculator: crate::calculator::Calculator,
     printers_app: crate::printers::PrintersApp,
     backup: crate::backup::BackupApp,
+    frame_app: crate::frame::FrameApp,
+    /// The photo frame / screensaver, while it's showing.
+    slideshow: Option<crate::frame::Slideshow>,
+    /// When the mouse or keyboard was last used, and where the pointer was.
+    last_input: u64,
+    pointer: (i32, i32),
     calendar: crate::calendar::CalendarApp,
     videos: VideosApp,
     /// Spreadsheet pages waiting to be printed (on the next tick, after the notice shows).
@@ -428,6 +437,10 @@ impl Desktop {
             calculator: crate::calculator::Calculator::new(),
             printers_app: crate::printers::PrintersApp::new(),
             backup: crate::backup::BackupApp::new(),
+            frame_app: crate::frame::FrameApp::new(),
+            slideshow: None,
+            last_input: 0,
+            pointer: (-1, -1),
             calendar: crate::calendar::CalendarApp::new(),
             videos: VideosApp::new(),
             pending_sheet_print: None,
@@ -559,8 +572,23 @@ impl Desktop {
         self.usb.shutdown();
     }
 
-    pub fn screen_off(&self) -> bool {
-        self.screen_off
+    /// No mouse pointer: the screen is off or the photo frame is showing.
+    pub fn hide_pointer(&self) -> bool {
+        self.screen_off || self.slideshow.is_some()
+    }
+
+    fn start_slideshow(&mut self, manual: bool) {
+        self.apps_menu = None;
+        self.folder = None;
+        self.capture = false;
+        self.slideshow = Some(crate::frame::Slideshow::new(&mut self.storage, &mut self.usb, &self.settings, manual));
+        self.last_input = Self::now();
+    }
+
+    fn end_slideshow(&mut self) {
+        self.slideshow = None;
+        self.last_input = Self::now();
+        kprintln!("frame: stopped");
     }
 
     pub fn set_date(&mut self, d: (u16, u8, u8)) -> bool {
@@ -571,7 +599,7 @@ impl Desktop {
 
     /// True while there's background work (photos to decode, an import), so the main loop shouldn't sleep.
     pub fn busy(&self) -> bool {
-        self.photos.needs_loading() || self.job.is_some() || self.copy.is_some() || self.disks.busy() || self.movie.exporting() || self.backup.busy()
+        self.photos.needs_loading() || self.job.is_some() || self.copy.is_some() || self.disks.busy() || self.movie.exporting() || self.backup.busy() || self.slideshow.as_ref().map_or(false, |s| s.busy())
     }
 
     fn step_import(&mut self, now: u64) -> bool {
@@ -789,6 +817,17 @@ impl Desktop {
             let usb = &self.usb;
             self.photos.drive_removed(&|id| !usb.has_drive(id));
             redraw = true;
+        }
+        if self.slideshow.is_none() && !self.screen_off && self.display_trial.is_none() && !self.videos.playing() && !self.movie.playing() {
+            if let Some(wait) = crate::frame::wait_ticks(&self.settings) {
+                if now >= self.last_input + wait {
+                    self.start_slideshow(false);
+                    redraw = true;
+                }
+            }
+        }
+        if let Some(ss) = &mut self.slideshow {
+            redraw |= ss.tick(now, &mut self.storage, &mut self.usb);
         }
         if matches!(&self.toast, Some((_, end)) if now >= *end) {
             self.toast = None;
@@ -1636,6 +1675,9 @@ impl Desktop {
         if app == App::Disks {
             self.disks.refresh(&mut self.storage, &mut self.usb);
         }
+        if app == App::PhotoFrame {
+            self.frame_app.photos = self.storage.all_photos(&mut self.usb).len();
+        }
         if app == App::Backup && !self.backup.busy() {
             self.backup.refresh(&mut self.storage, &mut self.usb);
         }
@@ -1879,6 +1921,12 @@ impl Desktop {
             c.fill_rect(0, 0, w, h, 0);
             return;
         }
+        if let Some(ss) = &mut self.slideshow {
+            ss.time = self.clock;
+            ss.date = self.date;
+            ss.draw(c, &self.settings);
+            return;
+        }
 
         if self.dock_icons.is_empty() {
             self.make_icons();
@@ -1962,6 +2010,7 @@ impl Desktop {
                     self.calendar.draw(c, body, &self.settings)
                 }
                 App::Backup => self.backup.draw(c, body, &self.settings, self.date),
+                App::PhotoFrame => self.frame_app.draw(c, body, &self.settings),
                 app if app.game().is_some() => self.games.draw(app.game().unwrap(), c, body),
                 app => draw_placeholder(c, app, body),
             }
@@ -2064,6 +2113,17 @@ impl Desktop {
                 let a = self.calendar.on_press(x, y, body, now);
                 redraw |= self.cal_action(a);
             }
+            App::PhotoFrame => match self.frame_app.on_press(x, y, body, &self.settings) {
+                crate::frame::FrameAction::None => {}
+                crate::frame::FrameAction::Change(n) => {
+                    self.apply_settings(n);
+                    redraw = true;
+                }
+                crate::frame::FrameAction::Start => {
+                    self.start_slideshow(true);
+                    return true;
+                }
+            },
             App::Backup => {
                 let a = self.backup.on_press(x, y, body, &mut self.storage, &mut self.usb);
                 redraw |= self.backup_action(a, now);
@@ -2086,6 +2146,10 @@ impl Desktop {
                         self.date = (y, mo, d);
                         self.clock = (h, mi);
                         self.toast = Some((String::from("Clock set"), now + 3 * HZ));
+                        redraw = true;
+                    }
+                    SettingsAction::Screensaver => {
+                        self.open(App::PhotoFrame);
                         redraw = true;
                     }
                     SettingsAction::Resolution(m) => {
@@ -2149,6 +2213,19 @@ impl Desktop {
         let released = buttons & 1 == 0 && prev & 1 != 0;
         let mut redraw = false;
 
+        let moved = (x, y) != self.pointer;
+        self.pointer = (x, y);
+        if moved || buttons != prev || wheel != 0 {
+            if self.slideshow.is_some() {
+                // Not straight after starting it (the click on Start).
+                if Self::now() > self.last_input + HZ && (moved || pressed || wheel != 0) {
+                    self.end_slideshow();
+                    return true;
+                }
+                return false;
+            }
+            self.last_input = now;
+        }
         if self.screen_off {
             // Any mouse movement or click wakes the screen.
             self.screen_off = false;
@@ -2360,6 +2437,18 @@ impl Desktop {
 
     /// Scancode set 1. Returns true if the screen needs redrawing.
     pub fn on_key(&mut self, sc: u8) -> bool {
+        self.last_input = Self::now();
+        if let Some(ss) = &mut self.slideshow {
+            if sc & 0x80 != 0 {
+                return false;
+            }
+            if ss.manual && sc == 0x4D {
+                ss.skip(Self::now());
+                return true;
+            }
+            self.end_slideshow();
+            return true;
+        }
         if self.display_trial.is_some() && sc & 0x80 == 0 {
             match sc {
                 0x1C => self.end_display_trial(true),
