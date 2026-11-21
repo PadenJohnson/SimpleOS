@@ -138,8 +138,9 @@ git clone https://github.com/limine-bootloader/limine.git --branch=v9.x-binary -
 powershell -ExecutionPolicy Bypass -File .\tools\make-usb.ps1
 ```
 
-Then write `dist\solon.img` to a stick with Rufus or balenaEtcher, turn off Secure Boot, and
-boot the PC from the stick.
+Then write `dist\solon.img` to a stick with Rufus or balenaEtcher and boot the PC from the
+stick. Secure Boot can stay on: the first time, approve Solon once in the blue shim screen
+(see docs/real-pc-guide.md and secureboot/README.md).
 
 ## Developing
 

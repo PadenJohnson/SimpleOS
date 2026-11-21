@@ -34,7 +34,14 @@ Write-Host "3/4 Assembling dist\solon-usb ..."
 $stage = "dist\solon-usb"
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force "$stage\EFI\BOOT", "$stage\boot" | Out-Null
-Copy-Item limine\BOOTX64.EFI "$stage\EFI\BOOT\BOOTX64.EFI"
+# Secure Boot (see secureboot\README.md): the firmware starts shim, shim starts Limine
+# (with an .sbat section), and the first time shim's key manager adds Limine's fingerprint.
+# SOLON-SECURE-BOOT.efi is the same file at the top of the stick, easy to pick.
+. "$PSScriptRoot\secureboot.ps1"
+Copy-Item secureboot\shimx64.efi "$stage\EFI\BOOT\BOOTX64.EFI"
+Copy-Item secureboot\mmx64.efi "$stage\EFI\BOOT\mmx64.efi"
+Invoke-SolonSecureLoader "limine\BOOTX64.EFI" "$stage\EFI\BOOT\grubx64.efi" $mkimg
+Copy-Item "$stage\EFI\BOOT\grubx64.efi" "$stage\SOLON-SECURE-BOOT.efi"
 Copy-Item limine\limine-bios.sys "$stage\boot\limine-bios.sys"
 Copy-Item target\x86_64-unknown-none\release\solon "$stage\boot\kernel"
 # Same boot entry as development, without the test photos.
@@ -43,7 +50,13 @@ Copy-Item limine.conf "$stage\boot\limine.conf"
 Solon - bootable USB files
 ==========================
 Copy everything in this folder (EFI and boot) onto a USB stick formatted as FAT32,
-keeping the folder structure. Then boot the PC from the stick (UEFI, Secure Boot off).
+keeping the folder structure. Then boot the PC from the stick.
+
+Secure Boot can stay on. The first time, a blue screen says "Verification failed":
+press Enter, then any key. In "Shim UEFI key management" choose "Enroll hash from disk",
+the stick (SOLONBOOT), then SOLON-SECURE-BOOT.efi, then "Yes", then "Reboot".
+After that Solon starts normally.
+
 See docs\real-pc-guide.md in the Solon project for the full guide.
 "@ | Out-File -Encoding ascii "$stage\SOLON-README.txt"
 

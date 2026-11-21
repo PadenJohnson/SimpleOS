@@ -25,7 +25,12 @@ param(
     [switch]$StickOnUsb2,     # with -BootStick: put the stick on a USB 2 controller Solon can't use
     [switch]$NoEsp,           # no development boot folder: boot from an internal disk (after installing)
     [switch]$Sound,           # add an Intel HD Audio sound card; what it plays lands in test-out\sound.wav
-    [switch]$ExpectExit       # the test ends with Solon turning the machine off or restarting
+    [switch]$ExpectExit,      # the test ends with Solon turning the machine off or restarting
+    # Secure Boot on, with Microsoft's keys like a real PC (Fedora's OVMF Secure Boot build in
+    # test-out\sb\: OVMF_CODE.secboot.fd and OVMF_VARS.secboot.fd). The firmware settings
+    # (enrolled keys) are kept between runs in test-out\sb\vars.fd; -ResetSecureBoot starts over.
+    [switch]$SecureBoot,
+    [switch]$ResetSecureBoot
 )
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
@@ -52,7 +57,14 @@ $args = @("-machine", "q35", "-m", "1G", "-display", "none",
           "-serial", "file:$log",
           "-serial", "file:test-out\printjob.bin",
           "-qmp", "tcp:127.0.0.1:$port,server,nowait")
-if (-not $LegacyBios) {
+if ($SecureBoot) {
+    if (-not (Test-Path test-out\sb\OVMF_CODE.secboot.fd)) { throw "Put Fedora's OVMF_CODE.secboot.fd and OVMF_VARS.secboot.fd in test-out\sb\" }
+    if ($ResetSecureBoot -or -not (Test-Path test-out\sb\vars.fd)) { Copy-Item test-out\sb\OVMF_VARS.secboot.fd test-out\sb\vars.fd -Force }
+    $args[1] = "q35,smm=on"
+    $args += @("-global", "driver=cfi.pflash01,property=secure,value=on",
+               "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=test-out\sb\OVMF_CODE.secboot.fd",
+               "-drive", "if=pflash,format=raw,unit=1,file=test-out\sb\vars.fd")
+} elseif (-not $LegacyBios) {
     $args += @("-drive", "`"if=pflash,format=raw,unit=0,readonly=on,file=$(Join-Path $share 'edk2-x86_64-code.fd')`"",
                "-drive", "if=pflash,format=raw,unit=1,file=test-out\vars.fd")
 }

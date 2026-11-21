@@ -1163,6 +1163,19 @@ fn main() {
             fs::write(&args[2], mbr_image(vol, 0x0C, 2048)).unwrap();
             return;
         }
+        Some("add-sbat") if args.len() == 5 => {
+            // Secure Boot: shim only starts EFI programs that carry an ".sbat" section.
+            let pe = fs::read(&args[2]).unwrap();
+            let csv = fs::read(&args[4]).unwrap();
+            match add_section(&pe, b".sbat", &csv) {
+                Ok(out) => fs::write(&args[3], out).unwrap(),
+                Err(e) => {
+                    eprintln!("add-sbat: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         Some("library") if args.len() == 5 => {
             // A Solon storage disk (GPT "Solon Library" partition, exFAT) with a folder's files.
             let mib: usize = args[4].parse().unwrap();
@@ -1610,4 +1623,60 @@ fn exfat_get(path: &Path, want: &str, out: &Path) -> bool {
     }
     println!("{} not found", want);
     false
+}
+
+/// Append a read-only data section to a PE32+ (UEFI) executable. The section table must
+/// have room for one more entry before the first section's data.
+fn add_section(pe: &[u8], name: &[u8], data: &[u8]) -> Result<Vec<u8>, String> {
+    let rd16 = |o: usize| u16::from_le_bytes([pe[o], pe[o + 1]]) as usize;
+    let rd32 = |o: usize| u32::from_le_bytes(pe[o..o + 4].try_into().unwrap()) as usize;
+    if pe.len() < 0x40 || &pe[..2] != b"MZ" {
+        return Err("not an EFI program".into());
+    }
+    let h = rd32(0x3C);
+    if &pe[h..h + 4] != b"PE\0\0" {
+        return Err("no PE header".into());
+    }
+    let n = rd16(h + 6);
+    let opt = h + 24;
+    if rd16(opt) != 0x20B {
+        return Err("not PE32+".into());
+    }
+    let opt_size = rd16(h + 20);
+    let (sect_align, file_align) = (rd32(opt + 32), rd32(opt + 36));
+    let size_of_image = rd32(opt + 56);
+    let table = opt + opt_size;
+    let first_raw = (0..n).map(|i| rd32(table + i * 40 + 20)).filter(|&p| p > 0).min().unwrap_or(rd32(opt + 60));
+    if table + (n + 1) * 40 > first_raw.min(rd32(opt + 60)) {
+        return Err("no room for another section header".into());
+    }
+    if rd32(opt + 112 + 4 * 8) != 0 {
+        return Err("already signed; add the section before signing".into());
+    }
+    if (0..n).any(|i| &pe[table + i * 40..table + i * 40 + name.len()] == name) {
+        return Err("the section is already there".into());
+    }
+    let up = |v: usize, a: usize| (v + a - 1) / a * a;
+    let mut out = pe.to_vec();
+    out.resize(up(out.len(), file_align), 0);
+    let raw_ptr = out.len();
+    let raw_size = up(data.len(), file_align);
+    let va = up(size_of_image, sect_align);
+    out.extend_from_slice(data);
+    out.resize(raw_ptr + raw_size, 0);
+    let e = table + n * 40;
+    let mut hdr = [0u8; 40];
+    hdr[..name.len()].copy_from_slice(name);
+    hdr[8..12].copy_from_slice(&(data.len() as u32).to_le_bytes());
+    hdr[12..16].copy_from_slice(&(va as u32).to_le_bytes());
+    hdr[16..20].copy_from_slice(&(raw_size as u32).to_le_bytes());
+    hdr[20..24].copy_from_slice(&(raw_ptr as u32).to_le_bytes());
+    hdr[36..40].copy_from_slice(&0x4000_0040u32.to_le_bytes()); // initialised data, readable
+    out[e..e + 40].copy_from_slice(&hdr);
+    out[h + 6..h + 8].copy_from_slice(&((n + 1) as u16).to_le_bytes());
+    let init = rd32(opt + 8) + raw_size;
+    out[opt + 8..opt + 12].copy_from_slice(&(init as u32).to_le_bytes());
+    out[opt + 56..opt + 60].copy_from_slice(&(up(va + data.len(), sect_align) as u32).to_le_bytes());
+    out[opt + 64..opt + 68].copy_from_slice(&0u32.to_le_bytes()); // checksum (unused by UEFI)
+    Ok(out)
 }

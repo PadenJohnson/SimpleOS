@@ -43,8 +43,9 @@ leaves plenty of room for photos.
 
 ## 3. Boot the PC from the stick
 
-1. Turn **Secure Boot off** in the PC's firmware setup (Solon's bootloader isn't signed by
-   Microsoft). It's usually under *Security* or *Boot*.
+1. **Secure Boot can stay on.** (If the PC refuses the stick outright, look in the firmware
+   setup for *Allow Microsoft 3rd Party UEFI CA* and turn it on; some Lenovo and Surface
+   PCs have it off.)
 2. Plug in the stick, power on, and press the **boot menu key** right away:
 
    | Brand | Boot menu key |
@@ -62,6 +63,21 @@ leaves plenty of room for photos.
 
 Solon's desktop should appear within a few seconds.
 
+### The first time with Secure Boot on (once per PC)
+
+Solon starts through *shim*, the Microsoft-signed starter Linux uses. The first time, shim
+doesn't know Solon yet and asks you to approve it:
+
+1. A blue box says **Verification failed: (0x1A) Security Violation**. Press **Enter**.
+2. "Shim UEFI key management" counts down: press any key.
+3. Choose **Enroll hash from disk** (with the arrow keys and Enter).
+4. Choose the stick (**SOLONBOOT**), then **SOLON-SECURE-BOOT.efi**.
+5. Choose **Continue**, then **Yes**, then **Reboot**.
+
+After that, Solon starts with no questions, from the stick or after installing it. The
+approval only has to be done again if Solon's boot loader (Limine) is updated, which the
+release notes will say. With Secure Boot off, none of this appears.
+
 ## 4. What to expect
 
 - **First boot from the image (Option A):** Solon automatically sets up a "Solon Library"
@@ -74,8 +90,7 @@ Solon's desktop should appear within a few seconds.
   after two warnings. Solon never erases an internal disk or its own stick.
 - **Internal disks** (NVMe/SATA) are detected but not touched unless you confirm *Set up
   Solon storage*, which only ever uses empty space.
-- To go back to Windows: shut down, remove the stick, and turn the PC on. Turn Secure Boot
-  back on if you like.
+- To go back to Windows: shut down, remove the stick, and turn the PC on.
 
 ## 5. Known limits on real hardware
 
