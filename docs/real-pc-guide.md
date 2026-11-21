@@ -81,10 +81,18 @@ Solon's desktop should appear within a few seconds.
 
 - **Laptop touchpads** often don't work yet (many use an I2C connection Solon doesn't
   support). Plug in a USB mouse. Laptop keyboards usually work.
-- **Very high-resolution screens** (4K) show everything small; there's no scaling yet.
-- **PCs from before about 2012** (USB 2-only controllers) can boot Solon, but USB devices won't work.
+- **Very high-resolution screens** (4K): choose Large or Extra large text in Settings.
+- **USB keyboards and mice on USB 2-only ports** (PCs from before about 2012) don't work yet;
+  drives, phones and printers do.
 - **No Wi-Fi or networking**: that's by design.
-- Videos, documents and printing aren't built yet.
+- **Sound** works with Intel High Definition Audio, the sound chip in nearly every PC since
+  about 2005. Sound over HDMI to a TV isn't supported yet. If the Video Editor says
+  "(no sound card)", F12 shows what Solon found (lines starting with `hda:`).
+- **Videos**: the Video Editor uses photos, camera videos in Motion-JPEG .avi and .wav music.
+  Phone videos (.mp4, .mov) are kept safely but can't be played or edited yet.
+- Exported movies (in the Videos folder) are MP4 with H.264 picture and FLAC sound. They
+  play in Windows' own player (checked). Most recent phones and web browsers handle FLAC
+  sound in MP4 too, but some players and TVs may show the picture without sound.
 
 ## 6. Reporting how it went
 

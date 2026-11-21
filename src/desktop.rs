@@ -20,12 +20,14 @@ use crate::settingsui::{SettingsAction, SettingsApp};
 use crate::files::{CopyJob, Files, FilesAction};
 use crate::diskmgr::{DiskAction, DiskMgr};
 use crate::documents::{DocSrc, DocsAction, DocsApp};
+use crate::movieui::{MovieAction, MovieApp};
 use crate::usb::Usb;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum App {
     Photos,
     Videos,
+    Movie,
     Documents,
     Printers,
     Import,
@@ -39,6 +41,7 @@ impl App {
         match self {
             App::Photos => "Photos",
             App::Videos => "Videos",
+            App::Movie => "Video Editor",
             App::Documents => "Documents",
             App::Printers => "Printers",
             App::Import => "Import",
@@ -56,7 +59,7 @@ impl App {
             App::Printers => ["No printers found.", "Connect a USB printer to this computer."],
             App::Import => ["No USB drives or cameras detected.", "USB support arrives in an upcoming milestone."],
             App::Settings => ["", ""],
-            App::Files | App::Disks => ["", ""],
+            App::Files | App::Disks | App::Movie => ["", ""],
         }
     }
 }
@@ -71,7 +74,7 @@ const TEXT_DIM: u32 = rgb(170, 180, 190);
 const WIN_BG: u32 = rgb(250, 250, 252);
 
 /// Every app, in the order the Applications menu shows them.
-const APPS: [App; 8] = [App::Photos, App::Documents, App::Files, App::Import, App::Printers, App::Videos, App::Disks, App::Settings];
+const APPS: [App; 9] = [App::Photos, App::Documents, App::Files, App::Import, App::Videos, App::Movie, App::Printers, App::Disks, App::Settings];
 
 struct Window {
     app: App,
@@ -154,6 +157,7 @@ pub struct Desktop {
     disks: DiskMgr,
     copy: Option<CopyJob>,
     docs: DocsApp,
+    movie: MovieApp,
     /// Spreadsheet pages waiting to be printed (on the next tick, after the notice shows).
     pending_sheet_print: Option<(Vec<Canvas>, Layout, PrinterInfo)>,
     /// A phone import to start on the next tick (after the "looking" notice shows).
@@ -263,6 +267,7 @@ impl Desktop {
             disks: DiskMgr::new(),
             copy: None,
             docs: DocsApp::new(),
+            movie: MovieApp::new(),
             pending_sheet_print: None,
             pending_phone_import: None,
             pending_save: None,
@@ -421,7 +426,7 @@ impl Desktop {
 
     /// True while there's background work (photos to decode, an import), so the main loop shouldn't sleep.
     pub fn busy(&self) -> bool {
-        self.photos.needs_loading() || self.job.is_some() || self.copy.is_some() || self.disks.busy()
+        self.photos.needs_loading() || self.job.is_some() || self.copy.is_some() || self.disks.busy() || self.movie.exporting()
     }
 
     fn step_import(&mut self, now: u64) -> bool {
@@ -632,6 +637,12 @@ impl Desktop {
         if matches!(&self.toast, Some((_, end)) if now >= *end) {
             self.toast = None;
             redraw = true;
+        }
+        // Video editor: playback, previews, thumbnails, saving, exporting.
+        if let Some(win) = self.windows.iter().find(|w| w.app == App::Movie) {
+            let visible = !win.minimized;
+            let a = self.movie.tick(now, &mut self.storage, &mut self.usb, visible);
+            redraw |= self.movie_action(a, now);
         }
         if let Some((i, choice, edits)) = self.pending_save.take() {
             match self.save_edit(i, choice, edits) {
@@ -1211,7 +1222,7 @@ impl Desktop {
         self.windows.push(Window { app, x, y, w, h, minimized: false, restore: None });
         self.order.push(app);
         // The editors want all the room they can get.
-        if matches!(app, App::Photos | App::Documents) {
+        if matches!(app, App::Photos | App::Documents | App::Movie) {
             self.set_maximized(app, true);
         }
         kprintln!("solon: open {}", app.name());
@@ -1227,9 +1238,19 @@ impl Desktop {
         if app == App::Documents && !self.docs.editing() {
             self.docs.refresh(&mut self.storage, &mut self.usb);
         }
+        if app == App::Movie {
+            self.movie.opened(&mut self.storage, &mut self.usb);
+        }
     }
 
     fn close_app(&mut self, app: App) {
+        if app == App::Movie {
+            if self.movie.exporting() {
+                self.toast = Some((String::from("Still making your video - wait for it to finish"), Self::now() + 4 * HZ));
+                return;
+            }
+            self.movie.closed(&mut self.storage, &mut self.usb);
+        }
         self.windows.retain(|w| w.app != app);
         self.order.retain(|a| *a != app);
         if matches!(self.drag, Some((a, ..)) if a == app) {
@@ -1366,6 +1387,7 @@ impl Desktop {
                 App::Files => self.files.draw(c, body, &self.storage, &self.usb),
                 App::Disks => self.disks.draw(c, body, &self.storage),
                 App::Documents => self.docs.draw(c, body),
+                App::Movie => self.movie.draw(c, body),
                 app => draw_placeholder(c, app, body),
             }
             c.reset_clip();
@@ -1391,13 +1413,14 @@ impl Desktop {
 
     // ---- input --------------------------------------------------------------------------
 
-    fn app_wheel(&mut self, app: App, wheel: i8, body: Rect) -> bool {
+    fn app_wheel(&mut self, app: App, wheel: i8, x: i32, y: i32, body: Rect) -> bool {
         match app {
             App::Photos => self.photos.on_wheel(wheel, body),
             App::Import => self.import.on_wheel(wheel, body, &self.usb),
             App::Files => self.files.on_wheel(wheel, body),
             App::Disks => self.disks.on_wheel(wheel, body),
             App::Documents => self.docs.on_wheel(wheel, body),
+            App::Movie => self.movie.on_wheel(wheel, x, y, body),
             _ => false,
         }
     }
@@ -1427,6 +1450,11 @@ impl Desktop {
                 self.capture = true;
                 redraw |= self.docs_action(a, now);
             }
+            App::Movie => {
+                let a = self.movie.on_press(x, y, body, now, &mut self.storage, &mut self.usb);
+                self.capture = true;
+                redraw |= self.movie_action(a, now);
+            }
             App::Settings => {
                 let screen = self.screen;
                 match self.settings_app.on_press(x, y, body, &self.settings, screen) {
@@ -1450,6 +1478,17 @@ impl Desktop {
         redraw
     }
 
+    fn movie_action(&mut self, a: MovieAction, now: u64) -> bool {
+        match a {
+            MovieAction::None => false,
+            MovieAction::Redraw => true,
+            MovieAction::Toast(msg) => {
+                self.toast = Some((msg, now + 5 * HZ));
+                true
+            }
+        }
+    }
+
     /// A key for an app. None = the app didn't want it.
     fn app_key(&mut self, app: App, sc: u8, body: Rect) -> Option<bool> {
         match app {
@@ -1458,6 +1497,7 @@ impl Desktop {
             App::Files => self.files.on_key(sc, body, &mut self.storage, &mut self.usb).map(|a| self.files_action(a, Self::now())),
             App::Disks => self.disks.on_key(sc).map(|a| self.disk_action(a, Self::now())),
             App::Documents => self.docs.on_key(sc, body, &mut self.storage, &mut self.usb).map(|a| self.docs_action(a, Self::now())),
+            App::Movie => self.movie.on_key(sc).map(|a| self.movie_action(a, Self::now())),
             _ => None,
         }
     }
@@ -1479,7 +1519,7 @@ impl Desktop {
         if wheel != 0 && self.apps_menu.is_none() {
             if let Some(i) = self.windows.iter().rposition(|w| !w.minimized && w.rect().contains(x, y)) {
                 let (app, body) = (self.windows[i].app, self.windows[i].body());
-                redraw |= self.app_wheel(app, wheel, body);
+                redraw |= self.app_wheel(app, wheel, x, y, body);
             }
         }
 
@@ -1489,10 +1529,18 @@ impl Desktop {
                 let (app, body) = (self.windows[i].app, self.windows[i].body());
                 if released {
                     self.capture = false;
-                    return redraw | if app == App::Documents { self.docs.on_release() } else { self.photos.on_release() };
+                    return redraw | match app {
+                        App::Documents => self.docs.on_release(),
+                        App::Movie => self.movie.on_release(),
+                        _ => self.photos.on_release(),
+                    };
                 }
                 if buttons & 1 != 0 {
-                    return redraw | if app == App::Documents { self.docs.on_drag(x, y, body) } else { self.photos.on_drag(x, y, body) };
+                    return redraw | match app {
+                        App::Documents => self.docs.on_drag(x, y, body),
+                        App::Movie => self.movie.on_drag(x, y, body),
+                        _ => self.photos.on_drag(x, y, body),
+                    };
                 }
             }
             self.capture = false;

@@ -1184,6 +1184,9 @@ fn main() {
         Some("fatcheck") if args.len() == 3 => {
             std::process::exit(if fat_check(Path::new(&args[2])) { 0 } else { 1 });
         }
+        Some("exfat-get") if args.len() == 5 => {
+            std::process::exit(if exfat_get(Path::new(&args[2]), &args[3], Path::new(&args[4])) { 0 } else { 1 });
+        }
         Some("check") if args.len() == 3 => {
             std::process::exit(if check_disk(Path::new(&args[2])) { 0 } else { 1 });
         }
@@ -1192,6 +1195,7 @@ fn main() {
     if args.len() != 3 {
         eprintln!("usage: mkimg <samples folder> <output folder>");
         eprintln!("       mkimg blank <file> <MiB>");
+        eprintln!("       mkimg exfat-get <disk image> <file name> <out file>");
         eprintln!("       mkimg windows-like <file> <MiB> <samples folder>");
         eprintln!("       mkimg check <disk image>");
         eprintln!("       mkimg fatcheck <disk image>");
@@ -1505,4 +1509,97 @@ fn sym_lookup(path: &Path, addr: u64) {
         Some((v, sz, n)) => println!("{:#x} = {} + {:#x} (size {:#x})", addr, n, addr - v, sz),
         None => println!("{:#x}: no symbol", addr),
     }
+}
+
+/// Copy a file (found by name anywhere) out of the exFAT partitions of a GPT disk image.
+fn exfat_get(path: &Path, want: &str, out: &Path) -> bool {
+    let img = fs::read(path).unwrap();
+    let p = &img[SECTOR..SECTOR + 92];
+    if &p[0..8] != b"EFI PART" {
+        println!("no GPT");
+        return false;
+    }
+    let elba = le64(p, 72) as usize;
+    for i in 0..le32(p, 80) as usize {
+        let e = &img[elba * SECTOR + i * 128..elba * SECTOR + (i + 1) * 128];
+        if e[0..16].iter().all(|&x| x == 0) {
+            continue;
+        }
+        let first = le64(e, 32) as usize * SECTOR;
+        let vol = &img[first..];
+        if &vol[3..11] != b"EXFAT   " {
+            continue;
+        }
+        let bps = 1usize << vol[108];
+        let spc = 1usize << vol[109];
+        let csize = bps * spc;
+        let fat_off = le32(vol, 80) as usize * bps;
+        let heap = le32(vol, 88) as usize * bps;
+        let root = le32(vol, 96);
+        let next = |c: u32| le32(vol, fat_off + c as usize * 4);
+        // Read a chain (or a contiguous run when `len` is known and NoFatChain is set).
+        let read = |start: u32, len: Option<u64>, contiguous: bool| -> Vec<u8> {
+            let mut data = Vec::new();
+            let mut c = start;
+            let max = len.unwrap_or(u64::MAX);
+            while c >= 2 && c < 0xFFFF_FFF7 && (data.len() as u64) < max {
+                let at = heap + (c as usize - 2) * csize;
+                data.extend_from_slice(&vol[at..at + csize]);
+                c = if contiguous { c + 1 } else { next(c) };
+            }
+            if let Some(l) = len {
+                data.truncate(l as usize);
+            }
+            data
+        };
+        let mut stack = vec![(root, None, false)];
+        while let Some((dc, dlen, dcont)) = stack.pop() {
+            let dir = read(dc, dlen, dcont);
+            let mut k = 0;
+            while k + 32 <= dir.len() {
+                let t = dir[k];
+                if t == 0 {
+                    break;
+                }
+                if t == 0x85 {
+                    let secondary = dir[k + 1] as usize;
+                    let attr = u16::from_le_bytes([dir[k + 4], dir[k + 5]]);
+                    let s = k + 32;
+                    if s + 32 > dir.len() || dir[s] != 0xC0 {
+                        k += 32;
+                        continue;
+                    }
+                    let flags = dir[s + 1];
+                    let nlen = dir[s + 3] as usize;
+                    let fc = le32(&dir, s + 20);
+                    let size = le64(&dir, s + 24);
+                    let mut units = Vec::new();
+                    for n in 0..secondary.saturating_sub(1) {
+                        let ne = s + 32 + n * 32;
+                        if ne + 32 > dir.len() || dir[ne] != 0xC1 {
+                            break;
+                        }
+                        for q in 0..15 {
+                            units.push(u16::from_le_bytes([dir[ne + 2 + q * 2], dir[ne + 3 + q * 2]]));
+                        }
+                    }
+                    units.truncate(nlen);
+                    let name = String::from_utf16_lossy(&units);
+                    if attr & 0x10 != 0 {
+                        stack.push((fc, Some(size), flags & 2 != 0));
+                    } else if name.eq_ignore_ascii_case(want) {
+                        let data = read(fc, Some(size), flags & 2 != 0);
+                        fs::write(out, &data).unwrap();
+                        println!("got {} ({} bytes, fnv {:08x})", name, data.len(), fnv(&data));
+                        return true;
+                    }
+                    k += 32 * (secondary + 1);
+                    continue;
+                }
+                k += 32;
+            }
+        }
+    }
+    println!("{} not found", want);
+    false
 }

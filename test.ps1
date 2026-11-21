@@ -24,6 +24,7 @@ param(
     [string]$Resolution = "", # screen mode (development boot only), e.g. "1920x1080"
     [switch]$StickOnUsb2,     # with -BootStick: put the stick on a USB 2 controller Solon can't use
     [switch]$NoEsp,           # no development boot folder: boot from an internal disk (after installing)
+    [switch]$Sound,           # add an Intel HD Audio sound card; what it plays lands in test-out\sound.wav
     [switch]$ExpectExit       # the test ends with Solon turning the machine off or restarting
 )
 $ErrorActionPreference = "Stop"
@@ -57,6 +58,10 @@ if (-not $LegacyBios) {
 }
 if (-not $BootStick -and -not $NoEsp) { $args += @("-drive", "format=raw,file=fat:rw:esp") }
 $xhci = $false
+if ($Sound) {
+    Remove-Item test-out\sound.wav -ErrorAction SilentlyContinue
+    $args += @("-audiodev", "wav,id=snd0,path=test-out\sound.wav", "-device", "intel-hda", "-device", "hda-output,audiodev=snd0")
+}
 if ($BootStick -and $StickOnUsb2) {
     # The stick on a USB 2 (EHCI) controller, which Solon doesn't drive (like some laptops' ports).
     $args += @("-device", "usb-ehci,id=ehci",

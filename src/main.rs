@@ -20,6 +20,7 @@ mod ehci;
 mod files;
 mod fs;
 mod gfx;
+mod hda;
 mod hc;
 mod icons;
 mod import;
@@ -28,6 +29,8 @@ mod install;
 mod interrupts;
 mod library;
 mod memory;
+mod movieui;
+mod movie;
 mod msc;
 mod nvme;
 mod pci;
@@ -46,6 +49,7 @@ mod textfield;
 mod usb;
 mod update;
 mod usbprint;
+mod video;
 mod xhci;
 
 use core::panic::PanicInfo;
@@ -218,6 +222,12 @@ extern "C" fn kmain() -> ! {
     let mut storage = Storage::init(&mut usb, disks);
     kprintln!("solon: usb ready in {} ms, {} drive(s)", (TICKS.load(Relaxed) - t0) * 1000 / HZ, usb.drives.len());
 
+    // Sound card (Intel HD Audio).
+    hda::init(&pci::scan());
+    if EXECUTABLE_CMDLINE_REQUEST.get_response().and_then(|r| r.cmdline().to_str().ok()).is_some_and(|c| c.split_whitespace().any(|w| w == "soundtest")) {
+        hda::self_test();
+    }
+
     // Power off / restart need the ACPI tables.
     let acpi = RSDP_REQUEST.get_response().and_then(|r| {
         let a = r.address() as u64;
@@ -239,6 +249,14 @@ extern "C" fn kmain() -> ! {
     // Photos on the boot drive (loaded into memory by the bootloader); decoded in the background.
     let files = MODULE_REQUEST.get_response().map(|r| r.modules()).unwrap_or(&[]);
     let mut photos = Photos::new(w, h);
+    // Everything on the boot drive is available to the video editor; photos also go to Photos.
+    for f in files.iter() {
+        let path = f.path().to_str().unwrap_or("?");
+        let name = String::from(path.rsplit('/').next().unwrap_or(path));
+        let bytes: &'static [u8] = unsafe { core::slice::from_raw_parts(f.addr(), f.size() as usize) };
+        movieui::BOOT_FILES.lock().push((name, bytes));
+    }
+    let files: alloc::vec::Vec<_> = files.iter().filter(|f| !matches!(movie::media_kind(f.path().to_str().unwrap_or("")), Some(movie::Kind::Video | movie::Kind::Music))).collect();
     if !files.is_empty() {
         let items = files
             .iter()

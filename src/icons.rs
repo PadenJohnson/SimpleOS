@@ -9,6 +9,7 @@ pub fn tile_color(app: App) -> u32 {
     match app {
         App::Photos => rgb(46, 134, 222),
         App::Videos => rgb(231, 76, 60),
+        App::Movie => rgb(211, 84, 0),
         App::Documents => rgb(39, 174, 96),
         App::Printers => rgb(142, 68, 173),
         App::Import => rgb(243, 156, 18),
@@ -35,6 +36,18 @@ pub fn draw(c: &mut Canvas, app: App, x: i32, y: i32) {
             c.circle(x + 32, y + 32, 19, WHITE);
             c.circle(x + 32, y + 32, 16, bg);
             c.triangle([(x + 27, y + 22), (x + 27, y + 42), (x + 43, y + 32)], WHITE);
+        }
+        App::Movie => {
+            // A film strip with a timeline under it.
+            c.round_rect(x + 10, y + 12, 44, 28, 4, WHITE);
+            for k in 0..5 {
+                c.fill_rect(x + 14 + k * 8, y + 15, 4, 3, bg);
+                c.fill_rect(x + 14 + k * 8, y + 34, 4, 3, bg);
+            }
+            c.triangle([(x + 28, y + 20), (x + 28, y + 32), (x + 38, y + 26)], bg);
+            c.round_rect(x + 10, y + 45, 20, 7, 2, WHITE);
+            c.round_rect(x + 33, y + 45, 21, 7, 2, WHITE);
+            c.fill_rect(x + 40, y + 42, 2, 13, rgb(255, 214, 10));
         }
         App::Documents => {
             c.fill_rect(x + 18, y + 12, 22, 40, WHITE);

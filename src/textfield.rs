@@ -53,6 +53,12 @@ impl TextField {
         TextField { text: String::from(initial), shift, max, any: true, fresh: false }
     }
 
+    /// Start with the text selected, so typing replaces it.
+    pub fn selected(mut self) -> TextField {
+        self.fresh = !self.text.is_empty();
+        self
+    }
+
     pub fn on_key(&mut self, sc: u8) -> TextEvent {
         match sc {
             0x2A | 0x36 => {

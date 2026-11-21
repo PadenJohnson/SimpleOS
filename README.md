@@ -8,7 +8,7 @@ SimpleOS (internally "Solon") is a small operating system written from scratch i
 nothing to download.
 
 **Working now**
-- Desktop with Photos, Videos, Documents, Printers, Import, Files, Disks and Settings
+- Desktop with Photos, Videos, Video Editor, Documents, Printers, Import, Files, Disks and Settings
 - Desktop: a taskbar along the bottom with an Applications menu and a button per open
   window; several apps open at once in windows that move, minimize and maximize
 - Photos: thumbnail grid, full-screen viewer, and a Lightroom-style editor: histogram, Auto,
@@ -30,6 +30,16 @@ nothing to download.
   you type), bold, text and fill colours, number formats (money, percent, dates), column
   widths, several sheets, undo, copy/paste, fill down, and printing. Charts, pictures and
   merged cells in Excel files aren't kept when saving.
+- Video Editor: a simple Kdenlive-style editor. Photos, camera videos (Motion-JPEG .avi)
+  and music (.wav) on the left, a preview with Play/Pause, and a timeline with Video, Titles
+  and two Music tracks. Add, drag to reorder or move, drag the ends to shorten, split at the
+  red line, delete, undo/redo; crossfade or dip-to-black between clips; slow zoom and pan on
+  photos; titles in the middle, at the bottom or on black; volume and fades. The project
+  saves itself. "Export video" makes an MP4 (H.264 picture, FLAC sound, 480p / 720p / 1080p)
+  in the Videos folder, written by Solon's own encoders. Phone videos (.mp4) can't be used
+  yet: that needs an H.264 decoder, which is next.
+- Sound: Intel High Definition Audio (the sound chip in nearly every PC since about 2005),
+  through the speakers, headphones and line out. Checked in QEMU; not yet on a real PC.
 - Phones over USB: Android phones (MTP, "File transfer") and iPhones and cameras (PTP) show up
   in Files and Import. Browse and copy anything off them; Import's "Import new photos &
   videos" copies everything not imported before (big videos are copied a piece at a time).
@@ -58,7 +68,7 @@ nothing to download.
   page; colour or black & white; copies. Checked with a test printer and GhostPCL; not yet
   tried on a real printer.
 
-**Planned:** playing videos.
+**Planned:** playing phone videos (H.264 decoding), in Videos and the Video Editor.
 
 ## Making a USB stick
 
@@ -83,18 +93,21 @@ QEMU for Windows.
 | `.\test.ps1` | Build and boot headless; drives mouse/keyboard, takes screenshots, checks the log |
 | `.\tools\make-usb.ps1` | Build the real-PC USB files and disk image into `dist\` |
 | `.\tools\make-samples.ps1` | Regenerate the sample photos |
-| `tools\mkimg` | Host tool: builds FAT/exFAT/GPT test disks, checks partition tables, decodes print jobs |
+| `tools\mkimg` | Host tool: builds FAT/exFAT/GPT test disks, checks partition tables, decodes print jobs, copies files out of disk images (`exfat-get`) |
+| `tools\videotest` | Host tool: checks the H.264, FLAC, MP4 and AVI code; its MP4s can be checked with Windows' own player |
 
 `test.ps1` options include `-Usb` (keyboard, mouse, read-only or writable USB drives, hot-plugging), `-Internal`
 (NVMe/SATA disk images), `-BootStick` / `-LegacyBios` (boot from a USB image like a real PC)
 and `-Cmdline "testprinter=pcl"` (a fake printer whose jobs are captured for checking) or
-`-Cmdline "testphone"` (a pretend phone with photos, a video and a document).
+`-Cmdline "testphone"` (a pretend phone with photos, a video and a document), `-Sound` (a sound
+card whose output is saved to `test-outsound.wav`; with `-Cmdline "soundtest"` it plays a tone).
 
 ## Layout
 
 - `src/`: the kernel. `main.rs` boots; `desktop.rs`, `photos.rs`, `editor.rs`, `import.rs`,
-  `files.rs`, `diskmgr.rs`, `documents.rs`, `sheetui.rs`, `settingsui.rs` and `printui.rs` are
-  the apps; `doc/` reads and writes spreadsheets (zip, XML, formulas, xlsx, csv); `xhci.rs`, `usb.rs`, `msc.rs`, `usbprint.rs`, `nvme.rs` and
+  `files.rs`, `diskmgr.rs`, `documents.rs`, `sheetui.rs`, `movieui.rs`, `settingsui.rs` and `printui.rs` are
+  the apps; `movie.rs` is the video editor's engine; `video/` holds the H.264, FLAC, MP4 and AVI/WAV code;
+  `doc/` reads and writes spreadsheets (zip, XML, formulas, xlsx, csv); `xhci.rs`, `ehci.rs`, `usb.rs`, `msc.rs`, `usbprint.rs`, `nvme.rs`, `hda.rs` and
   `ahci.rs` are drivers; `fs/` holds partition tables, FAT and exFAT; `library.rs` is the
   photo library; `print.rs` lays out pages and speaks PCL / IPP.
 - `tools/`: build, image and test helpers. `docs/`: guide and screenshots. `samples/`:

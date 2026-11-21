@@ -1,0 +1,15 @@
+[package]
+name = "videotest"
+version = "0.1.0"
+edition = "2021"
+description = "Host tests for Solon's video code in src/video (H.264 encoder, FLAC, MP4)"
+
+[dependencies]
+zune-jpeg = { version = "0.5", default-features = false }
+zune-png = { version = "0.5", default-features = false }
+zune-core = { version = "0.5", default-features = false }
+jpeg-encoder = { version = "0.7", default-features = false }
+
+[profile.release]
+debug = false
+overflow-checks = true

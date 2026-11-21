@@ -481,6 +481,17 @@ impl Storage {
         out
     }
 
+    /// /Videos (created if missing): exported movies and the video editor's project.
+    pub fn videos_dir(&mut self, usb: &mut Usb) -> Result<DirEntry, FsError> {
+        self.with(usb, |vol, d| {
+            let root = vol.root();
+            match vol.find(d, &root, "Videos")? {
+                Some(e) if e.is_dir => Ok(e),
+                _ => vol.mkdir(d, &root, "Videos"),
+            }
+        })
+    }
+
     /// /Documents (created if missing).
     pub fn documents_dir(&mut self, usb: &mut Usb) -> Result<DirEntry, FsError> {
         self.with(usb, |vol, d| {
@@ -527,7 +538,7 @@ impl Storage {
 
     // ---- edited photos ----------------------------------------------------------------
 
-    fn names_in(&mut self, usb: &mut Usb, dir: &DirEntry) -> Result<Vec<(String, u64)>, FsError> {
+    pub fn names_in(&mut self, usb: &mut Usb, dir: &DirEntry) -> Result<Vec<(String, u64)>, FsError> {
         Ok(self.list(usb, dir)?.into_iter().map(|e| (e.name, e.size)).collect())
     }
 
