@@ -110,7 +110,7 @@ impl SettingsApp {
                 let col = mix(*top, *bottom, (k * 255 / b.h.max(1)) as u32);
                 c.fill_rect(b.x, b.y + k, b.w, 1, col);
             }
-            c.text_centered(b.x + b.w / 2, b.y + 12, name, Size::Small, true, rgb(240, 242, 245));
+            c.text_centered(b.x + b.w / 2, b.y + 12, name, Size::Small, true, crate::wallpaper::ink(i));
         }
 
         label(c, 1, "Text and icon size");

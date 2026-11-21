@@ -719,6 +719,11 @@ impl Shooter {
     /// Move with sliding along walls.
     fn try_move(&self, x: f32, y: f32, dx: f32, dy: f32, r: f32) -> (f32, f32) {
         let free = |px: f32, py: f32| !(self.blocked(px - r, py - r) || self.blocked(px + r, py - r) || self.blocked(px - r, py + r) || self.blocked(px + r, py + r) || self.solid_thing_near(px, py, r));
+        // Already overlapping something (say, a door that shut on you)? Let any step whose centre
+        // is clear through, so you can always walk out.
+        if !free(x, y) {
+            return if self.blocked(x + dx, y + dy) { (x, y) } else { (x + dx, y + dy) };
+        }
         let mut nx = x;
         let mut ny = y;
         if free(x + dx, y) {
@@ -909,12 +914,30 @@ impl Shooter {
 
     /// Open doors, find secrets, press the exit.
     fn use_key(&mut self, sfx: &mut Sfx) {
-        let (dx, dy) = (libm::cosf(self.angle), libm::sinf(self.angle));
-        let mut d = 0.3;
-        while d < 1.6 {
-            let (cx, cy) = ((self.x + dx * d) as i32, (self.y + dy * d) as i32);
-            let c = self.cell(cx, cy);
-            if c != EMPTY {
+        // Look straight ahead first, then a little to each side, so you needn't face a door or the
+        // exit switch exactly, or stand square on to it.
+        let mut found = None;
+        for off in [0.0f32, 0.2, -0.2, 0.4, -0.4, 0.6, -0.6] {
+            let (dx, dy) = (libm::cosf(self.angle + off), libm::sinf(self.angle + off));
+            let mut d = 0.1;
+            while d < 1.7 {
+                let (cx, cy) = ((self.x + dx * d) as i32, (self.y + dy * d) as i32);
+                let c = self.cell(cx, cy);
+                // Look past the open doorway you're standing in.
+                if c != EMPTY && !(is_door(c) && cx == self.x as i32 && cy == self.y as i32) {
+                    if is_door(c) || c == SECRET || c == EXIT {
+                        found = Some((cx, cy, c));
+                    }
+                    break;
+                }
+                d += 0.05;
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        if let Some((cx, cy, c)) = found {
+            {
                 match c {
                     DOOR | DOOR_RED | DOOR_BLUE => {
                         if c == DOOR_RED && !self.keys[0] {
@@ -947,9 +970,7 @@ impl Shooter {
                     }
                     _ => {}
                 }
-                return;
             }
-            d += 0.1;
         }
     }
 
@@ -1100,8 +1121,16 @@ impl Shooter {
             self.hurt_player(hits, sfx);
         }
         // Doors.
-        let (pcx, pcy) = (px as usize, py as usize);
-        let occupied: Vec<(usize, usize)> = self.enemies.iter().filter(|e| e.dead == 0).map(|e| (e.x as usize, e.y as usize)).chain(core::iter::once((pcx, pcy))).collect();
+        // Anything whose body overlaps a doorway, not just its centre, keeps that door open, so a
+        // door never shuts on you and leaves you wedged in it.
+        let mut occupied: Vec<(usize, usize)> = Vec::new();
+        for (bx, by) in self.enemies.iter().filter(|e| e.dead == 0).map(|e| (e.x, e.y)).chain(core::iter::once((px, py))) {
+            for (ox, oy) in [(-0.3f32, -0.3f32), (0.3, -0.3), (-0.3, 0.3), (0.3, 0.3)] {
+                if bx + ox >= 0.0 && by + oy >= 0.0 {
+                    occupied.push(((bx + ox) as usize, (by + oy) as usize));
+                }
+            }
+        }
         for d in self.doors.iter_mut() {
             match d.dir {
                 1 => {
@@ -1657,7 +1686,7 @@ impl Shooter {
                 return None;
             }
             State::Dead => {
-                if down && code == 0x1C {
+                if down && matches!(code, 0x1C | 0x39 | 0x12) {
                     self.kit = self.kit_at_start.clone();
                     self.kit.health = self.kit.health.max(100);
                     self.load(self.level);
@@ -1666,14 +1695,14 @@ impl Shooter {
                 return Some(GameAction::Redraw);
             }
             State::LevelDone => {
-                if down && code == 0x1C {
+                if down && matches!(code, 0x1C | 0x39 | 0x12) {
                     self.load(self.level + 1);
                     self.state = State::Playing;
                 }
                 return Some(GameAction::Redraw);
             }
             State::Won => {
-                if down && code == 0x1C {
+                if down && matches!(code, 0x1C | 0x39 | 0x12) {
                     self.state = State::Title;
                 }
                 return Some(GameAction::Redraw);

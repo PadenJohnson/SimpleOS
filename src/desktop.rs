@@ -41,6 +41,9 @@ pub enum App {
     Sudoku,
     Pinball,
     Shooter,
+    Writer,
+    Pdf,
+    TextEdit,
 }
 
 impl App {
@@ -49,7 +52,10 @@ impl App {
             App::Photos => "Photos",
             App::Videos => "Videos",
             App::Movie => "Video Editor",
-            App::Documents => "Documents",
+            App::Documents => "Spreadsheets",
+            App::Writer => "Writer",
+            App::Pdf => "PDF",
+            App::TextEdit => "Text Editor",
             App::Printers => "Printers",
             App::Import => "Import",
             App::Files => "Files",
@@ -91,26 +97,100 @@ impl App {
     }
 }
 
-/// Height of the taskbar along the bottom.
-const BAR_H: i32 = 44;
-const TITLE_H: i32 = 36;
+/// Room kept along the bottom for the dock (windows stay above it).
+const BAR_H: i32 = 66;
+/// The dock: a floating rounded bar centred at the bottom.
+const DOCK_H: i32 = 56;
+const DOCK_ICON: i32 = 42;
+const DOCK_GAP: i32 = 8;
+const TITLE_H: i32 = 38;
 const DOUBLE_CLICK_TICKS: u64 = 50; // 0.5 s at 100 Hz
 
-const TEXT: u32 = rgb(240, 242, 245);
-const TEXT_DIM: u32 = rgb(170, 180, 190);
-const WIN_BG: u32 = rgb(250, 250, 252);
+const INK: u32 = rgb(28, 32, 40);
+const INK_DIM: u32 = rgb(96, 104, 116);
+const WIN_BG: u32 = rgb(251, 251, 253);
 
-/// Every app, in the order the Applications menu shows them.
-const APPS: [App; 9] = [App::Photos, App::Documents, App::Files, App::Import, App::Videos, App::Movie, App::Printers, App::Disks, App::Settings];
+/// The Applications menu, in order (folders open in place).
+const APPS: [MenuEntry; 10] = [
+    MenuEntry::App(App::Photos),
+    MenuEntry::Folder(Folder::Documents),
+    MenuEntry::App(App::Files),
+    MenuEntry::App(App::Import),
+    MenuEntry::App(App::Videos),
+    MenuEntry::App(App::Movie),
+    MenuEntry::Folder(Folder::Games),
+    MenuEntry::App(App::Printers),
+    MenuEntry::App(App::Disks),
+    MenuEntry::App(App::Settings),
+];
 
-/// The games, shown in the Games folder of the Applications menu.
-const GAMES: [App; 6] = [App::Solitaire, App::Mines, App::FreeCell, App::Sudoku, App::Pinball, App::Shooter];
+/// Always in the dock (after the Applications button).
+const PINNED: [MenuEntry; 6] = [
+    MenuEntry::App(App::Photos),
+    MenuEntry::App(App::Videos),
+    MenuEntry::Folder(Folder::Documents),
+    MenuEntry::App(App::Files),
+    MenuEntry::Folder(Folder::Games),
+    MenuEntry::App(App::Settings),
+];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Folder {
+    Games,
+    Documents,
+}
+
+impl Folder {
+    fn name(self) -> &'static str {
+        match self {
+            Folder::Games => "Games",
+            Folder::Documents => "Documents",
+        }
+    }
+    fn apps(self) -> &'static [App] {
+        match self {
+            Folder::Games => &[App::Solitaire, App::Mines, App::FreeCell, App::Sudoku, App::Pinball, App::Shooter],
+            Folder::Documents => &[App::Writer, App::Documents, App::Pdf, App::TextEdit],
+        }
+    }
+    fn icon(self) -> icons::Icon {
+        match self {
+            Folder::Games => icons::Icon::Games,
+            Folder::Documents => icons::Icon::Documents,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum MenuEntry {
     App(App),
-    Games,
+    Folder(Folder),
     Back,
+}
+
+impl MenuEntry {
+    fn icon(self) -> icons::Icon {
+        match self {
+            MenuEntry::App(a) => icons::Icon::App(a),
+            MenuEntry::Folder(f) => f.icon(),
+            MenuEntry::Back => icons::Icon::Back,
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            MenuEntry::App(a) => a.name(),
+            MenuEntry::Folder(f) => f.name(),
+            MenuEntry::Back => "Back",
+        }
+    }
+}
+
+/// What's in the dock.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DockItem {
+    Apps,
+    Entry(MenuEntry),
+    Power,
 }
 
 struct Window {
@@ -160,8 +240,13 @@ pub struct Desktop {
     last_title: Option<(App, u64)>,
     /// The Applications menu is open (and which item the keyboard is on).
     apps_menu: Option<usize>,
-    /// The Applications menu is showing the Games folder.
-    games_menu: bool,
+    /// The Applications menu is showing a folder.
+    folder: Option<Folder>,
+    /// Icons drawn small, for the dock (42 px) and title bars (22 px).
+    dock_icons: Vec<(icons::Icon, crate::image::Image)>,
+    title_icons: Vec<(icons::Icon, crate::image::Image)>,
+    /// The wallpaper, drawn once per size and choice: (background, w, h, pixels).
+    wallpaper: Option<(usize, i32, i32, Vec<u32>)>,
     games: crate::games::Games,
     photos: Photos,
     import: Import,
@@ -285,7 +370,10 @@ impl Desktop {
             clock: (0, 0),
             last_title: None,
             apps_menu: None,
-            games_menu: false,
+            folder: None,
+            dock_icons: Vec::new(),
+            title_icons: Vec::new(),
+            wallpaper: None,
             games: crate::games::Games::new(),
             photos,
             import: Import::new(),
@@ -364,14 +452,6 @@ impl Desktop {
         }
     }
 
-    fn power_button(&self) -> Rect {
-        Rect::new(self.w - 48, self.h - BAR_H, 48, BAR_H)
-    }
-
-    fn power_item(&self, i: i32) -> Rect {
-        Rect::new(self.w - 236, self.h - BAR_H - 10 - 3 * 46 + i * 46, 220, 42)
-    }
-
     fn confirm_box(&self) -> Rect {
         Rect::new(self.w / 2 - 230, self.h / 2 - 100, 460, 200)
     }
@@ -385,32 +465,23 @@ impl Desktop {
     }
 
     fn draw_power(&self, c: &mut Canvas) {
-        // The button: a classic power symbol.
-        let b = self.power_button();
-        let (cx, cy) = (b.x + b.w / 2, b.y + b.h / 2 + 1);
-        if self.power_menu {
-            c.fill_rect_alpha(b.x, b.y, b.w, b.h, rgb(255, 255, 255), 40);
-        }
-        c.circle(cx, cy, 9, TEXT);
-        c.circle(cx, cy, 7, rgb(20, 24, 30));
-        c.fill_rect(cx - 3, cy - 10, 6, 6, rgb(20, 24, 30));
-        c.fill_rect(cx - 1, cy - 11, 2, 9, TEXT);
-
+        // (The button itself is drawn with the dock.)
         if self.power_menu {
             let top = self.power_item(0);
-            c.round_rect_alpha(top.x - 6 + 3, top.y - 6 + 5, top.w + 12, 3 * 46 + 8, 10, 0, 80);
-            c.round_rect(top.x - 6, top.y - 6, top.w + 12, 3 * 46 + 8, 10, WIN_BG);
+            let (x, y, w, h) = (top.x - 6, top.y - 6, top.w + 12, 3 * 46 + 8);
+            c.shadow(x, y + 4, w, h, 14, 18, 80);
+            c.round_rect(x, y, w, h, 14, WIN_BG);
             for (i, label) in ["Turn off screen", "Restart", "Shut down"].iter().enumerate() {
                 let r = self.power_item(i as i32);
-                c.round_rect(r.x, r.y, r.w, r.h, 8, rgb(236, 239, 243));
-                c.text(r.x + 16, r.y + 11, label, Size::Small, true, rgb(40, 44, 52));
+                c.round_rect(r.x, r.y, r.w, r.h, 10, rgb(238, 241, 246));
+                c.text(r.x + 16, r.y + 12, label, Size::Small, true, INK);
             }
         }
         if let Some(req) = self.confirm {
-            c.fill_rect_alpha(0, 0, self.w, self.h, 0, 120);
+            c.fill_rect_alpha(0, 0, self.w, self.h, 0, 110);
             let b = self.confirm_box();
-            c.round_rect_alpha(b.x + 3, b.y + 6, b.w, b.h, 12, 0, 90);
-            c.round_rect(b.x, b.y, b.w, b.h, 12, WIN_BG);
+            c.shadow(b.x, b.y + 8, b.w, b.h, 16, 28, 110);
+            c.round_rect(b.x, b.y, b.w, b.h, 16, WIN_BG);
             let (title, line, ok) = match req {
                 PowerRequest::Restart => ("Restart the computer?", "Your photos are saved. Solon will start again.", "Restart"),
                 _ => ("Shut down the computer?", "Your photos are saved. The computer will turn off.", "Shut down"),
@@ -1409,50 +1480,86 @@ impl Desktop {
         kprintln!("solon: close {}", app.name());
     }
 
-    // ---- taskbar and Applications menu -------------------------------------------------
+    // ---- dock and Applications menu -------------------------------------------------------
+
+    /// What the dock shows: the Applications button, the pinned apps and folders, then any
+    /// other open apps.
+    fn dock_items(&self) -> Vec<DockItem> {
+        let mut v = alloc::vec![DockItem::Apps];
+        v.extend(PINNED.iter().map(|&e| DockItem::Entry(e)));
+        for &a in &self.order {
+            if !PINNED.contains(&MenuEntry::App(a)) {
+                v.push(DockItem::Entry(MenuEntry::App(a)));
+            }
+        }
+        v
+    }
+
+    fn clock_strings(&self) -> (String, String) {
+        let clock = self.settings.clock_text(self.clock.0, self.clock.1);
+        let date = if self.settings.show_date { settings::short_date_text(self.date.0, self.date.1, self.date.2) } else { String::new() };
+        (clock, date)
+    }
+
+    fn dock_clock_w(&self) -> i32 {
+        let (clock, date) = self.clock_strings();
+        text_width(&clock, Size::Medium, true).max(text_width(&date, Size::Small, false)) + 8
+    }
+
+    /// The dock and where everything in it is. The power button is last.
+    fn dock_layout(&self) -> (Rect, Vec<(DockItem, Rect)>) {
+        let items = self.dock_items();
+        let n = items.len() as i32;
+        let clock_w = self.dock_clock_w();
+        let fixed = 12 + 17 + clock_w + 10 + 40 + 10;
+        let step = (DOCK_ICON + DOCK_GAP).min((self.w - 24 - fixed) / n.max(1)).max(24);
+        let width = 12 + n * step - DOCK_GAP + fixed;
+        let dock = Rect::new((self.w - width) / 2, self.h - DOCK_H - (BAR_H - DOCK_H) / 2, width, DOCK_H);
+        let iy = dock.y + (DOCK_H - DOCK_ICON) / 2 - 1;
+        let mut v: Vec<(DockItem, Rect)> = items.iter().enumerate().map(|(i, &it)| (it, Rect::new(dock.x + 12 + i as i32 * step, iy, DOCK_ICON, DOCK_ICON))).collect();
+        v.push((DockItem::Power, Rect::new(dock.x + dock.w - 10 - 40, dock.y + (DOCK_H - 40) / 2, 40, 40)));
+        (dock, v)
+    }
 
     fn apps_button(&self) -> Rect {
-        Rect::new(6, self.h - BAR_H + 5, 150, BAR_H - 10)
+        self.dock_layout().1[0].1
     }
 
-    /// Taskbar buttons for open windows (in opening order), squeezed to fit.
-    fn task_buttons(&self) -> Vec<(App, Rect)> {
-        let start = self.apps_button().x + self.apps_button().w + 10;
-        let end = self.power_button().x - 230;
-        let n = self.order.len().max(1) as i32;
-        let w = ((end - start) / n - 6).clamp(44, 190);
-        self.order.iter().enumerate().map(|(i, &a)| (a, Rect::new(start + i as i32 * (w + 6), self.h - BAR_H + 5, w, BAR_H - 10))).collect()
+    fn power_button(&self) -> Rect {
+        self.dock_layout().1.last().unwrap().1
     }
 
-    /// Columns in the Applications menu: 2, or 4 when the screen is too short for that.
+    fn power_item(&self, i: i32) -> Rect {
+        let p = self.power_button();
+        let (dock, _) = self.dock_layout();
+        Rect::new((p.x + p.w - 220).min(self.w - 236), dock.y - 12 - 3 * 46 + i * 46, 220, 42)
+    }
+
+    /// Columns in the Applications menu.
     fn menu_cols(&self) -> usize {
-        if 64 + 4 * 100 + BAR_H + 24 > self.h { 4 } else { 2 }
+        if self.w >= 5 * 124 + 48 { 5 } else { 4 }
     }
 
-    /// What the Applications menu shows: the apps and the Games folder, or the games.
+    /// What the Applications menu shows: the apps and folders, or a folder's apps.
     fn menu_entries(&self) -> Vec<MenuEntry> {
-        if self.games_menu {
-            core::iter::once(MenuEntry::Back).chain(GAMES.iter().map(|&a| MenuEntry::App(a))).collect()
-        } else {
-            let mut v: Vec<MenuEntry> = APPS.iter().map(|&a| MenuEntry::App(a)).collect();
-            let at = APPS.iter().position(|&a| a == App::Movie).map(|i| i + 1).unwrap_or(v.len());
-            v.insert(at, MenuEntry::Games);
-            v
+        match self.folder {
+            Some(f) => core::iter::once(MenuEntry::Back).chain(f.apps().iter().map(|&a| MenuEntry::App(a))).collect(),
+            None => APPS.to_vec(),
         }
     }
 
     fn activate(&mut self, e: MenuEntry) {
         match e {
             MenuEntry::App(a) => {
-                self.games_menu = false;
+                self.folder = None;
                 self.open(a);
             }
-            MenuEntry::Games => {
-                self.games_menu = true;
+            MenuEntry::Folder(f) => {
+                self.folder = Some(f);
                 self.apps_menu = Some(0);
             }
             MenuEntry::Back => {
-                self.games_menu = false;
+                self.folder = None;
                 self.apps_menu = Some(0);
             }
         }
@@ -1461,84 +1568,99 @@ impl Desktop {
     fn menu_box(&self) -> Rect {
         let cols = self.menu_cols() as i32;
         let rows = self.menu_entries().len().div_ceil(cols as usize) as i32;
-        Rect::new(6, self.h - BAR_H - 12 - (64 + rows * 100), cols * 170 + 32, 64 + rows * 100)
+        let (w, h) = (cols * 124 + 40, 66 + rows * 112 + 12);
+        let (dock, _) = self.dock_layout();
+        Rect::new((self.w - w) / 2, dock.y - 14 - h, w, h)
     }
 
     fn menu_item(&self, i: usize) -> Rect {
         let b = self.menu_box();
         let cols = self.menu_cols();
-        Rect::new(b.x + 16 + (i % cols) as i32 * 170, b.y + 52 + (i / cols) as i32 * 100, 166, 96)
+        Rect::new(b.x + 20 + (i % cols) as i32 * 124, b.y + 60 + (i / cols) as i32 * 112, 120, 108)
     }
 
-    fn draw_taskbar(&self, c: &mut Canvas) {
-        let (w, h) = (self.w, self.h);
-        let y = h - BAR_H;
-        c.fill_rect_alpha(0, y, w, BAR_H, rgb(12, 16, 22), 215);
-        c.fill_rect_alpha(0, y, w, 1, rgb(255, 255, 255), 30);
-        // Applications button: a 3x3 grid of dots.
-        let a = self.apps_button();
-        let open = self.apps_menu.is_some();
-        c.round_rect_alpha(a.x, a.y, a.w, a.h, 8, rgb(255, 255, 255), if open { 70 } else { 30 });
-        for r in 0..3 {
-            for k in 0..3 {
-                c.round_rect(a.x + 12 + k * 7, a.y + 9 + r * 7, 5, 5, 1, TEXT);
-            }
+    fn icon_img(list: &[(icons::Icon, crate::image::Image)], icon: icons::Icon) -> Option<&crate::image::Image> {
+        list.iter().find(|(i, _)| *i == icon).map(|(_, img)| img)
+    }
+
+    fn make_icons(&mut self) {
+        let mut all: Vec<icons::Icon> = APPS.iter().map(|e| e.icon()).collect();
+        for f in [Folder::Games, Folder::Documents] {
+            all.extend(f.apps().iter().map(|&a| icons::Icon::App(a)));
         }
-        c.text(a.x + 44, a.y + 8, "Applications", Size::Small, true, TEXT);
-        // Open windows.
+        all.push(icons::Icon::Back);
+        self.dock_icons = all.iter().map(|&i| (i, icons::image(i, DOCK_ICON as u32))).collect();
+        self.title_icons = all.iter().map(|&i| (i, icons::image(i, 22))).collect();
+    }
+
+    fn draw_dock(&self, c: &mut Canvas) {
+        let (dock, items) = self.dock_layout();
+        c.shadow(dock.x, dock.y + 4, dock.w, dock.h, 20, 16, 70);
+        c.round_rect(dock.x, dock.y, dock.w, dock.h, 20, rgb(249, 250, 253));
         let focus = self.focused_app();
-        for (app, b) in self.task_buttons() {
-            let minimized = self.windows.iter().any(|w| w.app == app && w.minimized);
-            let alpha = if focus == Some(app) { 70 } else if minimized { 12 } else { 30 };
-            c.round_rect_alpha(b.x, b.y, b.w, b.h, 8, rgb(255, 255, 255), alpha);
-            if focus == Some(app) {
-                c.fill_rect(b.x + 10, b.y + b.h - 3, b.w - 20, 3, icons::tile_color(app));
-            }
-            c.round_rect(b.x + 8, b.y + 8, 18, 18, 5, icons::tile_color(app));
-            if b.w > 70 {
-                let name = crate::photos::ellipsize(app.name(), b.w - 40, Size::Small, false);
-                c.text(b.x + 34, b.y + 8, &name, Size::Small, false, if minimized { TEXT_DIM } else { TEXT });
+        for &(item, r) in &items {
+            match item {
+                DockItem::Apps => {
+                    let open = self.apps_menu.is_some();
+                    c.round_rect(r.x, r.y, r.w, r.h, 12, if open { rgb(30, 100, 210) } else { rgb(46, 124, 232) });
+                    for row in 0..3 {
+                        for k in 0..3 {
+                            c.round_rect(r.x + 10 + k * 8, r.y + 10 + row * 8, 6, 6, 2, rgb(255, 255, 255));
+                        }
+                    }
+                }
+                DockItem::Entry(e) => {
+                    if let Some(img) = Self::icon_img(&self.dock_icons, e.icon()) {
+                        c.draw_image(img, r.x, r.y);
+                    }
+                    if let MenuEntry::App(app) = e {
+                        if self.is_open(app) {
+                            let focused = focus == Some(app);
+                            let w = if focused { 16 } else { 6 };
+                            c.round_rect(r.x + r.w / 2 - w / 2, dock.y + dock.h - 6, w, 4, 2, if focused { rgb(46, 124, 232) } else { INK_DIM });
+                        }
+                    }
+                }
+                DockItem::Power => {
+                    let bg = if self.power_menu { rgb(214, 220, 230) } else { rgb(234, 237, 242) };
+                    c.round_rect(r.x, r.y, r.w, r.h, 12, bg);
+                    let (cx, cy) = (r.x + r.w / 2, r.y + r.h / 2 + 1);
+                    c.circle(cx, cy, 9, INK);
+                    c.circle(cx, cy, 7, bg);
+                    c.fill_rect(cx - 3, cy - 11, 6, 7, bg);
+                    c.round_rect(cx - 1, cy - 12, 3, 10, 1, INK);
+                }
             }
         }
-        // Clock, date, power.
-        let clock = self.settings.clock_text(self.clock.0, self.clock.1);
-        let cw = text_width(&clock, Size::Medium, true);
-        let right = self.power_button().x - 10;
-        c.text(right - cw, y + 11, &clock, Size::Medium, true, TEXT);
-        if self.settings.show_date {
-            let d = settings::date_text(self.date.0, self.date.1, self.date.2);
-            let dw = text_width(&d, Size::Small, false);
-            c.text(right - cw - 16 - dw, y + 13, &d, Size::Small, false, TEXT_DIM);
+        // Separator, then the clock.
+        let clock_w = self.dock_clock_w();
+        let px = items.last().unwrap().1.x;
+        let cx = px - 10 - clock_w;
+        c.fill_rect_alpha(cx - 9, dock.y + 12, 1, dock.h - 24, 0, 40);
+        let (clock, date) = self.clock_strings();
+        if date.is_empty() {
+            c.text_centered(cx + clock_w / 2, dock.y + (dock.h - 20) / 2, &clock, Size::Medium, true, INK);
+        } else {
+            c.text_centered(cx + clock_w / 2, dock.y + 7, &clock, Size::Medium, true, INK);
+            c.text_centered(cx + clock_w / 2, dock.y + 30, &date, Size::Small, false, INK_DIM);
         }
     }
 
     fn draw_apps_menu(&self, c: &mut Canvas) {
         let Some(sel) = self.apps_menu else { return };
         let b = self.menu_box();
-        c.round_rect_alpha(b.x + 3, b.y + 6, b.w, b.h, 14, 0, 100);
-        c.round_rect(b.x, b.y, b.w, b.h, 14, rgb(246, 247, 250));
-        c.text(b.x + 20, b.y + 16, if self.games_menu { "Games" } else { "Applications" }, Size::Medium, true, rgb(40, 44, 52));
+        c.shadow(b.x, b.y + 6, b.w, b.h, 18, 24, 90);
+        c.round_rect(b.x, b.y, b.w, b.h, 18, rgb(249, 250, 253));
+        let title = self.folder.map(|f| f.name()).unwrap_or("Applications");
+        c.text(b.x + 24, b.y + 20, title, Size::Medium, true, INK);
         for (i, &e) in self.menu_entries().iter().enumerate() {
             let r = self.menu_item(i);
             if i == sel {
-                c.round_rect(r.x, r.y, r.w, r.h, 10, rgb(222, 232, 246));
+                c.round_rect(r.x, r.y, r.w, r.h, 14, rgb(226, 235, 250));
             }
-            let (ix, iy) = (r.x + (r.w - 64) / 2, r.y + 2);
-            let name = match e {
-                MenuEntry::App(app) => {
-                    icons::draw(c, app, ix, iy);
-                    app.name()
-                }
-                MenuEntry::Games => {
-                    icons::games_folder(c, ix, iy);
-                    "Games"
-                }
-                MenuEntry::Back => {
-                    icons::back(c, ix, iy);
-                    "Back"
-                }
-            };
-            c.text_centered(r.x + r.w / 2, r.y + 72, name, Size::Small, true, rgb(40, 44, 52));
+            icons::draw_icon(c, e.icon(), r.x + (r.w - 64) / 2, r.y + 8);
+            let name = crate::photos::ellipsize(e.name(), r.w - 8, Size::Small, false);
+            c.text_centered(r.x + r.w / 2, r.y + 80, &name, Size::Small, false, INK);
         }
     }
 
@@ -1552,12 +1674,34 @@ impl Desktop {
             return;
         }
 
-        // Background
-        let (_, top, bottom) = settings::BACKGROUNDS[self.settings.background];
-        c.gradient_v(0, 0, w, h, top, bottom);
-        c.text_centered(w / 2, (h - BAR_H) / 2 - 16, "Solon", Size::Large, true, crate::gfx::mix(top, rgb(160, 180, 200), 80));
-        if self.windows.is_empty() {
-            c.text_centered(w / 2, (h - BAR_H) / 2 + 30, "Press Applications (bottom left) to start", Size::Small, false, crate::gfx::mix(top, rgb(200, 210, 220), 140));
+        if self.dock_icons.is_empty() {
+            self.make_icons();
+        }
+        // Wallpaper (drawn once), with a big clock.
+        let bg = self.settings.background;
+        if !matches!(&self.wallpaper, Some((b, ww, hh, _)) if *b == bg && *ww == w && *hh == h) {
+            self.wallpaper = Some((bg, w, h, crate::wallpaper::make(bg, w as usize, h as usize)));
+        }
+        if let Some((_, _, _, px)) = &self.wallpaper {
+            if c.w == w as usize && c.px.len() == px.len() {
+                c.px.copy_from_slice(px);
+            }
+        }
+        let maximized = self.windows.iter().any(|w| !w.minimized && w.restore.is_some());
+        if !maximized {
+            use crate::font::{width, Face};
+            let ink = crate::wallpaper::ink(bg);
+            let clock = self.settings.clock_text(self.clock.0, self.clock.1);
+            let big = (h / 9).clamp(56, 120) as u16;
+            let top = h / 5 + big as i32;
+            c.text_face((w / 2 - width(&clock, Face::Sans, big) / 2) * 64, top, &clock, Face::Sans, big, ink);
+            let date = settings::long_date_text(self.date.0, self.date.1, self.date.2);
+            let dpx = (big / 4).max(18);
+            c.text_face((w / 2 - width(&date, Face::Sans, dpx) / 2) * 64, top + dpx as i32 * 2, &date, Face::Sans, dpx, ink);
+            if self.windows.is_empty() {
+                let hint = "Click the blue button at the bottom to see all your apps";
+                c.text_centered(w / 2, h - BAR_H - 48, hint, Size::Small, false, ink);
+            }
         }
 
         // Windows, bottom to top.
@@ -1568,7 +1712,8 @@ impl Desktop {
                 continue;
             }
             let title = if win.app == App::Documents { self.docs.title() } else { None };
-            draw_frame(c, win, title.as_deref().unwrap_or(win.app.name()), focus == Some(i));
+            let icon = Self::icon_img(&self.title_icons, icons::Icon::App(win.app));
+            draw_frame(c, win, title.as_deref().unwrap_or(win.app.name()), focus == Some(i), icon);
             let body = win.body();
             let app = win.app;
             c.set_clip(body);
@@ -1587,13 +1732,13 @@ impl Desktop {
             c.reset_clip();
         }
 
-        self.draw_taskbar(c);
+        self.draw_dock(c);
         if let Some((msg, _)) = &self.toast {
-            let tw = text_width(msg, Size::Small, true) + 32;
-            let y = h - BAR_H - 40;
-            c.round_rect_alpha(w / 2 - tw / 2 + 2, y + 3, tw, 28, 14, 0, 80);
-            c.round_rect(w / 2 - tw / 2, y, tw, 28, 14, rgb(243, 156, 18));
-            c.text_centered(w / 2, y + 6, msg, Size::Small, true, rgb(30, 30, 30));
+            let tw = text_width(msg, Size::Small, true) + 40;
+            let y = h - BAR_H - 46;
+            c.shadow(w / 2 - tw / 2, y + 3, tw, 34, 17, 12, 70);
+            c.round_rect(w / 2 - tw / 2, y, tw, 34, 17, rgb(36, 40, 50));
+            c.text_centered(w / 2, y + 9, msg, Size::Small, true, rgb(255, 255, 255));
         }
         self.draw_apps_menu(c);
         if self.install_notice {
@@ -1820,7 +1965,8 @@ impl Desktop {
             return r;
         }
 
-        // Applications menu and taskbar.
+        // Applications menu and dock.
+        let shown_folder = if self.apps_menu.is_some() { self.folder } else { None };
         if self.apps_menu.is_some() {
             let entries = self.menu_entries();
             if let Some(i) = (0..entries.len()).find(|&i| self.menu_item(i).contains(x, y)) {
@@ -1830,25 +1976,36 @@ impl Desktop {
             let on_menu = self.menu_box().contains(x, y);
             let on_button = self.apps_button().contains(x, y);
             self.apps_menu = None;
+            self.folder = None;
             if on_menu || on_button {
                 return true;
             }
             redraw = true;
         } else if self.apps_button().contains(x, y) {
             self.apps_menu = Some(0);
-            self.games_menu = false;
+            self.folder = None;
             return true;
         }
         if y >= self.h - BAR_H {
-            if let Some((app, _)) = self.task_buttons().into_iter().find(|(_, b)| b.contains(x, y)) {
-                if self.focused_app() == Some(app) {
-                    if let Some(i) = self.index_of(app) {
-                        self.windows[i].minimized = true;
-                        self.capture = false;
+            let (_, items) = self.dock_layout();
+            match items.into_iter().find(|(_, b)| b.contains(x, y)).map(|(it, _)| it) {
+                Some(DockItem::Entry(MenuEntry::App(app))) => {
+                    if !self.is_open(app) {
+                        self.open(app);
+                    } else if self.focused_app() == Some(app) {
+                        if let Some(i) = self.index_of(app) {
+                            self.windows[i].minimized = true;
+                            self.capture = false;
+                        }
+                    } else {
+                        self.raise(app);
                     }
-                } else {
-                    self.raise(app);
                 }
+                Some(DockItem::Entry(MenuEntry::Folder(f))) if shown_folder != Some(f) => {
+                    self.folder = Some(f);
+                    self.apps_menu = Some(0);
+                }
+                _ => {}
             }
             return true;
         }
@@ -1965,7 +2122,7 @@ impl Desktop {
             let entries = self.menu_entries();
             let n = entries.len();
             match sc {
-                0x01 if self.games_menu => self.activate(MenuEntry::Back),
+                0x01 if self.folder.is_some() => self.activate(MenuEntry::Back),
                 0x01 => self.apps_menu = None,
                 0x1C => self.activate(entries[sel.min(n - 1)]),
                 0x4B => self.apps_menu = Some((sel + n - 1) % n),
@@ -1991,7 +2148,7 @@ impl Desktop {
         // Nothing open: Enter or Space opens the Applications menu.
         if sc == 0x1C || sc == 0x39 {
             self.apps_menu = Some(0);
-            self.games_menu = false;
+            self.folder = None;
             return true;
         }
         false
@@ -2004,42 +2161,47 @@ impl Desktop {
     }
 }
 
-fn draw_frame(c: &mut Canvas, win: &Window, title: &str, focused: bool) {
+fn draw_frame(c: &mut Canvas, win: &Window, title: &str, focused: bool, icon: Option<&crate::image::Image>) {
     let (x, y, w, h) = (win.x, win.y, win.w, win.h);
-    let round = if win.restore.is_some() { 0 } else { 10 };
+    let round = if win.restore.is_some() { 0 } else { 12 };
     if round > 0 {
-        c.round_rect_alpha(x + 4, y + 8, w, h, 10, 0, if focused { 100 } else { 60 }); // shadow
+        c.shadow(x, y + 6, w, h, round, if focused { 26 } else { 16 }, if focused { 95 } else { 55 });
+        // A hairline edge so light windows stand apart from light wallpaper.
+        c.round_rect(x - 1, y - 1, w + 2, h + 2, round + 1, rgb(206, 211, 220));
     }
     c.round_rect(x, y, w, h, round, WIN_BG);
-    let bar = if focused { rgb(226, 232, 242) } else { rgb(238, 240, 243) };
+    let bar = if focused { rgb(240, 243, 248) } else { WIN_BG };
     c.round_rect(x, y, w, TITLE_H + 12, round, bar);
     c.fill_rect(x, y + TITLE_H, w, 12, WIN_BG);
-    c.fill_rect(x, y + TITLE_H, w, 1, rgb(210, 214, 220));
+    c.fill_rect(x, y + TITLE_H, w, 1, rgb(222, 226, 232));
 
-    // Title with a small app-coloured dot
-    c.circle(x + 20, y + TITLE_H / 2, 6, icons::tile_color(win.app));
-    let title = crate::photos::ellipsize(title, w - 3 * TITLE_H - 50, Size::Medium, true);
-    c.text(x + 34, y + 8, &title, Size::Medium, true, if focused { rgb(30, 34, 42) } else { rgb(120, 126, 136) });
+    // App icon and title.
+    if let Some(img) = icon {
+        c.draw_image(img, x + 12, y + (TITLE_H - 22) / 2);
+    }
+    let title = crate::photos::ellipsize(title, w - 3 * TITLE_H - 60, Size::Small, true);
+    c.text(x + 44, y + (TITLE_H - 16) / 2, &title, Size::Small, true, if focused { INK } else { rgb(130, 136, 146) });
 
-    let ink = rgb(70, 76, 86);
+    let ink = if focused { rgb(60, 66, 78) } else { rgb(140, 146, 156) };
     // Minimize: a line.
     let m = win.min_box();
-    c.fill_rect(m.x + m.w / 2 - 7, m.y + m.h / 2 + 4, 14, 2, ink);
-    // Maximize / restore: a square (two when maximized).
+    c.round_rect(m.x + m.w / 2 - 7, m.y + m.h / 2, 14, 2, 1, ink);
+    // Maximize / restore: a rounded square (two when maximized).
     let b = win.max_box();
-    let (bx, by) = (b.x + b.w / 2 - 7, b.y + b.h / 2 - 6);
+    let (bx, by) = (b.x + b.w / 2 - 6, b.y + b.h / 2 - 6);
     if win.restore.is_some() {
-        c.outline_rect(bx + 3, by - 2, 11, 10, ink);
-        c.fill_rect(bx, by + 2, 11, 10, bar);
-        c.outline_rect(bx, by + 2, 11, 10, ink);
+        c.round_rect(bx + 3, by - 2, 10, 10, 2, ink);
+        c.round_rect(bx + 4, by - 1, 8, 8, 1, bar);
+        c.round_rect(bx, by + 2, 10, 10, 2, ink);
+        c.round_rect(bx + 1, by + 3, 8, 8, 1, bar);
     } else {
-        c.outline_rect(bx, by, 14, 12, ink);
-        c.fill_rect(bx, by, 14, 2, ink);
+        c.round_rect(bx, by, 12, 12, 3, ink);
+        c.round_rect(bx + 2, by + 2, 8, 8, 2, bar);
     }
-    // Close button
+    // Close: a red circle with a white cross.
     let b = win.close_box();
     let (cx, cy) = (b.x + b.w / 2, b.y + b.h / 2);
-    c.circle(cx, cy, 9, rgb(225, 80, 70));
+    c.circle(cx, cy, 10, if focused { rgb(232, 72, 72) } else { rgb(214, 150, 150) });
     for d in -4..=4 {
         c.fill_rect(cx + d - 1, cy + d, 2, 1, rgb(255, 255, 255));
         c.fill_rect(cx + d - 1, cy - d, 2, 1, rgb(255, 255, 255));

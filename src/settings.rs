@@ -7,11 +7,11 @@ use crate::gfx::rgb;
 
 /// Desktop background colours: (name, top of gradient, bottom of gradient).
 pub const BACKGROUNDS: [(&str, u32, u32); 5] = [
-    ("Blue", rgb(28, 64, 88), rgb(14, 26, 40)),
-    ("Green", rgb(34, 78, 62), rgb(14, 34, 28)),
-    ("Purple", rgb(64, 44, 92), rgb(26, 18, 42)),
-    ("Gray", rgb(70, 74, 80), rgb(28, 30, 34)),
-    ("Warm", rgb(110, 70, 48), rgb(44, 26, 20)),
+    ("Blue", rgb(214, 230, 252), rgb(140, 176, 236)),
+    ("Green", rgb(222, 244, 230), rgb(120, 196, 166)),
+    ("Purple", rgb(238, 228, 252), rgb(176, 150, 232)),
+    ("Gray", rgb(242, 244, 247), rgb(180, 188, 200)),
+    ("Warm", rgb(254, 236, 220), rgb(240, 170, 140)),
 ];
 
 /// Text and icon sizes and their scale (in halves: 2 = 1x, 3 = 1.5x, 4 = 2x).
@@ -122,4 +122,16 @@ pub fn days_in_month(y: u16, m: u8) -> u8 {
         4 | 6 | 9 | 11 => 30,
         _ => 31,
     }
+}
+
+/// "Sat, Nov 21", for the dock.
+pub fn short_date_text(y: u16, m: u8, d: u8) -> String {
+    let day = DAYS[weekday(y, m, d)];
+    format!("{}, {} {}", &day[..3.min(day.len())], MONTHS[(m as usize).clamp(1, 12) - 1], d)
+}
+
+/// "Saturday, November 21", for the desktop.
+pub fn long_date_text(y: u16, m: u8, d: u8) -> String {
+    const LONG: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    format!("{}, {} {}", DAYS[weekday(y, m, d)], LONG[(m as usize).clamp(1, 12) - 1], d)
 }
