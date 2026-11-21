@@ -280,7 +280,7 @@ fn read_odml(read: &mut Read, supers: &[(u64, u32)], out: &mut Vec<(u64, u32, bo
     }
 }
 
-fn video_codec(f: &[u8]) -> VCodec {
+pub(crate) fn video_codec(f: &[u8]) -> VCodec {
     if f.len() < 20 {
         return VCodec::Other(String::from("unknown"));
     }

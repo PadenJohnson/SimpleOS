@@ -1,0 +1,16 @@
+[package]
+name = "mediatest"
+version = "0.1.0"
+edition = "2021"
+description = "Host tests for Solon's media engine (src/media): containers and decoders against FFmpeg"
+
+[dependencies]
+libm = "0.2"
+zune-jpeg = { version = "0.5", default-features = false }
+zune-png = { version = "0.5", default-features = false }
+zune-core = { version = "0.5", default-features = false }
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+
+[profile.release]
+debug = false
+overflow-checks = true

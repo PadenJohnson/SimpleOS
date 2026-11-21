@@ -13,7 +13,11 @@ use alloc::vec::Vec;
 pub mod avi;
 pub mod dec;
 pub mod engine;
+pub mod es;
+pub mod mkv;
 pub mod mp4;
+pub mod mpegps;
+pub mod mpegts;
 
 pub use engine::Engine;
 
@@ -135,6 +139,19 @@ pub fn open_demux(read: &mut Read, size: u64) -> Result<Box<dyn Demux>, String> 
     }
     if head.len() >= 8 && [&b"ftyp"[..], b"moov", b"mdat", b"wide", b"free", b"skip", b"pnot"].contains(&&head[4..8]) {
         return mp4::Mp4Demux::open(read, size).map(|d| Box::new(d) as Box<dyn Demux>);
+    }
+    if head.len() >= 4 && head[0..4] == [0x1A, 0x45, 0xDF, 0xA3] {
+        return mkv::MkvDemux::open(read, size).map(|d| Box::new(d) as Box<dyn Demux>);
+    }
+    // Transport streams: a 0x47 sync byte every 188 bytes (192 in .m2ts).
+    if let Some(more) = read(0, 600) {
+        let sync = |s: usize, step: usize| (0..3).all(|k| more.get(s + k * step) == Some(&0x47));
+        if sync(0, 188) || sync(4, 192) {
+            return mpegts::TsDemux::open(read, size).map(|d| Box::new(d) as Box<dyn Demux>);
+        }
+    }
+    if head.len() >= 4 && head[0..4] == [0, 0, 1, 0xBA] {
+        return mpegps::PsDemux::open(read, size).map(|d| Box::new(d) as Box<dyn Demux>);
     }
     Err(format!("Solon can't read this kind of video file yet"))
 }

@@ -132,7 +132,8 @@ impl Engine {
             }
             kprintln!("media: sound {} {} Hz, {} channel(s)", a.codec.name(), a.rate, a.channels);
         }
-        Ok(Engine {
+        let need_size = vdec.is_some() && (width == 0 || height == 0);
+        let mut e = Engine {
             src: Src { demux, cache },
             vdec,
             adec,
@@ -156,7 +157,29 @@ impl Engine {
             a_next: 0,
             a_end: false,
             a_started: false,
-        })
+        };
+        if need_size {
+            e.learn_size(read);
+        }
+        Ok(e)
+    }
+
+    /// Streams that don't say their picture size: decode the first picture to find out.
+    fn learn_size(&mut self, read: &mut Read) {
+        self.seek(read, 0);
+        for _ in 0..300 {
+            if !self.feed(read) || !self.frames.is_empty() {
+                break;
+            }
+        }
+        let size = self.frames.front().map(|(_, p)| match p {
+            Pic::Yuv(f) => (f.width, f.height),
+            Pic::Rgb(i) => (i.w, i.h),
+        });
+        if let Some((w, h)) = size {
+            (self.width, self.height) = if self.rotation == 90 || self.rotation == 270 { (h, w) } else { (w, h) };
+        }
+        self.started = false; // the first picture() starts from the beginning again
     }
 
     pub fn has_sound(&self) -> bool {
@@ -226,7 +249,9 @@ impl Engine {
             Some(k) => k > self.fed_key,
             None => target > self.last_pts + 4_000_000, // files without an index: far ahead
         };
-        if !self.started || behind || ahead {
+        // At the end with nothing to show (a jump past the last picture): start again.
+        let stuck = self.video_end && self.frames.is_empty() && (self.current.is_none() || self.current.as_ref().is_some_and(|c| c.0 + 1_000_000 < target || c.0 > target));
+        if !self.started || behind || ahead || stuck {
             self.seek(read, target);
         }
         let mut fed = 0;
