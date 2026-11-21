@@ -1,4 +1,4 @@
-//! What Writer, PDF and the Text Editor have in common: the list of files they can open (in
+﻿//! What Writer, PDF and the Text Editor have in common: the list of files they can open (in
 //! Solon storage and on USB drives), a "New" button, opening, saving (in place, or under a
 //! new name in Solon's Documents folder), "Save changes?", printing, and a file picker.
 //! Each app supplies an editor (the `DocEditor` trait) and a `Kind` describing itself.
@@ -790,12 +790,12 @@ impl<E: DocEditor> DocApp for DocShell<E> {
             return self.ed_action(a, storage, usb);
         }
         if self.new_btn(r).contains(x, y) {
-            self.doc = Some(Open { ed: (self.make_new)(), name: format!("New {}", self.kind.app), origin: Origin::New });
+            self.doc = Some(Open { ed: (self.make_new)(), name: String::from("Untitled"), origin: Origin::New });
             return DocsAction::Redraw;
         }
         for (k, &(_, purpose, exts, title)) in self.kind.extra.iter().enumerate() {
             if self.extra_btn(r, k).contains(x, y) {
-                self.doc = Some(Open { ed: (self.make_new)(), name: format!("New {}", self.kind.app), origin: Origin::New });
+                self.doc = Some(Open { ed: (self.make_new)(), name: String::from("Untitled"), origin: Origin::New });
                 return self.ed_action(EdAction::Pick { purpose, exts, title, many: true }, storage, usb);
             }
         }

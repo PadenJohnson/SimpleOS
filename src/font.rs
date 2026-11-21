@@ -71,9 +71,10 @@ pub struct Glyph {
 pub struct Fonts {
     faces: [Option<ttf_parser::Face<'static>>; 8],
     glyphs: BTreeMap<(u8, u32, u16), Glyph>,
+    units: BTreeMap<(u8, u32), u16>,
 }
 
-pub static FONTS: Mutex<Fonts> = Mutex::new(Fonts { faces: [None, None, None, None, None, None, None, None], glyphs: BTreeMap::new() });
+pub static FONTS: Mutex<Fonts> = Mutex::new(Fonts { faces: [None, None, None, None, None, None, None, None], glyphs: BTreeMap::new(), units: BTreeMap::new() });
 
 /// Feeds an outline into a raster, scaling font units to pixels (y flipped).
 pub struct ToRaster<'a> {
@@ -157,6 +158,25 @@ impl Fonts {
     pub fn advance_units(&mut self, face: Face, gid: u16) -> (u16, u16) {
         let f = self.face(face);
         (f.glyph_hor_advance(GlyphId(gid)).unwrap_or(0), f.units_per_em())
+    }
+
+    /// Advance of a character in font units (missing characters measure as '?').
+    pub fn char_units(&mut self, face: Face, ch: char) -> i32 {
+        let key = (face as u8, ch as u32);
+        if let Some(&u) = self.units.get(&key) {
+            return u as i32;
+        }
+        let f = self.face(face);
+        let gid = f.glyph_index(ch).or_else(|| f.glyph_index('?')).unwrap_or(GlyphId(0));
+        let u = f.glyph_hor_advance(gid).unwrap_or(0);
+        self.units.insert(key, u);
+        u as i32
+    }
+
+    /// (units per em, ascender, descender (positive), line gap) in font units.
+    pub fn vmetrics(&mut self, face: Face) -> (i32, i32, i32, i32) {
+        let f = self.face(face);
+        (f.units_per_em() as i32, f.ascender() as i32, -(f.descender() as i32), f.line_gap() as i32)
     }
 
     /// Keep memory in check: drop cached glyphs when there are too many.

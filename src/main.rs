@@ -40,6 +40,7 @@ mod movie;
 mod msc;
 mod nvme;
 mod pci;
+mod pdf;
 mod raster;
 mod phone;
 mod photos;
@@ -59,6 +60,7 @@ mod update;
 mod usbprint;
 mod videos;
 mod wallpaper;
+mod writer;
 mod video;
 mod xhci;
 
