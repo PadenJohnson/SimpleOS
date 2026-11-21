@@ -43,7 +43,10 @@ nothing to download.
   photos; titles in the middle, at the bottom or on black; volume and fades. The project
   saves itself. "Export video" makes an MP4 (H.264 picture, FLAC sound, 480p / 720p / 1080p)
   in the Videos folder, written by Solon's own encoders.
-- Games (a folder in the Applications menu): Solitaire (draw 1 or 3), FreeCell, Mines (easy,
+- Games (a folder in the Applications menu): Starbase Breach (an original first-person shooter:
+  three station decks with keycard doors, secret walls, three weapons, four kinds of robots and
+  the Warden; easy/normal/hard; automap; decks unlock as you clear them), Solitaire (draw 1 or 3),
+  FreeCell, Mines (easy,
   medium, hard; right-click or "Flag" for flags), Sudoku (puzzles made on the spot, always
   with one answer; notes) and Star Pinball (an original space table with planet bumpers,
   rollover lanes, star targets, a wormhole and a ball saver; flippers on Shift or by clicking

@@ -177,6 +177,12 @@ try {
             "down"     { Send-Button $true }
             "up"       { Send-Button $false }
             "wait"     { Start-Sleep -Milliseconds ([int]$arg) }
+            "hold"     {
+                # hold:w,1500 holds a key (QEMU key name) down for 1.5 s
+                $k, $ms = $arg -split ','
+                Send-Qmp "{`"execute`":`"send-key`",`"arguments`":{`"keys`":[{`"type`":`"qcode`",`"data`":`"$k`"}],`"hold-time`":$ms}}"
+                Start-Sleep -Milliseconds ([int]$ms + 100)
+            }
             "shot"     { Save-Shot $arg }
         }
     }

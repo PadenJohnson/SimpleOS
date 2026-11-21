@@ -4,6 +4,7 @@
 pub mod cards;
 pub mod mines;
 pub mod pinball;
+pub mod shooter;
 pub mod sudoku;
 
 use alloc::format;
@@ -273,13 +274,15 @@ pub struct Scores {
     pub solitaire: (u32, u32),
     pub freecell: (u32, u32),
     pub pinball: u32,
+    /// Starbase Breach: the furthest deck unlocked.
+    pub shooter: u32,
 }
 
 impl Scores {
     pub fn to_text(&self) -> String {
         format!(
-            "mines={},{},{}\nsudoku={},{},{}\nsolitaire={},{}\nfreecell={},{}\npinball={}\n",
-            self.mines[0], self.mines[1], self.mines[2], self.sudoku[0], self.sudoku[1], self.sudoku[2], self.solitaire.0, self.solitaire.1, self.freecell.0, self.freecell.1, self.pinball
+            "mines={},{},{}\nsudoku={},{},{}\nsolitaire={},{}\nfreecell={},{}\npinball={}\nshooter={}\n",
+            self.mines[0], self.mines[1], self.mines[2], self.sudoku[0], self.sudoku[1], self.sudoku[2], self.solitaire.0, self.solitaire.1, self.freecell.0, self.freecell.1, self.pinball, self.shooter
         )
     }
 
@@ -295,6 +298,7 @@ impl Scores {
                 "solitaire" => s.solitaire = (g(0), g(1)),
                 "freecell" => s.freecell = (g(0), g(1)),
                 "pinball" => s.pinball = g(0),
+                "shooter" => s.shooter = g(0),
                 _ => {}
             }
         }
@@ -321,6 +325,7 @@ pub enum Game {
     FreeCell,
     Sudoku,
     Pinball,
+    Shooter,
 }
 
 pub struct Games {
@@ -329,6 +334,7 @@ pub struct Games {
     pub freecell: cards::Cards,
     pub sudoku: sudoku::Sudoku,
     pub pinball: pinball::Pinball,
+    pub shooter: shooter::Shooter,
     pub scores: Scores,
     saved: Scores,
     pub loaded: bool,
@@ -344,6 +350,7 @@ impl Games {
             freecell: cards::Cards::new(cards::Kind::FreeCell),
             sudoku: sudoku::Sudoku::new(),
             pinball: pinball::Pinball::new(),
+            shooter: shooter::Shooter::new(),
             scores: Scores::default(),
             saved: Scores::default(),
             loaded: false,
@@ -360,12 +367,16 @@ impl Games {
             self.saved = self.scores.clone();
         }
         self.pinball.high = self.scores.pinball;
+        self.shooter.best_level = self.scores.shooter as usize;
     }
 
     /// The scores to write, if they changed.
     pub fn take_save(&mut self) -> Option<String> {
         if self.pinball.high > self.scores.pinball {
             self.scores.pinball = self.pinball.high;
+        }
+        if self.shooter.best_level as u32 > self.scores.shooter {
+            self.scores.shooter = self.shooter.best_level as u32;
         }
         if self.scores != self.saved {
             self.saved = self.scores.clone();
@@ -382,6 +393,7 @@ impl Games {
             Game::FreeCell => self.freecell.draw(c, r, self.scores.freecell),
             Game::Sudoku => self.sudoku.draw(c, r, &self.scores),
             Game::Pinball => self.pinball.draw(c, r),
+            Game::Shooter => self.shooter.draw(c, r),
         }
     }
 
@@ -393,6 +405,7 @@ impl Games {
             Game::FreeCell if !right => self.freecell.on_press(x, y, r, &mut self.scores.freecell, s).redraw(),
             Game::Sudoku if !right => self.sudoku.on_press(x, y, r, now, &mut self.scores, s).redraw(),
             Game::Pinball if !right => self.pinball.on_press(x, y, r, s).redraw(),
+            Game::Shooter if !right => self.shooter.on_press(x, y, r, s).redraw(),
             _ => false,
         }
     }
@@ -411,6 +424,7 @@ impl Games {
             Game::Solitaire => self.solitaire.on_release(r, &mut self.scores.solitaire, s),
             Game::FreeCell => self.freecell.on_release(r, &mut self.scores.freecell, s),
             Game::Pinball => self.pinball.on_release(s),
+            Game::Shooter => self.shooter.on_release(),
             _ => false,
         }
     }
@@ -421,6 +435,7 @@ impl Games {
         match g {
             Game::Sudoku => self.sudoku.on_key(sc, now, &mut self.scores, s).map(|a| a.redraw()),
             Game::Pinball => self.pinball.on_key(sc, s).map(|a| a.redraw()),
+            Game::Shooter => self.shooter.on_key(sc, s).map(|a| a.redraw()),
             _ => None,
         }
     }
@@ -436,6 +451,7 @@ impl Games {
                 Game::Solitaire => self.solitaire.tick(now, &mut self.scores.solitaire, &mut self.sfx),
                 Game::FreeCell => self.freecell.tick(now, &mut self.scores.freecell, &mut self.sfx),
                 Game::Pinball => self.pinball.tick(now, focused == Some(Game::Pinball), &mut self.sfx),
+                Game::Shooter => self.shooter.tick(now, focused == Some(Game::Shooter), &mut self.sfx),
             };
         }
         if !visible.contains(&Game::Pinball) || focused != Some(Game::Pinball) {

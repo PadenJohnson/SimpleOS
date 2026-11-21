@@ -21,6 +21,7 @@ pub fn tile_color(app: App) -> u32 {
         App::FreeCell => rgb(20, 110, 120),
         App::Sudoku => rgb(200, 140, 40),
         App::Pinball => rgb(70, 40, 130),
+        App::Shooter => rgb(150, 50, 30),
     }
 }
 
@@ -91,6 +92,14 @@ pub fn draw(c: &mut Canvas, app: App, x: i32, y: i32) {
             c.text(x + 16, y + 14, "5", crate::gfx::Size::Small, true, bg);
             c.text(x + 42, y + 40, "9", crate::gfx::Size::Small, true, bg);
             c.text(x + 29, y + 27, "3", crate::gfx::Size::Small, true, rgb(40, 90, 200));
+        }
+        App::Shooter => {
+            // A visor with a glowing slit, over a station corridor.
+            c.triangle([(x + 8, y + 56), (x + 24, y + 30), (x + 24, y + 56)], rgb(110, 40, 20));
+            c.triangle([(x + 56, y + 56), (x + 40, y + 30), (x + 40, y + 56)], rgb(110, 40, 20));
+            c.round_rect(x + 14, y + 10, 36, 26, 10, WHITE);
+            c.fill_rect(x + 18, y + 19, 28, 6, rgb(255, 150, 60));
+            c.fill_rect(x + 24, y + 36, 16, 6, WHITE);
         }
         App::Pinball => {
             // A ball, a flipper and a star.

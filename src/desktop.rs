@@ -40,6 +40,7 @@ pub enum App {
     FreeCell,
     Sudoku,
     Pinball,
+    Shooter,
 }
 
 impl App {
@@ -59,6 +60,7 @@ impl App {
             App::FreeCell => "FreeCell",
             App::Sudoku => "Sudoku",
             App::Pinball => "Star Pinball",
+            App::Shooter => "Starbase Breach",
         }
     }
 
@@ -72,6 +74,7 @@ impl App {
             App::FreeCell => Game::FreeCell,
             App::Sudoku => Game::Sudoku,
             App::Pinball => Game::Pinball,
+            App::Shooter => Game::Shooter,
             _ => return None,
         })
     }
@@ -101,7 +104,7 @@ const WIN_BG: u32 = rgb(250, 250, 252);
 const APPS: [App; 9] = [App::Photos, App::Documents, App::Files, App::Import, App::Videos, App::Movie, App::Printers, App::Disks, App::Settings];
 
 /// The games, shown in the Games folder of the Applications menu.
-const GAMES: [App; 5] = [App::Solitaire, App::Mines, App::FreeCell, App::Sudoku, App::Pinball];
+const GAMES: [App; 6] = [App::Solitaire, App::Mines, App::FreeCell, App::Sudoku, App::Pinball, App::Shooter];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MenuEntry {
@@ -1355,7 +1358,7 @@ impl Desktop {
         self.windows.push(Window { app, x, y, w, h, minimized: false, restore: None });
         self.order.push(app);
         // The editors want all the room they can get.
-        if matches!(app, App::Photos | App::Documents | App::Movie | App::Videos | App::Pinball) {
+        if matches!(app, App::Photos | App::Documents | App::Movie | App::Videos | App::Pinball | App::Shooter) {
             self.set_maximized(app, true);
         }
         kprintln!("solon: open {}", app.name());
