@@ -48,6 +48,8 @@ pub enum PhotoAction {
     Revert(usize),
     /// Open the print dialog (the desktop supplies the printer list).
     Print(usize),
+    /// Use this photo as the desktop background.
+    Wallpaper(usize),
     /// Print these photos.
     DoPrint { indices: Vec<usize>, layout: crate::print::Layout, printer: crate::print::PrinterInfo },
 }
@@ -410,6 +412,10 @@ impl Photos {
         Rect::new(r.x + r.w - 12 - 90 - 10 - 90, r.y + 8, 90, 32)
     }
 
+    fn wallpaper_button(r: Rect) -> Rect {
+        Rect::new(r.x + r.w - 12 - 90 - 10 - 90 - 10 - 160, r.y + 8, 160, 32)
+    }
+
     fn grid_print_button(r: Rect) -> Rect {
         Rect::new(r.x + r.w - PAD - 90, r.y + 8, 90, 32)
     }
@@ -525,7 +531,7 @@ impl Photos {
         } else {
             format!("{}   |   {} of {}", p.name, i + 1, self.photos.len())
         };
-        let info = ellipsize(&info, r.w - 2 * (b.w + 24), Size::Small, false);
+        let info = ellipsize(&info, r.w - 2 * (370 + 24), Size::Small, false);
         c.text_centered(r.x + r.w / 2, r.y + 15, &info, Size::Small, false, VIEW_TEXT);
         if matches!(self.photos[i].state, State::Ready { .. }) {
             let eb = Self::edit_button(r);
@@ -534,6 +540,9 @@ impl Photos {
             let pb = Self::print_button(r);
             c.round_rect(pb.x, pb.y, pb.w, pb.h, 8, rgb(60, 64, 74));
             c.text_centered(pb.x + pb.w / 2, pb.y + 7, "Print", Size::Small, true, VIEW_TEXT);
+            let wb = Self::wallpaper_button(r);
+            c.round_rect(wb.x, wb.y, wb.w, wb.h, 8, rgb(60, 64, 74));
+            c.text_centered(wb.x + wb.w / 2, wb.y + 7, "Desktop picture", Size::Small, true, VIEW_TEXT);
         }
 
         let ia = Self::image_area(r);
@@ -634,6 +643,10 @@ impl Photos {
         }
         match self.mode {
             Mode::View(i) => {
+                if Self::wallpaper_button(r).contains(x, y) && matches!(self.photos[i].state, State::Ready { .. }) {
+                    self.pending = Some(PhotoAction::Wallpaper(i));
+                    return true;
+                }
                 if Self::edit_button(r).contains(x, y) && matches!(self.photos[i].state, State::Ready { .. }) {
                     self.pending = Some(PhotoAction::Edit(i));
                     return true;

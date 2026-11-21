@@ -51,7 +51,7 @@ pub struct Settings {
 impl Settings {
     /// First-boot defaults: bigger text on very high-resolution screens.
     pub fn defaults(screen_w: usize, screen_h: usize) -> Settings {
-        let mut s = Settings { background: 0, size: 0, clock24: false, show_date: true, mouse: 1, install_notice: false, saver: 0, saver_wait: 1, slide_time: 1, shuffle: true };
+        let mut s = Settings { background: crate::wallpaper::DEFAULT, size: 0, clock24: false, show_date: true, mouse: 1, install_notice: false, saver: 0, saver_wait: 1, slide_time: 1, shuffle: true };
         for i in (0..SIZES.len()).rev() {
             if screen_w >= 2400 && s.size_fits(i, screen_w, screen_h) {
                 s.size = i;
@@ -84,7 +84,7 @@ impl Settings {
             let Some((k, v)) = line.split_once('=') else { continue };
             let n: usize = v.trim().parse().unwrap_or(usize::MAX);
             match k.trim() {
-                "background" if n < BACKGROUNDS.len() => s.background = n,
+                "background" if n < crate::wallpaper::COUNT => s.background = n,
                 "size" if n < SIZES.len() => s.size = n,
                 "clock24" if n <= 1 => s.clock24 = n == 1,
                 "show_date" if n <= 1 => s.show_date = n == 1,

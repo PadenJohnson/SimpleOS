@@ -390,6 +390,17 @@ impl Storage {
         .flatten()
     }
 
+    /// Remove a file at the top of the library, if it's there.
+    pub fn remove_root_file(&mut self, usb: &mut Usb, name: &str) -> Result<(), FsError> {
+        self.with(usb, |vol, d| {
+            let root = vol.root();
+            match vol.find(d, &root, name)? {
+                Some(e) if !e.is_dir => vol.delete(d, &e),
+                _ => Ok(()),
+            }
+        })
+    }
+
     /// Replace a small file at the top of the library.
     pub fn write_root_file(&mut self, usb: &mut Usb, name: &str, data: &[u8]) -> Result<(), FsError> {
         self.with(usb, |vol, d| {

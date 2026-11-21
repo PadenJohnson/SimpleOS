@@ -81,3 +81,74 @@ pub fn make(bg: usize, w: usize, h: usize) -> Vec<u32> {
     }
     px
 }
+
+// ---- photo backgrounds -------------------------------------------------------------------
+
+/// Built-in nature photos (CC0, see assets/wallpapers/CREDITS.md): name, photo, preview.
+pub const PHOTOS: [(&str, &[u8], &[u8]); 5] = [
+    ("Autumn", include_bytes!("../assets/wallpapers/autumn.jpg"), include_bytes!("../assets/wallpapers/thumbs/autumn.jpg")),
+    ("Sunset", include_bytes!("../assets/wallpapers/sunset.jpg"), include_bytes!("../assets/wallpapers/thumbs/sunset.jpg")),
+    ("Forest", include_bytes!("../assets/wallpapers/forest.jpg"), include_bytes!("../assets/wallpapers/thumbs/forest.jpg")),
+    ("Field", include_bytes!("../assets/wallpapers/field.jpg"), include_bytes!("../assets/wallpapers/thumbs/field.jpg")),
+    ("Snow", include_bytes!("../assets/wallpapers/snow.jpg"), include_bytes!("../assets/wallpapers/thumbs/snow.jpg")),
+];
+
+/// Background numbers (Settings.background): the colours (0-4), the photos, then "your photo".
+pub const FIRST_PHOTO: usize = THEMES.len();
+pub const CUSTOM: usize = FIRST_PHOTO + PHOTOS.len();
+pub const COUNT: usize = CUSTOM + 1;
+/// What new installs start with.
+pub const DEFAULT: usize = FIRST_PHOTO;
+
+/// The name of a background, for the Settings window.
+pub fn name(bg: usize) -> &'static str {
+    match bg {
+        b if b < FIRST_PHOTO => crate::settings::BACKGROUNDS[b].0,
+        b if b < CUSTOM => PHOTOS[b - FIRST_PHOTO].0,
+        _ => "Your photo",
+    }
+}
+
+/// A photo filling w x h (cropped to the screen's shape, never stretched).
+pub fn photo(img: &crate::image::Image, w: usize, h: usize) -> Vec<u32> {
+    crate::frame::cover(img, w, h)
+}
+
+/// Clock colour for the part of the wallpaper inside `r`: dark on bright pictures, white
+/// (with a soft shadow behind it) on dark ones. Returns (ink, needs a shadow).
+pub fn ink_for(px: &[u32], w: usize, h: usize, r: (i32, i32, i32, i32)) -> (u32, bool) {
+    let (x0, y0) = (r.0.clamp(0, w as i32) as usize, r.1.clamp(0, h as i32) as usize);
+    let (x1, y1) = ((r.0 + r.2).clamp(0, w as i32) as usize, (r.1 + r.3).clamp(0, h as i32) as usize);
+    let (mut sum, mut n) = (0u64, 0u64);
+    for y in (y0..y1).step_by(4) {
+        for x in (x0..x1).step_by(4) {
+            let p = px[y * w + x];
+            sum += (299 * (p >> 16 & 0xFF) + 587 * (p >> 8 & 0xFF) + 114 * (p & 0xFF)) as u64 / 1000;
+            n += 1;
+        }
+    }
+    if n > 0 && sum / n < 160 {
+        (rgb(255, 255, 255), true)
+    } else {
+        (rgb(20, 28, 40), false)
+    }
+}
+
+/// Darken an oval (centre cx, cy; radii rx, ry) with a soft edge, up to `strength`/255 in
+/// the middle, so white text over a photo stays readable.
+pub fn soft_shade(px: &mut [u32], w: usize, h: usize, cx: i32, cy: i32, rx: i32, ry: i32, strength: u32) {
+    let (rx, ry) = (rx.max(1) as i64, ry.max(1) as i64);
+    for y in (cy as i64 - ry).max(0)..(cy as i64 + ry).min(h as i64) {
+        for x in (cx as i64 - rx).max(0)..(cx as i64 + rx).min(w as i64) {
+            let (dx, dy) = (x - cx as i64, y - cy as i64);
+            // Distance from the centre, 0 (middle) to 4096 (edge).
+            let d = (dx * dx * 4096 / (rx * rx) + dy * dy * 4096 / (ry * ry)).min(4096);
+            let f = ((4096 - d) * (4096 - d) / 4096) as u32; // smooth fall-off
+            let a = 256 - strength * f / 4096;
+            let p = &mut px[y as usize * w + x as usize];
+            let rb = ((*p & 0xFF00FF) * a >> 8) & 0xFF00FF;
+            let g = ((*p & 0x00FF00) * a >> 8) & 0x00FF00;
+            *p = 0xFF00_0000 | rb | g;
+        }
+    }
+}

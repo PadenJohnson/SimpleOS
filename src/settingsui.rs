@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 
 use crate::gfx::{mix, rgb, Canvas, Rect, Size};
 use crate::settings::{days_in_month, Settings, BACKGROUNDS, MONTHS, MOUSE, SIZES};
+use crate::wallpaper::{CUSTOM, FIRST_PHOTO, PHOTOS};
 
 const INK: u32 = rgb(40, 44, 52);
 const DIM: u32 = rgb(110, 116, 126);
@@ -31,6 +32,11 @@ pub struct SettingsApp {
     edited: bool,
     /// The resolution list is open.
     picker: bool,
+    /// The background chooser is open.
+    bg_picker: bool,
+    /// Previews of the built-in photos, and of the user's own desktop picture.
+    thumbs: Vec<crate::image::Image>,
+    custom_thumb: Option<crate::image::Image>,
 }
 
 fn button(c: &mut Canvas, b: Rect, label: &str, on: bool, enabled: bool) {
@@ -45,7 +51,8 @@ fn button(c: &mut Canvas, b: Rect, label: &str, on: bool, enabled: bool) {
 
 impl SettingsApp {
     pub fn new() -> SettingsApp {
-        let mut s = SettingsApp { t: (2026, 1, 1, 0, 0), edited: false, picker: false };
+        let thumbs = PHOTOS.iter().filter_map(|p| crate::image::decode(p.2).ok()).collect();
+        let mut s = SettingsApp { t: (2026, 1, 1, 0, 0), edited: false, picker: false, bg_picker: false, thumbs, custom_thumb: None };
         s.reload_time();
         s
     }
@@ -56,6 +63,7 @@ impl SettingsApp {
         let (h, mi, _) = crate::rtc::time();
         self.t = (y, mo, d, h, mi);
         self.edited = false;
+        self.bg_picker = false;
     }
 
     // ---- layout ----------------------------------------------------------------
@@ -67,8 +75,11 @@ impl SettingsApp {
     fn x0(r: Rect) -> i32 {
         r.x + 24 + LABEL_W
     }
-    fn swatch(r: Rect, i: usize) -> Rect {
-        Rect::new(Self::x0(r) + i as i32 * 96, Self::row_y(r, 0), 84, 44)
+    fn bg_preview(r: Rect) -> Rect {
+        Rect::new(Self::x0(r), Self::row_y(r, 0) - 4, 80, 50)
+    }
+    fn bg_btn(r: Rect) -> Rect {
+        Rect::new(Self::x0(r) + 250, Self::row_y(r, 0) + 4, 200, 36)
     }
     fn size_btn(r: Rect, i: usize) -> Rect {
         Rect::new(Self::x0(r) + i as i32 * 158, Self::row_y(r, 1) + 4, 148, 36)
@@ -103,17 +114,9 @@ impl SettingsApp {
         let label = |c: &mut Canvas, i: i32, t: &str| c.text(r.x + 24, Self::row_y(r, i) + 12, t, Size::Small, true, DIM);
 
         label(c, 0, "Background");
-        for (i, (name, top, bottom)) in BACKGROUNDS.iter().enumerate() {
-            let b = Self::swatch(r, i);
-            if s.background == i {
-                c.round_rect(b.x - 4, b.y - 4, b.w + 8, b.h + 8, 10, ON);
-            }
-            for k in 0..b.h {
-                let col = mix(*top, *bottom, (k * 255 / b.h.max(1)) as u32);
-                c.fill_rect(b.x, b.y + k, b.w, 1, col);
-            }
-            c.text_centered(b.x + b.w / 2, b.y + 12, name, Size::Small, true, crate::wallpaper::ink(i));
-        }
+        self.draw_bg_tile(c, Self::bg_preview(r), s.background, false);
+        c.text(Self::x0(r) + 96, Self::row_y(r, 0) + 12, crate::wallpaper::name(s.background), Size::Small, true, INK);
+        button(c, Self::bg_btn(r), "Change background", false, true);
 
         label(c, 1, "Text and icon size");
         for (i, (name, _)) in SIZES.iter().enumerate() {
@@ -159,6 +162,9 @@ impl SettingsApp {
         if self.picker {
             self.draw_picker(c, r);
         }
+        if self.bg_picker {
+            self.draw_bg_picker(c, r, s);
+        }
     }
 
     // ---- input ------------------------------------------------------------------
@@ -181,6 +187,13 @@ impl SettingsApp {
     }
 
     pub fn on_press(&mut self, x: i32, y: i32, r: Rect, s: &Settings, screen: (usize, usize)) -> SettingsAction {
+        if self.bg_picker {
+            return self.bg_picker_press(x, y, r, s);
+        }
+        if !self.picker && (Self::bg_btn(r).contains(x, y) || Self::bg_preview(r).contains(x, y)) {
+            self.bg_picker = true;
+            return SettingsAction::Redraw;
+        }
         if self.picker {
             if Self::picker_close(r).contains(x, y) {
                 self.picker = false;
@@ -206,11 +219,6 @@ impl SettingsApp {
             return SettingsAction::Redraw;
         }
         let mut n = *s;
-        for i in 0..BACKGROUNDS.len() {
-            if Self::swatch(r, i).contains(x, y) {
-                n.background = i;
-            }
-        }
         for i in 0..SIZES.len() {
             if Self::size_btn(r, i).contains(x, y) && s.size_fits(i, screen.0, screen.1) {
                 n.size = i;
@@ -313,6 +321,113 @@ impl SettingsApp {
         }
         if info.modes.len() <= 1 {
             c.text(r.x + 24, r.y + 130, "This computer only offers one resolution.", Size::Small, true, INK);
+        }
+    }
+}
+
+// ---- background chooser ----------------------------------------------------------------
+
+impl SettingsApp {
+    /// The user's own desktop picture changed (None = there isn't one).
+    pub fn set_custom_thumb(&mut self, img: Option<crate::image::Image>) {
+        self.custom_thumb = img;
+    }
+
+    fn tile_w(r: Rect) -> i32 {
+        ((r.w - 48 - 4 * 16) / 5).min(180)
+    }
+    fn photo_tile(r: Rect, i: usize) -> Rect {
+        let tw = Self::tile_w(r);
+        Rect::new(r.x + 24 + i as i32 * (tw + 16), r.y + 112, tw, tw * 5 / 8)
+    }
+    fn colour_tile(r: Rect, i: usize) -> Rect {
+        let tw = Self::tile_w(r);
+        Rect::new(r.x + 24 + i as i32 * (tw + 16), Self::photo_tile(r, 0).y + tw * 5 / 8 + 72, tw, 56)
+    }
+    fn custom_tile(r: Rect) -> Rect {
+        let tw = Self::tile_w(r);
+        Rect::new(r.x + 24, Self::colour_tile(r, 0).y + 56 + 50, tw, tw * 5 / 8)
+    }
+    fn bg_done(r: Rect) -> Rect {
+        Rect::new(r.x + r.w - 140, r.y + 16, 116, 36)
+    }
+
+    /// A small picture of background `bg` in `b`.
+    fn draw_bg_tile(&self, c: &mut Canvas, b: Rect, bg: usize, selected: bool) {
+        if selected {
+            c.round_rect(b.x - 4, b.y - 4, b.w + 8, b.h + 8, 10, ON);
+        }
+        if bg < FIRST_PHOTO {
+            let (_, top, bottom) = BACKGROUNDS[bg];
+            for k in 0..b.h {
+                c.fill_rect(b.x, b.y + k, b.w, 1, mix(top, bottom, (k * 255 / b.h.max(1)) as u32));
+            }
+            return;
+        }
+        let img = if bg < CUSTOM { self.thumbs.get(bg - FIRST_PHOTO) } else { self.custom_thumb.as_ref() };
+        match img {
+            Some(img) => {
+                let px = crate::frame::cover(img, b.w as usize, b.h as usize);
+                c.draw_image(&crate::image::Image { w: b.w as usize, h: b.h as usize, px, opaque: true }, b.x, b.y);
+            }
+            None => {
+                c.fill_rect(b.x, b.y, b.w, b.h, rgb(236, 238, 242));
+                c.outline_rect(b.x, b.y, b.w, b.h, rgb(210, 214, 220));
+                c.text_centered(b.x + b.w / 2, b.y + b.h / 2 - 9, "None yet", Size::Small, false, DIM);
+            }
+        }
+    }
+
+    fn draw_bg_picker(&self, c: &mut Canvas, r: Rect, s: &Settings) {
+        c.fill_rect(r.x, r.y, r.w, r.h, rgb(250, 250, 252));
+        c.text(r.x + 24, r.y + 20, "Choose a background", Size::Medium, true, INK);
+        button(c, Self::bg_done(r), "Done", true, true);
+        c.text(r.x + 24, Self::photo_tile(r, 0).y - 32, "Nature photos", Size::Small, true, DIM);
+        for (i, p) in PHOTOS.iter().enumerate() {
+            let b = Self::photo_tile(r, i);
+            self.draw_bg_tile(c, b, FIRST_PHOTO + i, s.background == FIRST_PHOTO + i);
+            c.text_centered(b.x + b.w / 2, b.y + b.h + 8, p.0, Size::Small, false, INK);
+        }
+        c.text(r.x + 24, Self::colour_tile(r, 0).y - 32, "Colours", Size::Small, true, DIM);
+        for (i, (name, _, _)) in BACKGROUNDS.iter().enumerate() {
+            let b = Self::colour_tile(r, i);
+            self.draw_bg_tile(c, b, i, s.background == i);
+            c.text_centered(b.x + b.w / 2, b.y + 17, name, Size::Small, true, crate::wallpaper::ink(i));
+        }
+        let b = Self::custom_tile(r);
+        c.text(r.x + 24, b.y - 32, "Your photo", Size::Small, true, DIM);
+        self.draw_bg_tile(c, b, CUSTOM, s.background == CUSTOM && self.custom_thumb.is_some());
+        let x = b.x + b.w + 24;
+        c.text(x, b.y + 10, "To use one of your own photos, open it in Photos", Size::Small, false, INK);
+        c.text(x, b.y + 34, "and press \"Desktop picture\" at the top.", Size::Small, false, INK);
+        if self.custom_thumb.is_some() && s.background != CUSTOM {
+            c.text(x, b.y + 66, "Or click the picture on the left to use it again.", Size::Small, false, DIM);
+        }
+    }
+
+    fn bg_picker_press(&mut self, x: i32, y: i32, r: Rect, s: &Settings) -> SettingsAction {
+        if Self::bg_done(r).contains(x, y) {
+            self.bg_picker = false;
+            return SettingsAction::Redraw;
+        }
+        let mut n = *s;
+        for i in 0..PHOTOS.len() {
+            if Self::photo_tile(r, i).contains(x, y) {
+                n.background = FIRST_PHOTO + i;
+            }
+        }
+        for i in 0..BACKGROUNDS.len() {
+            if Self::colour_tile(r, i).contains(x, y) {
+                n.background = i;
+            }
+        }
+        if self.custom_thumb.is_some() && Self::custom_tile(r).contains(x, y) {
+            n.background = CUSTOM;
+        }
+        if n != *s {
+            SettingsAction::Change(n)
+        } else {
+            SettingsAction::None
         }
     }
 }

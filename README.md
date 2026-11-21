@@ -10,7 +10,9 @@ nothing to download.
 **Working now**
 - Desktop with Photos, Photo Frame, Videos, Video Editor, Documents (Writer, Spreadsheets, PDF, Text Editor),
   Paint, Calendar, Calculator, Printers, Backup, Import, Files, Disks, Settings and Games
-- Desktop: light wallpapers with a big clock, a floating dock (Applications button, pinned
+- Desktop: a nature photo (five built in: autumn, sunset, forest, field, snow; free CC0
+  photos, see assets/wallpapers/CREDITS.md), a soft colour, or one of your own photos ("Desktop
+  picture" in Photos) behind a big clock whose colour adapts to the picture; a floating dock (Applications button, pinned
   apps and folders, open apps, clock, power) and a centred Applications launcher; several
   apps open at once in rounded windows that move, minimize and maximize. Smooth Noto Sans
   and Noto Serif fonts throughout

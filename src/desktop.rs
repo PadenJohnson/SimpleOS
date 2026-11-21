@@ -262,8 +262,11 @@ pub struct Desktop {
     /// Icons drawn small, for the dock (42 px) and title bars (22 px).
     dock_icons: Vec<(icons::Icon, crate::image::Image)>,
     title_icons: Vec<(icons::Icon, crate::image::Image)>,
-    /// The wallpaper, drawn once per size and choice: (background, w, h, pixels).
-    wallpaper: Option<(usize, i32, i32, Vec<u32>)>,
+    /// The wallpaper, drawn once per size and choice.
+    wallpaper: Option<Wall>,
+    /// The user's own desktop picture (file bytes), once looked for in Solon storage.
+    custom_wallpaper: Option<Vec<u8>>,
+    custom_checked: bool,
     games: crate::games::Games,
     photos: Photos,
     import: Import,
@@ -356,6 +359,20 @@ struct ImportJob {
 
 const PHONE_INDEX: &str = "PhoneImports.txt";
 
+/// The user's own desktop picture in Solon storage (JPEG or PNG).
+const CUSTOM_NAMES: [&str; 2] = ["Desktop picture.jpg", "Desktop picture.png"];
+
+/// The desktop wallpaper at one size, with the colours for text drawn on it.
+struct Wall {
+    bg: usize,
+    w: i32,
+    h: i32,
+    px: Vec<u32>,
+    /// Clock and date colour, and whether they need a shadow; the hint along the bottom.
+    ink: (u32, bool),
+    hint: (u32, bool),
+}
+
 /// How an imported phone file is remembered.
 fn phone_key(serial: &Option<String>, f: &DirEntry) -> String {
     format!("{}	{}	{}", serial.as_deref().unwrap_or(""), f.name, f.size)
@@ -403,6 +420,8 @@ impl Desktop {
             dock_icons: Vec::new(),
             title_icons: Vec::new(),
             wallpaper: None,
+            custom_wallpaper: None,
+            custom_checked: false,
             games: crate::games::Games::new(),
             photos,
             import: Import::new(),
@@ -850,6 +869,10 @@ impl Desktop {
             self.calendar.load(t.as_deref().and_then(|b| core::str::from_utf8(b).ok()));
             redraw = true;
         }
+        // The user's own desktop picture, for its preview in Settings.
+        if !self.custom_checked && self.storage.library.is_some() {
+            let _ = self.custom_image();
+        }
         if !self.backup.last_loaded && self.storage.library.is_some() {
             self.backup.load_last(&mut self.storage, &mut self.usb);
             redraw = true;
@@ -1006,6 +1029,7 @@ impl Desktop {
                 self.toast = Some((String::from("Saving your photo..."), Self::now() + 120 * HZ));
                 self.pending_save = Some((i, choice, edits));
             }
+            PhotoAction::Wallpaper(i) => self.use_as_wallpaper(i),
             PhotoAction::Print(i) => {
                 let printers = self.printers();
                 kprintln!("print: dialog opened, {} printer(s)", printers.len());
@@ -1223,6 +1247,79 @@ impl Desktop {
                 true
             }
         }
+    }
+
+    /// The wallpaper for background `bg` at w x h, and the text colours that suit it.
+    fn make_wallpaper(&mut self, bg: usize, w: i32, h: i32) -> Wall {
+        use crate::wallpaper::{CUSTOM, FIRST_PHOTO, PHOTOS};
+        let (wu, hu) = (w as usize, h as usize);
+        if bg < FIRST_PHOTO {
+            let ink = crate::wallpaper::ink(bg);
+            return Wall { bg, w, h, px: crate::wallpaper::make(bg, wu, hu), ink: (ink, false), hint: (ink, false) };
+        }
+        let img = if bg == CUSTOM { self.custom_image() } else { None };
+        let img = img.or_else(|| crate::image::decode(PHOTOS[if bg < CUSTOM { bg - FIRST_PHOTO } else { 0 }].1).ok());
+        let px = match &img {
+            Some(img) => crate::wallpaper::photo(img, wu, hu),
+            None => crate::wallpaper::make(0, wu, hu),
+        };
+        let big = (h / 9).clamp(56, 120);
+        let top = h / 5 + big;
+        let mut px = px;
+        let ink = crate::wallpaper::ink_for(&px, wu, hu, (w / 4, top - big, w / 2, big + big / 2 + 40));
+        if ink.1 {
+            // White clock: darken softly behind it so it reads on any photo.
+            crate::wallpaper::soft_shade(&mut px, wu, hu, w / 2, top - big / 4, w / 3, big * 3 / 2, 90);
+        }
+        let hint = crate::wallpaper::ink_for(&px, wu, hu, (w / 4, h - BAR_H - 52, w / 2, 28));
+        kprintln!("solon: wallpaper {} at {}x{}", crate::wallpaper::name(bg), w, h);
+        Wall { bg, w, h, px, ink, hint }
+    }
+
+    /// The user's own desktop picture, decoded (read from Solon storage the first time).
+    fn custom_image(&mut self) -> Option<crate::image::Image> {
+        if self.custom_wallpaper.is_none() && !self.custom_checked && self.storage.library.is_some() {
+            self.custom_checked = true;
+            self.custom_wallpaper = CUSTOM_NAMES.iter().find_map(|n| self.storage.read_root_file(&mut self.usb, n));
+        }
+        let img = crate::image::decode(self.custom_wallpaper.as_ref()?).ok()?;
+        self.settings_app.set_custom_thumb(Some(crate::image::Image { w: 192, h: 120, px: crate::frame::cover(&img, 192, 120), opaque: true }));
+        Some(img)
+    }
+
+    /// Photos: "Desktop picture" on photo `i`.
+    fn use_as_wallpaper(&mut self, i: usize) {
+        let bytes = match self.photos.source(i).cloned() {
+            Some(Source::Memory(b)) => Ok(b.to_vec()),
+            Some(Source::Usb { drive, vol, entry }) => self.usb.read_file(drive, vol, &entry),
+            Some(Source::Library { entry, .. }) => self.storage.read_file(&mut self.usb, &entry),
+            None => return,
+        };
+        let Ok(bytes) = bytes else {
+            self.toast = Some((String::from("Couldn't read that photo"), Self::now() + 5 * HZ));
+            return;
+        };
+        if crate::image::decode(&bytes).is_err() {
+            self.toast = Some((String::from("That photo can't be used as a desktop picture"), Self::now() + 5 * HZ));
+            return;
+        }
+        // Kept in Solon storage so it's there after a restart (only one at a time).
+        if self.storage.library.is_some() {
+            let name = if crate::image::sniff(&bytes) == Some(crate::image::Format::Png) { CUSTOM_NAMES[1] } else { CUSTOM_NAMES[0] };
+            for other in CUSTOM_NAMES.iter().filter(|n| **n != name) {
+                let _ = self.storage.remove_root_file(&mut self.usb, other);
+            }
+            if let Err(e) = self.storage.write_root_file(&mut self.usb, name, &bytes) {
+                kprintln!("solon: couldn't save the desktop picture: {:?}", e);
+            }
+        }
+        self.custom_wallpaper = Some(bytes);
+        self.custom_checked = true;
+        self.wallpaper = None;
+        let mut s = self.settings;
+        s.background = crate::wallpaper::CUSTOM;
+        self.apply_settings(s);
+        self.toast = Some((String::from("Desktop picture changed - you'll see it when you close Photos"), Self::now() + 6 * HZ));
     }
 
     fn backup_action(&mut self, a: crate::backup::BackupAction, now: u64) -> bool {
@@ -1933,10 +2030,11 @@ impl Desktop {
         }
         // Wallpaper (drawn once), with a big clock.
         let bg = self.settings.background;
-        if !matches!(&self.wallpaper, Some((b, ww, hh, _)) if *b == bg && *ww == w && *hh == h) {
-            self.wallpaper = Some((bg, w, h, crate::wallpaper::make(bg, w as usize, h as usize)));
+        if !matches!(&self.wallpaper, Some(wp) if wp.bg == bg && wp.w == w && wp.h == h) {
+            self.wallpaper = Some(self.make_wallpaper(bg, w, h));
         }
-        if let Some((_, _, _, px)) = &self.wallpaper {
+        let (ink, shadow, hint_ink) = self.wallpaper.as_ref().map_or((INK, false, INK), |wp| (wp.ink.0, wp.ink.1, wp.hint.0));
+        if let Some(Wall { px, .. }) = &self.wallpaper {
             if c.w == w as usize && c.px.len() == px.len() {
                 c.px.copy_from_slice(px);
             }
@@ -1944,7 +2042,6 @@ impl Desktop {
         let maximized = self.windows.iter().any(|w| !w.minimized && w.restore.is_some());
         if !maximized {
             use crate::font::{width, Face};
-            let ink = crate::wallpaper::ink(bg);
             let clock = self.settings.clock_text(self.clock.0, self.clock.1);
             let big = (h / 9).clamp(56, 120) as u16;
             let top = h / 5 + big as i32;
@@ -1960,7 +2057,7 @@ impl Desktop {
                 let l = crate::photos::ellipsize(l, w - 80, Size::Medium, false);
                 let lw = text_width(&l, Size::Medium, false) + 36;
                 c.round_rect_alpha(w / 2 - lw / 2, ly, lw, 32, 16, 0xFF_FFFF, 150);
-                c.text_centered(w / 2, ly + 6, &l, Size::Medium, false, ink);
+                c.text_centered(w / 2, ly + 6, &l, Size::Medium, false, if shadow { rgb(30, 34, 42) } else { ink });
                 ly += 40;
             }
             if let Some((msg, b)) = self.backup_nudge() {
@@ -1970,7 +2067,10 @@ impl Desktop {
             }
             if self.windows.is_empty() {
                 let hint = "Click the blue button at the bottom to see all your apps";
-                c.text_centered(w / 2, h - BAR_H - 48, hint, Size::Small, false, ink);
+                if hint_ink == rgb(255, 255, 255) {
+                    c.text_centered(w / 2 + 1, h - BAR_H - 47, hint, Size::Small, false, rgb(0, 0, 0));
+                }
+                c.text_centered(w / 2, h - BAR_H - 48, hint, Size::Small, false, hint_ink);
             }
         }
 

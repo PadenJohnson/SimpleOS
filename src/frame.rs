@@ -565,3 +565,24 @@ fn soften(img: &Image) -> Image {
     let px = cur.iter().map(|c| 0xFF00_0000 | c[0] << 16 | c[1] << 8 | c[2]).collect();
     Image { w, h, px, opaque: true }
 }
+
+/// `img` filling w x h exactly: the middle part with the screen's shape, scaled.
+pub fn cover(img: &Image, w: usize, h: usize) -> Vec<u32> {
+    let (iw, ih) = (img.w, img.h);
+    // The part of the photo with the screen's shape.
+    let (cw, ch) = if iw * h >= ih * w { ((ih * w / h).max(1), ih) } else { (iw, (iw * h / w).max(1)) };
+    let (cx, cy) = ((iw - cw) / 2, (ih - ch) / 2);
+    if cw > w {
+        // Shrinking: average the pixels (sharper than sampling).
+        let mut part = Vec::with_capacity(cw * ch);
+        for y in cy..cy + ch {
+            part.extend_from_slice(&img.px[y * iw + cx..y * iw + cx + cw]);
+        }
+        let small = Image { w: cw, h: ch, px: part, opaque: true }.shrink_to_fit(w, h);
+        if (small.w, small.h) == (w, h) {
+            return small.px;
+        }
+        return sample(&small, 0, 0, (small.w as u64) << 16, (small.h as u64) << 16, w, h);
+    }
+    sample(img, (cx as u64) << 16, (cy as u64) << 16, (cw as u64) << 16, (ch as u64) << 16, w, h)
+}
