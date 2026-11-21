@@ -80,6 +80,8 @@ enum Tool {
     Outdent,
     Indent,
     PageBreak,
+    Picture,
+    Table,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -118,6 +120,8 @@ pub struct WriterEd {
     last_click: Option<(Pos, u64)>,
     want_x: Option<i32>,
     view_h: core::cell::Cell<i32>,
+    /// Pictures decoded at the size last drawn: (picture, w, h).
+    pics: RefCell<alloc::collections::BTreeMap<(u16, i32, i32), Option<alloc::rc::Rc<crate::image::Image>>>>,
     /// From a .txt file: the first save asks for a name (as a .docx).
     note: Option<String>,
 }
@@ -141,6 +145,7 @@ pub fn new_doc() -> WriterEd {
         last_click: None,
         want_x: None,
         view_h: core::cell::Cell::new(600),
+        pics: RefCell::new(alloc::collections::BTreeMap::new()),
         note: None,
     }
 }
@@ -154,7 +159,7 @@ pub fn load(name: &str, b: &[u8]) -> Result<WriterEd, String> {
             .map(|l| {
                 let t: Vec<char> = l.strip_suffix('\r').unwrap_or(l).chars().collect();
                 let n = t.len();
-                Para { text: t, st: alloc::vec![Style::NORMAL; n], p: PStyle::NORMAL, end: Style::NORMAL }
+                Para { text: t, st: alloc::vec![Style::NORMAL; n], p: PStyle::NORMAL, end: Style::NORMAL, row: None }
             })
             .collect();
         if ed.doc.paras.is_empty() {
@@ -193,6 +198,8 @@ fn toolbar_row2() -> &'static [(Tool, &'static str)] {
         (Tool::Outdent, ""),
         (Tool::Indent, ""),
         (Tool::PageBreak, "Page break"),
+        (Tool::Picture, "Picture"),
+        (Tool::Table, "Table"),
     ]
 }
 
@@ -261,11 +268,25 @@ impl WriterEd {
             let (ox, oy) = self.page_origin(r, page);
             let m = &self.doc.margin;
             let mut best = None;
-            for l in lay.lines.iter().filter(|l| l.page == page) {
-                let top = oy + self.to_px(m[1] * 64 + l.y);
-                best = Some(l);
-                if y < top + self.to_px(l.h) {
-                    break;
+            // In a table: the cell under the pointer (its lowest line above the pointer).
+            let ux = ((x - ox) as i64 * 64000 / self.mpp() as i64) as i32 - m[0] * 64;
+            let uy = ((y - oy) as i64 * 64000 / self.mpp() as i64) as i32 - m[1] * 64;
+            let in_row = lay.boxes.iter().any(|&(pg, bx, by, bw, bh)| pg == page && ux >= bx && ux < bx + bw && uy >= by && uy < by + bh);
+            if in_row {
+                // The row box under the pointer, then that cell's lowest line starting above it.
+                let rb = lay.boxes.iter().find(|&&(pg, bx, by, bw, bh)| pg == page && ux >= bx && ux < bx + bw && uy >= by && uy < by + bh).copied();
+                if let Some((_, _, by, _, bh)) = rb {
+                    let in_cell = |l: &&doc::Line| l.page == page && l.y >= by && l.y < by + bh && l.cell.is_some_and(|(a, b)| ux >= a && ux < b);
+                    best = lay.lines.iter().filter(in_cell).filter(|l| l.y <= uy).last().or_else(|| lay.lines.iter().find(in_cell));
+                }
+            }
+            if best.is_none() {
+                for l in lay.lines.iter().filter(|l| l.page == page) {
+                    let top = oy + self.to_px(m[1] * 64 + l.y);
+                    best = Some(l);
+                    if y < top + self.to_px(l.h) {
+                        break;
+                    }
                 }
             }
             let Some(l) = best.or_else(|| lay.lines.iter().rev().find(|l| l.page < page)).or(lay.lines.first()) else { return (0, 0) };
@@ -333,6 +354,22 @@ impl WriterEd {
     }
 
     fn delete_range(&mut self, a: Pos, b: Pos) {
+        if a.0 == b.0 && self.doc.paras[a.0].row.is_some() {
+            // In a table row keep the cell edges (tabs): clear only what's between them.
+            let p = &mut self.doc.paras[a.0];
+            let mut k = b.1;
+            while k > a.1 {
+                k -= 1;
+                if p.text[k] != '\t' {
+                    p.text.remove(k);
+                    p.st.remove(k);
+                }
+            }
+            self.cur = a;
+            self.anchor = None;
+            self.changed();
+            return;
+        }
         if a.0 == b.0 {
             let p = &mut self.doc.paras[a.0];
             p.text.drain(a.1..b.1);
@@ -359,7 +396,11 @@ impl WriterEd {
     }
 
     fn insert_char(&mut self, ch: char) {
-        let st = self.cur_style();
+        let mut st = self.cur_style();
+        if ch != doc::PICTURE {
+            // Text typed next to a picture is text.
+            st.img = 0;
+        }
         self.delete_selection();
         let (pi, i) = self.cur;
         let p = &mut self.doc.paras[pi];
@@ -374,7 +415,8 @@ impl WriterEd {
     }
 
     fn split_para(&mut self) {
-        let st = self.cur_style();
+        let mut st = self.cur_style();
+        st.img = 0;
         self.delete_selection();
         let (pi, i) = self.cur;
         let p = &mut self.doc.paras[pi];
@@ -393,7 +435,7 @@ impl WriterEd {
             np.block = Block::Normal;
             end = Block::Normal.style(st);
         }
-        let new = Para { text: t, st: s, p: np, end };
+        let new = Para { text: t, st: s, p: np, end, row: None };
         self.doc.paras.insert(pi + 1, new);
         self.cur = (pi + 1, 0);
         self.pending = if self.doc.paras[pi + 1].text.is_empty() { Some(end) } else { None };
@@ -404,7 +446,7 @@ impl WriterEd {
         self.split_para();
         let (pi, _) = self.cur;
         let st = self.doc.paras[pi].end;
-        self.doc.paras.insert(pi, Para { text: alloc::vec![PAGE_BREAK], st: alloc::vec![st], p: PStyle::NORMAL, end: st });
+        self.doc.paras.insert(pi, Para { text: alloc::vec![PAGE_BREAK], st: alloc::vec![st], p: PStyle::NORMAL, end: st, row: None });
         self.cur = (pi + 1, 0);
         self.changed();
     }
@@ -508,7 +550,7 @@ impl WriterEd {
             let p = &self.doc.paras[pi];
             let from = if pi == a.0 { a.1 } else { 0 };
             let to = if pi == b.0 { b.1 } else { p.text.len() };
-            out.push(Para { text: p.text[from..to].to_vec(), st: p.st[from..to].to_vec(), p: p.p, end: p.style_at(to) });
+            out.push(Para { text: p.text[from..to].to_vec(), st: p.st[from..to].to_vec(), p: p.p, end: p.style_at(to), row: None });
         }
         out
     }
@@ -538,7 +580,7 @@ impl WriterEd {
                 .map(|l| {
                     let t: Vec<char> = l.chars().filter(|&c| c != '\r').collect();
                     let n = t.len();
-                    Para { text: t, st: alloc::vec![st; n], p: PStyle::NORMAL, end: st }
+                    Para { text: t, st: alloc::vec![st; n], p: PStyle::NORMAL, end: st, row: None }
                 })
                 .collect(),
         };
@@ -654,7 +696,8 @@ impl WriterEd {
             let w = match t {
                 Tool::Style => 128,
                 Tool::Font => 84,
-                Tool::PageBreak => text_width(label, Size::Small, true) + 24,
+                Tool::PageBreak | Tool::Picture => text_width(label, Size::Small, true) + 24,
+                Tool::Table => 84,
                 _ => 34,
             };
             if matches!(t, Tool::Bold | Tool::Color | Tool::Left | Tool::Bullets | Tool::PageBreak) {
@@ -758,6 +801,11 @@ impl WriterEd {
             }
             Tool::Indent => self.repara(|p| p.p.indent = (p.p.indent + 1).min(8)),
             Tool::Outdent => self.repara(|p| p.p.indent = p.p.indent.saturating_sub(1)),
+            Tool::Table => {
+                self.table_button();
+                self.scroll_to_cursor(r);
+            }
+            Tool::Picture => return EdAction::Pick { purpose: 1, exts: &["jpg", "jpeg", "png"], title: "Choose a picture to put in", many: false },
             Tool::PageBreak => {
                 self.snapshot(EditKind::None);
                 self.insert_page_break();
@@ -807,6 +855,7 @@ impl WriterEd {
         let ps = self.cur_pstyle();
         for (t, b) in self.tool_rects(r) {
             let label = toolbar_row1().iter().chain(toolbar_row2()).find(|x| x.0 == t).map(|x| x.1).unwrap_or("");
+            let label = if t == Tool::Table && self.in_table() { "Add row" } else { label };
             let on = match t {
                 Tool::Bold => st.bold,
                 Tool::Italic => st.italic,
@@ -959,6 +1008,17 @@ impl WriterEd {
         let m = &self.doc.margin;
         let px = |v64: i32| (v64 as i64 * mpp as i64 / 64000) as i32;
         let mut buf = [0u8; 4];
+        // Table cell borders.
+        let thin = (mpp / 1400).max(1);
+        for &(_, bx, by, bw, bh) in lay.boxes.iter().filter(|b| b.0 == page) {
+            let (x0, y0) = (ox + px(m[0] * 64 + bx), oy + px(m[1] * 64 + by));
+            let (x1, y1) = (ox + px(m[0] * 64 + bx + bw), oy + px(m[1] * 64 + by + bh));
+            let col = rgb(120, 126, 136);
+            c.fill_rect(x0, y0, x1 - x0 + thin, thin, col);
+            c.fill_rect(x0, y1, x1 - x0 + thin, thin, col);
+            c.fill_rect(x0, y0, thin, y1 - y0, col);
+            c.fill_rect(x1, y0, thin, y1 - y0, col);
+        }
         for l in lay.lines.iter().filter(|l| l.page == page) {
             let top = oy + px(m[1] * 64 + l.y);
             let lh = px(l.h).max(1);
@@ -997,7 +1057,13 @@ impl WriterEd {
                 if in_sel {
                     c.fill_rect(x0, top, (x1 - x0).max(3), lh, rgb(190, 212, 248));
                 }
-                if ch != ' ' && ch != '\t' && ch != '\n' {
+                if st.img != 0 && ch == doc::PICTURE {
+                    let ph = px(self.doc.image_of(&st).map(|im| im.h * 64).unwrap_or(0));
+                    self.draw_picture(c, st.img, x0, base - ph, x1 - x0, ph);
+                    if in_sel {
+                        c.fill_rect_alpha(x0, base - ph, x1 - x0, ph, rgb(60, 110, 220), 90);
+                    }
+                } else if ch != ' ' && ch != '\t' && ch != '\n' {
                     let gpx = ((st.size as i32 * mpp + 1000) / 2000).max(1) as u16;
                     let x64 = (ox * 64) + ((lx + l.xs[i - l.start]) as i64 * mpp as i64 * 64 / 64000) as i32;
                     c.text_face(x64, base, ch.encode_utf8(&mut buf), st.face(), gpx, st.color);
@@ -1030,6 +1096,16 @@ impl WriterEd {
         let m = self.doc.margin;
         for page in 0..lay.pages {
             pdf.begin_page();
+            for &(_, bx, by, bw, bh) in lay.boxes.iter().filter(|b| b.0 == page) {
+                let (x, y) = ((m[0] * 64 + bx) as f32 / 64.0, (m[1] * 64 + by) as f32 / 64.0);
+                let (w, h) = (bw as f32 / 64.0, bh as f32 / 64.0);
+                let t = 0.5;
+                let col = 0x787E88;
+                pdf.rect(x, y, w + t, t, col);
+                pdf.rect(x, y + h, w + t, t, col);
+                pdf.rect(x, y, t, h, col);
+                pdf.rect(x + w, y, t, h, col);
+            }
             for l in lay.lines.iter().filter(|l| l.page == page) {
                 let p = &self.doc.paras[l.para];
                 if p.is_page_break() {
@@ -1052,6 +1128,12 @@ impl WriterEd {
                 let mut i = l.start;
                 while i < l.end {
                     let st = p.st[i];
+                    if let Some(im) = self.doc.image_of(&st) {
+                        let x = (lx + l.xs[i - l.start]) as f32 / 64.0;
+                        pdf.picture(&im.data, x, base - im.h as f32, im.w as f32, im.h as f32);
+                        i += 1;
+                        continue;
+                    }
                     if matches!(p.text[i], ' ' | '\t' | '\n') {
                         i += 1;
                         continue;
@@ -1207,6 +1289,28 @@ impl DocEditor for WriterEd {
             self.menu = None;
         }
         let (shift, ctrl) = (self.keys.shift, self.keys.ctrl);
+        // Inside a table row: Tab moves between cells, Enter starts a new line in the cell, and
+        // the edges of cells can't be deleted (that would merge them).
+        if self.doc.paras[self.cur.0].row.is_some() && self.selection().is_none() {
+            let (pi, i) = self.cur;
+            let t = &self.doc.paras[pi].text;
+            match key {
+                Key::Tab => {
+                    self.next_cell(!shift);
+                    self.scroll_to_cursor(r);
+                    return EdAction::Redraw;
+                }
+                Key::Enter if !ctrl => {
+                    self.snapshot(EditKind::None);
+                    self.insert_char('\n');
+                    self.scroll_to_cursor(r);
+                    return EdAction::Redraw;
+                }
+                Key::Backspace if i == 0 || t[i - 1] == '\t' => return EdAction::None,
+                Key::Delete if i >= t.len() || t[i] == '\t' => return EdAction::None,
+                _ => {}
+            }
+        }
         let before = self.cur;
         let mut moved = false;
         match key {
@@ -1405,6 +1509,40 @@ impl DocEditor for WriterEd {
         }
     }
 
+    fn picked(&mut self, _purpose: u8, name: &str, bytes: Vec<u8>) -> EdAction {
+        let Ok(img) = crate::image::decode(&bytes) else { return EdAction::Message(format!("\"{}\" isn't a picture Solon can read.", name)) };
+        // About 96 pixels to the inch, but never wider than the text or taller than 7 inches.
+        let cw = self.doc.page_w - self.doc.margin[0] - self.doc.margin[2];
+        let mut w = (img.w as i32 * 3 / 4).max(16);
+        let mut h = (img.h as i32 * 3 / 4).max(16);
+        if w > cw {
+            h = h * cw / w;
+            w = cw;
+        }
+        if h > 504 {
+            w = w * 504 / h;
+            h = 504;
+        }
+        let ext = match crate::image::sniff(&bytes) {
+            Some(crate::image::Format::Jpeg) => "jpeg",
+            _ => "png",
+        };
+        self.snapshot(EditKind::None);
+        self.doc.images.push(doc::DocImage { data: bytes, ext: String::from(ext), w: w.max(4), h: h.max(4) });
+        let mut st = self.cur_style();
+        st.img = self.doc.images.len() as u16;
+        st.underline = false;
+        st.strike = false;
+        st.highlight = None;
+        self.pending = Some(st);
+        self.insert_char(doc::PICTURE);
+        // Typing after the picture goes back to plain text style.
+        let mut back = st;
+        back.img = 0;
+        self.pending = Some(back);
+        EdAction::Redraw
+    }
+
     fn print_pages(&mut self, _paper: Paper) -> Vec<Canvas> {
         let lay = doc::layout(&self.doc);
         let mpp = 100_000 / 72;
@@ -1418,5 +1556,146 @@ impl DocEditor for WriterEd {
                 c
             })
             .collect()
+    }
+}
+
+/// Scale a picture to exactly w x h (box filter when shrinking, nearest when enlarging).
+fn scale_image(src: &crate::image::Image, w: usize, h: usize) -> crate::image::Image {
+    if w <= src.w && h <= src.h {
+        let s = src.shrink_to_fit(w, h);
+        if s.w == w && s.h == h {
+            return s;
+        }
+    }
+    let mut px = alloc::vec![0u32; w * h];
+    for y in 0..h {
+        let sy = (y * src.h / h.max(1)).min(src.h - 1);
+        for x in 0..w {
+            px[y * w + x] = src.px[sy * src.w + (x * src.w / w.max(1)).min(src.w - 1)];
+        }
+    }
+    crate::image::Image { w, h, px, opaque: src.opaque }
+}
+
+impl WriterEd {
+    fn draw_picture(&self, c: &mut Canvas, img: u16, x: i32, y: i32, w: i32, h: i32) {
+        if w <= 0 || h <= 0 || w > 6000 || h > 6000 {
+            return;
+        }
+        let key = (img, w, h);
+        let cached = self.pics.borrow().get(&key).cloned();
+        let pic = match cached {
+            Some(p) => p,
+            None => {
+                let decoded = self.doc.images.get(img as usize - 1).and_then(|im| crate::image::decode(&im.data).ok()).map(|d| alloc::rc::Rc::new(scale_image(&d, w as usize, h as usize)));
+                let mut m = self.pics.borrow_mut();
+                if m.len() > 40 {
+                    m.clear();
+                }
+                m.insert(key, decoded.clone());
+                decoded
+            }
+        };
+        match pic {
+            Some(p) => c.draw_image(&p, x, y),
+            None => {
+                // A kind of picture Solon can't show (kept in the file all the same).
+                c.fill_rect(x, y, w, h, rgb(236, 238, 242));
+                c.outline_rect(x, y, w, h, rgb(190, 196, 206));
+                c.text_centered(x + w / 2, y + h / 2 - 8, "Picture", Size::Small, false, DIM);
+            }
+        }
+    }
+}
+
+impl WriterEd {
+    fn in_table(&self) -> bool {
+        self.doc.paras[self.cur.0].row.is_some()
+    }
+
+    /// Tab / Shift+Tab in a table. Tab in the last cell adds a row, as in Word.
+    fn next_cell(&mut self, forward: bool) {
+        let (pi, i) = self.cur;
+        let text = &self.doc.paras[pi].text;
+        let table = self.doc.paras[pi].row.as_ref().map(|r| r.table);
+        if forward {
+            if let Some(t) = (i..text.len()).find(|&k| text[k] == '\t') {
+                self.cur = (pi, t + 1);
+            } else if self.doc.paras.get(pi + 1).and_then(|p| p.row.as_ref()).map(|r| r.table) == table {
+                self.cur = (pi + 1, 0);
+            } else {
+                self.snapshot(EditKind::None);
+                self.add_row();
+            }
+        } else {
+            let start = text[..i].iter().rposition(|&c| c == '\t').map(|k| k + 1).unwrap_or(0);
+            if start > 0 {
+                let prev = text[..start - 1].iter().rposition(|&c| c == '\t').map(|k| k + 1).unwrap_or(0);
+                self.cur = (pi, prev);
+            } else if pi > 0 && self.doc.paras[pi - 1].row.as_ref().map(|r| r.table) == table {
+                let pt = &self.doc.paras[pi - 1].text;
+                let last = pt.iter().rposition(|&c| c == '\t').map(|k| k + 1).unwrap_or(0);
+                self.cur = (pi - 1, last);
+            }
+        }
+        self.anchor = None;
+        self.want_x = None;
+    }
+
+    /// A new empty row under the cursor's row, with the same columns.
+    fn add_row(&mut self) {
+        let pi = self.cur.0;
+        let p = &self.doc.paras[pi];
+        let Some(row) = p.row.clone() else { return };
+        let tabs = p.text.iter().filter(|&&c| c == '\t').count();
+        let mut st = p.style_at(0);
+        st.img = 0;
+        let mut np = Para::new(p.p, st);
+        np.row = Some(row);
+        for _ in 0..tabs {
+            np.text.push('\t');
+            np.st.push(st);
+        }
+        self.doc.paras.insert(pi + 1, np);
+        self.cur = (pi + 1, 0);
+        self.changed();
+    }
+
+    /// The Table button: add a row when in a table, otherwise put in a 3 x 3 table.
+    fn table_button(&mut self) {
+        self.snapshot(EditKind::None);
+        if self.in_table() {
+            self.add_row();
+            return;
+        }
+        let cw = self.doc.page_w - self.doc.margin[0] - self.doc.margin[2];
+        let id = self.doc.paras.iter().filter_map(|p| p.row.as_ref().map(|r| r.table)).max().unwrap_or(0) + 1;
+        let mut st = self.cur_style();
+        st.img = 0;
+        let pi = self.cur.0;
+        // Start the table on its own line.
+        let at = if self.doc.paras[pi].text.is_empty() {
+            self.doc.paras.remove(pi);
+            pi
+        } else {
+            pi + 1
+        };
+        for k in 0..3 {
+            let mut np = Para::new(PStyle::NORMAL, st);
+            np.p.after = 0;
+            np.row = Some(doc::Row { table: id, widths: alloc::vec![cw / 3; 3] });
+            for _ in 0..2 {
+                np.text.push('\t');
+                np.st.push(st);
+            }
+            self.doc.paras.insert(at + k, np);
+        }
+        // A normal line after it, to carry on typing.
+        if self.doc.paras.get(at + 3).is_none_or(|p| p.row.is_some()) {
+            self.doc.paras.insert(at + 3, Para::new(PStyle::NORMAL, st));
+        }
+        self.cur = (at, 0);
+        self.anchor = None;
+        self.changed();
     }
 }

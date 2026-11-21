@@ -370,12 +370,10 @@ pub struct Decryptor {
 }
 
 pub struct Params<'a> {
-    pub v: i64,
     pub r: i64,
     pub length: i64,
     pub o: &'a [u8],
     pub u: &'a [u8],
-    pub oe: &'a [u8],
     pub ue: &'a [u8],
     pub p: i64,
     pub id0: &'a [u8],

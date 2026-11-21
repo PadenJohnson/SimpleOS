@@ -1,5 +1,6 @@
 //! PDF files: reading and drawing them, editing pages, and writing new or edited PDFs.
 
+pub mod ccitt;
 pub mod crypt;
 pub mod edit;
 pub mod file;

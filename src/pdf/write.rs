@@ -120,11 +120,6 @@ impl DocPdf {
         DocPdf { out, pages_id, w: w as f32, h: h as f32, pages: Vec::new(), content: String::new(), fonts: BTreeMap::new(), page_fonts: BTreeSet::new(), page_images: Vec::new(), images: 0 }
     }
 
-    pub fn page_size(&mut self, w: f32, h: f32) {
-        self.w = w;
-        self.h = h;
-    }
-
     pub fn begin_page(&mut self) {
         self.content.clear();
         self.page_fonts.clear();
@@ -262,5 +257,39 @@ impl DocPdf {
         let root = self.out.add_str(&format!("<< /Type /Catalog /Pages {} 0 R >>", self.pages_id));
         let info = self.out.add_str("<< /Producer (Solon) /Creator (Solon) >>");
         self.out.finish(root, Some(info))
+    }
+}
+
+impl DocPdf {
+    /// A picture file (JPEG as-is; PNG and others decoded) drawn into (x, y, w, h).
+    pub fn picture(&mut self, data: &[u8], x: f32, y: f32, w: f32, h: f32) {
+        if crate::image::sniff(data) == Some(crate::image::Format::Jpeg) {
+            use zune_core::bytestream::ZCursor;
+            let mut d = zune_jpeg::JpegDecoder::new(ZCursor::new(data));
+            if d.decode_headers().is_ok() {
+                if let Some(info) = d.info() {
+                    if info.components == 1 || info.components == 3 {
+                        self.jpeg(data, info.width as usize, info.height as usize, info.components == 1, x, y, w, h);
+                        return;
+                    }
+                }
+            }
+        }
+        match crate::image::decode(data) {
+            Ok(img) => {
+                let mut px = Vec::with_capacity(img.w * img.h * 3);
+                for &p in &img.px {
+                    let a = p >> 24;
+                    let ch = |s: u32| ((((p >> s) & 0xFF) * a + 255 * (255 - a)) / 255) as u8;
+                    px.extend_from_slice(&[ch(16), ch(8), ch(0)]);
+                }
+                let id = self.out.add(PdfOut::stream_body(&format!("/Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB /BitsPerComponent 8", img.w, img.h), &px, true));
+                self.images += 1;
+                let name = format!("Im{}", self.images);
+                self.content += &format!("q {} 0 0 {} {} {} cm /{} Do Q\n", num(w), num(h), num(x), num(self.h - y - h), name);
+                self.page_images.push((name, id));
+            }
+            Err(_) => self.rect(x, y, w, h, 0xE6E6E6),
+        }
     }
 }

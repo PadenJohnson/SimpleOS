@@ -31,11 +31,12 @@ nothing to download.
 - Documents (a folder in the Applications menu):
   - Writer: a word processor that opens and saves Word (.docx) files: fonts and sizes, bold,
     italic, underline, colours, highlighting, headings, alignment, bullets and numbering,
-    page breaks, undo, printing and Save as PDF. Pictures and table layout in Word files
-    aren't kept yet.
+    page breaks, pictures, tables (Tab moves between cells), undo, printing and Save as
+    PDF. Text boxes and drawings made in Word aren't shown yet.
   - PDF: view any PDF, add text, draw, highlight, sign with the mouse, turn/move/delete
     pages, add pages from other PDFs or photos, save and print; "PDF from photos" makes new
-    PDFs. Opens protected PDFs that have no open password.
+    PDFs. Opens protected PDFs that have no open password, and scanned (fax-style) pages.
+    JPEG 2000 and JBIG2 pictures in PDFs show as grey boxes for now.
   - Text Editor: plain text and code files, keeping their encoding and line endings; wrap,
     find and replace, bigger text, printing.
   - Spreadsheets: opens and saves Excel (.xlsx) and CSV files from Solon

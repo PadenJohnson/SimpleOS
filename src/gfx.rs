@@ -318,7 +318,7 @@ impl Canvas {
         let blur = blur.max(1);
         let (cx2, cy2) = (2 * x + w, 2 * y + h);
         let (x0, y0, x1, y1) = (x - blur, y - blur, x + w + blur, y + h + blur);
-        let mut seg = |c: &mut Canvas, py: i32, xa: i32, xb: i32| {
+        let seg = |c: &mut Canvas, py: i32, xa: i32, xb: i32| {
             for px in xa..xb {
                 let qx = (2 * px + 1 - cx2).abs() - (w - 2 * r);
                 let qy = (2 * py + 1 - cy2).abs() - (h - 2 * r);

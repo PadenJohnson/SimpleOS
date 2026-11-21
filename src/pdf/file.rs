@@ -28,17 +28,7 @@ pub struct Page {
     pub rotate: i32,
 }
 
-impl Page {
-    /// Size as shown (after rotation), in points.
-    pub fn size(&self) -> (f32, f32) {
-        let (w, h) = ((self.crop[2] - self.crop[0]).abs(), (self.crop[3] - self.crop[1]).abs());
-        if self.rotate % 180 != 0 {
-            (h, w)
-        } else {
-            (w, h)
-        }
-    }
-}
+impl Page {}
 
 pub struct PdfFile {
     pub data: Vec<u8>,
@@ -301,14 +291,14 @@ impl PdfFile {
             length = l1.max(l2).max(40);
         }
         let id0 = self.trailer.get("ID").and_then(|o| o.as_array()).and_then(|a| a.first()).and_then(|o| o.as_str()).map(|s| s.to_vec()).unwrap_or_default();
-        let (o, u, oe, ue) = (bytes("O"), bytes("U"), bytes("OE"), bytes("UE"));
+        let (o, u, ue) = (bytes("O"), bytes("U"), bytes("UE"));
         let p = Params {
-            v,
+
             r: int("R", 2),
             length,
             o: &o,
             u: &u,
-            oe: &oe,
+
             ue: &ue,
             p: int("P", -1),
             id0: &id0,
@@ -356,11 +346,9 @@ impl PdfFile {
         }
         let o = lx.obj().unwrap_or(Obj::Null);
         let Obj::Dict(d) = o else { return Some((o, Vec::new())) };
-        let save = lx.p;
         match lx.tok() {
             Some(Tok::Word(b"stream")) => {}
             _ => {
-                lx.p = save;
                 return Some((Obj::Dict(d), Vec::new()));
             }
         }
@@ -554,10 +542,6 @@ impl PdfFile {
         } else {
             Some(s)
         }
-    }
-
-    pub fn object_numbers(&self) -> Vec<u32> {
-        self.xref.keys().copied().collect()
     }
 }
 

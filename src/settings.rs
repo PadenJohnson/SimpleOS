@@ -111,10 +111,6 @@ pub fn weekday(y: u16, m: u8, d: u8) -> usize {
 }
 
 /// "Thursday, Nov 20".
-pub fn date_text(y: u16, m: u8, d: u8) -> String {
-    format!("{}, {} {}", DAYS[weekday(y, m, d)], MONTHS[(m as usize).clamp(1, 12) - 1], d)
-}
-
 pub fn days_in_month(y: u16, m: u8) -> u8 {
     match m {
         2 if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 => 29,

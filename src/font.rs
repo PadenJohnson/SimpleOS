@@ -142,14 +142,6 @@ impl Fonts {
         self.glyph(face, ch, px).adv
     }
 
-    /// Ascent and descent (both positive) and the recommended line height, in px.
-    pub fn line(&mut self, face: Face, px: f32) -> (f32, f32, f32) {
-        let f = self.face(face);
-        let s = px / f.units_per_em() as f32;
-        let (a, d, g) = (f.ascender() as f32 * s, -(f.descender() as f32) * s, f.line_gap() as f32 * s);
-        (a, d, a + d + g)
-    }
-
     pub fn glyph_index(&mut self, face: Face, ch: char) -> u16 {
         self.face(face).glyph_index(ch).map(|g| g.0).unwrap_or(0)
     }
@@ -177,13 +169,6 @@ impl Fonts {
     pub fn vmetrics(&mut self, face: Face) -> (i32, i32, i32, i32) {
         let f = self.face(face);
         (f.units_per_em() as i32, f.ascender() as i32, -(f.descender() as i32), f.line_gap() as i32)
-    }
-
-    /// Keep memory in check: drop cached glyphs when there are too many.
-    pub fn trim(&mut self) {
-        if self.glyphs.len() > 30_000 {
-            self.glyphs.clear();
-        }
     }
 }
 

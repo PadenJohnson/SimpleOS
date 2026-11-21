@@ -1531,7 +1531,18 @@ pub fn decode_image(file: &PdfFile, o: &Obj, res: &Dict) -> Option<Img> {
         return None;
     }
     let mask = matches!(d.get("ImageMask"), Some(Obj::Bool(true)));
-    let (data, left) = super::filter::decode(&d, raw);
+    let (mut data, mut left) = super::filter::decode(&d, raw);
+    if let Some((name, parms)) = &left {
+        if name.as_slice() == b"CCITTFaxDecode" || name.as_slice() == b"CCF" {
+            let p = parms.clone().unwrap_or_default();
+            let int = |k: &str, def: i64| p.get(k).map(|o| file.resolve(o)).and_then(|o| o.as_i64()).unwrap_or(def);
+            let flag = |k: &str| matches!(p.get(k).map(|o| file.resolve(o)), Some(Obj::Bool(true)));
+            let cols = int("Columns", 1728).max(1) as usize;
+            let rows = int("Rows", h as i64).max(0) as usize;
+            data = super::ccitt::decode(&data, int("K", 0), cols, rows.max(h), flag("BlackIs1"), flag("EncodedByteAlign"));
+            left = None;
+        }
+    }
     let decode: Vec<f32> = d.get("Decode").and_then(|x| x.as_array()).map(|a| a.iter().map(|x| x.as_f32().unwrap_or(0.0)).collect()).unwrap_or_default();
     let mut px = vec![0xFF80_8080u32; w * h];
     match left.as_ref().map(|(n, _)| n.as_slice()) {

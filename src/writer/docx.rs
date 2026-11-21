@@ -7,7 +7,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::doc::{Align, Block, Doc, List, PStyle, Para, Style, PAGE_BREAK};
+use super::doc::{Align, Block, Doc, DocImage, List, PStyle, Para, Style, PAGE_BREAK, PICTURE};
 use crate::doc::xml::{attr, escape, local, Ev, Reader};
 use crate::doc::zip;
 use crate::gfx::rgb;
@@ -369,13 +369,36 @@ pub fn read(b: &[u8]) -> Result<(Doc, Option<String>), String> {
     // State.
     let mut para: Option<(Para, PP, SDef)> = None;
     let mut ppr: Option<PP> = None;
-    let mut pstyle_id: Option<String> = None;
     let mut run: Option<RP> = None;
     let mut in_rpr = false;
     let mut in_text = false;
     let mut skip = 0usize; // inside pictures, text boxes, deleted text, etc.
+    // A picture being read: size in EMUs and the relationship id of its image.
+    let mut pic: Option<(i64, i64, Option<String>)> = None;
+    // Relationship id -> file in the zip.
+    let mut rels: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(rb) = get("word/_rels/document.xml.rels") {
+        let mut rr = Reader::new(rb);
+        while let Some(ev) = rr.next() {
+            if let Ev::Start { name, attrs, .. } = ev {
+                if local(name) == "Relationship" {
+                    if let (Some(id), Some(t)) = (attr(&attrs, "Id"), attr(&attrs, "Target")) {
+                        let path = if let Some(abs) = t.strip_prefix('/') { String::from(abs) } else { format!("word/{}", t) };
+                        rels.insert(String::from(id), path);
+                    }
+                }
+            }
+        }
+    }
     let mut pictures = 0;
-    let mut tables = false;
+    // Tables: nesting depth, which table, column widths (points), the row being gathered.
+    let mut tbl_depth = 0u32;
+    let mut table_id = 0u32;
+    let mut grid: Vec<i32> = Vec::new();
+    let mut row_para: Option<Para> = None;
+    let mut row_widths: Vec<i32> = Vec::new();
+    let mut cell_w: Option<i32> = None;
+    let mut cell_paras = 0usize;
     let mut rstyle: Option<String> = None;
 
     let para_style = |pp_id: &Option<String>| -> SDef {
@@ -409,7 +432,7 @@ pub fn read(b: &[u8]) -> Result<(Doc, Option<String>), String> {
             for (ch, st) in para.text.iter().zip(&para.st) {
                 if *ch == PAGE_BREAK {
                     doc.paras.push(core::mem::replace(&mut cur, Para::new(ps, para.end)));
-                    doc.paras.push(Para { text: alloc::vec![PAGE_BREAK], st: alloc::vec![*st], p: PStyle::NORMAL, end: *st });
+                    doc.paras.push(Para { text: alloc::vec![PAGE_BREAK], st: alloc::vec![*st], p: PStyle::NORMAL, end: *st, row: None });
                 } else {
                     cur.text.push(*ch);
                     cur.st.push(*st);
@@ -426,6 +449,16 @@ pub fn read(b: &[u8]) -> Result<(Doc, Option<String>), String> {
             Ev::Start { name, attrs, empty } => {
                 let n = local(name);
                 if skip > 0 {
+                    // Inside a picture: note its size and which image file it shows.
+                    if let Some(p) = &mut pic {
+                        if n == "extent" && p.0 == 0 {
+                            p.0 = attr(&attrs, "cx").and_then(|v| v.parse().ok()).unwrap_or(0);
+                            p.1 = attr(&attrs, "cy").and_then(|v| v.parse().ok()).unwrap_or(0);
+                        }
+                        if n == "blip" && p.2.is_none() {
+                            p.2 = attr(&attrs, "embed").map(String::from);
+                        }
+                    }
                     if !empty {
                         skip += 1;
                     }
@@ -433,7 +466,9 @@ pub fn read(b: &[u8]) -> Result<(Doc, Option<String>), String> {
                 }
                 match n {
                     "drawing" | "pict" | "object" | "AlternateContent" | "del" | "moveFrom" | "instrText" | "footnoteReference" | "commentReference" => {
-                        if matches!(n, "drawing" | "pict" | "AlternateContent" | "object") {
+                        if n == "drawing" && !empty {
+                            pic = Some((0, 0, None));
+                        } else if matches!(n, "pict" | "AlternateContent" | "object") {
                             pictures += 1;
                         }
                         if !empty {
@@ -443,14 +478,13 @@ pub fn read(b: &[u8]) -> Result<(Doc, Option<String>), String> {
                     "p" => {
                         finish(&mut doc, para.take(), &base_pp, &numbering);
                         para = Some((Para::new(PStyle::NORMAL, base), PP::default(), normal.clone()));
-                        pstyle_id = None;
                         if empty {
                             finish(&mut doc, para.take(), &base_pp, &numbering);
                         }
                     }
                     "pPr" if !empty && run.is_none() => ppr = Some(PP::default()),
                     "pStyle" if ppr.is_some() => {
-                        pstyle_id = attr(&attrs, "val").map(String::from);
+                        let pstyle_id = attr(&attrs, "val").map(String::from);
                         if let Some((p, _, sdef)) = &mut para {
                             *sdef = para_style(&pstyle_id);
                             let mut st = base;
@@ -482,7 +516,29 @@ pub fn read(b: &[u8]) -> Result<(Doc, Option<String>), String> {
                         push_char(&mut para, ch, &run, &rstyle, &styles, base);
                     }
                     "lastRenderedPageBreak" => {}
-                    "tbl" => tables = true,
+                    "tbl" => {
+                        tbl_depth += 1;
+                        if tbl_depth == 1 {
+                            table_id += 1;
+                            grid.clear();
+                        }
+                    }
+                    "gridCol" if tbl_depth == 1 => grid.push(attr(&attrs, "w").and_then(|v| v.parse::<i32>().ok()).unwrap_or(0) / 20),
+                    "tr" if tbl_depth == 1 => {
+                        let mut rp = Para::new(PStyle::NORMAL, base);
+                        rp.end = base;
+                        row_para = Some(rp);
+                        row_widths.clear();
+                    }
+                    "tc" if tbl_depth == 1 => {
+                        cell_paras = 0;
+                        cell_w = None;
+                    }
+                    "tcW" if tbl_depth == 1 => {
+                        if attr(&attrs, "type").is_none_or(|t| t == "dxa") {
+                            cell_w = attr(&attrs, "w").and_then(|v| v.parse::<i32>().ok()).map(|w| w / 20).filter(|&w| w > 0);
+                        }
+                    }
                     "pgSz" => {
                         if let (Some(w), Some(h)) = (attr(&attrs, "w").and_then(|v| v.parse::<i32>().ok()), attr(&attrs, "h").and_then(|v| v.parse::<i32>().ok())) {
                             doc.page_w = (w / 20).clamp(144, 2000);
@@ -511,10 +567,65 @@ pub fn read(b: &[u8]) -> Result<(Doc, Option<String>), String> {
                 let n = local(name);
                 if skip > 0 {
                     skip -= 1;
+                    if skip == 0 {
+                        if let Some((cx, cy, rid)) = pic.take() {
+                            let data = rid.as_deref().and_then(|r| rels.get(r)).and_then(|t| get(t));
+                            match data {
+                                Some(bytes) if cx > 0 && cy > 0 => {
+                                    let target = rels.get(rid.as_deref().unwrap_or("")).cloned().unwrap_or_default();
+                                    let ext = target.rsplit('.').next().unwrap_or("png").to_ascii_lowercase();
+                                    doc.images.push(DocImage { data: bytes.to_vec(), ext, w: ((cx / 12700) as i32).max(4), h: ((cy / 12700) as i32).max(4) });
+                                    push_char(&mut para, PICTURE, &run, &rstyle, &styles, base);
+                                    if let Some((p, _, _)) = &mut para {
+                                        if let Some(st) = p.st.last_mut() {
+                                            st.img = doc.images.len() as u16;
+                                        }
+                                    }
+                                }
+                                _ => pictures += 1,
+                            }
+                        }
+                    }
                     continue;
                 }
                 match n {
-                    "p" => finish(&mut doc, para.take(), &base_pp, &numbering),
+                    "p" => {
+                        // A paragraph in a table cell joins the row (a new line in the cell).
+                        if let Some(rp) = row_para.as_mut() {
+                            if let Some((cp, _, _)) = para.take() {
+                                if cell_paras > 0 {
+                                    rp.text.push('\n');
+                                    rp.st.push(rp.end);
+                                }
+                                // Tabs inside a cell would split it: make them spaces.
+                                rp.text.extend(cp.text.iter().map(|&c| if c == '\t' { ' ' } else { c }));
+                                rp.st.extend(cp.st);
+                                cell_paras += 1;
+                            }
+                        } else {
+                            finish(&mut doc, para.take(), &base_pp, &numbering);
+                        }
+                    }
+                    "tc" if tbl_depth == 1 => {
+                        if let Some(rp) = row_para.as_mut() {
+                            rp.text.push('\t');
+                            rp.st.push(rp.end);
+                            let w = cell_w.take().or_else(|| grid.get(row_widths.len()).copied()).unwrap_or(0);
+                            row_widths.push(w);
+                        }
+                    }
+                    "tr" if tbl_depth == 1 => {
+                        if let Some(mut rp) = row_para.take() {
+                            if rp.text.last() == Some(&'\t') {
+                                rp.text.pop();
+                                rp.st.pop();
+                            }
+                            rp.row = Some(super::doc::Row { table: table_id, widths: core::mem::take(&mut row_widths) });
+                            rp.p.after = 0;
+                            doc.paras.push(rp);
+                        }
+                    }
+                    "tbl" => tbl_depth = tbl_depth.saturating_sub(1),
                     "pPr" => {
                         if let (Some(pp), Some((_, ppp, _))) = (ppr.take(), &mut para) {
                             *ppp = pp;
@@ -539,12 +650,18 @@ pub fn read(b: &[u8]) -> Result<(Doc, Option<String>), String> {
     if doc.paras.is_empty() {
         doc.paras.push(Para::new(PStyle::NORMAL, base));
     }
+    // Pictures wider or taller than the page area are shrunk to fit.
+    let (cw, ch) = (doc.page_w - doc.margin[0] - doc.margin[2], doc.page_h - doc.margin[1] - doc.margin[3]);
+    for im in doc.images.iter_mut() {
+        if im.w > cw || im.h > ch {
+            let (w0, h0) = (im.w, im.h);
+            im.w = (w0 * cw / w0.max(1)).min(w0 * ch / h0.max(1)).max(4);
+            im.h = (h0 * im.w / w0.max(1)).max(4);
+        }
+    }
     let mut notes = Vec::new();
     if pictures > 0 {
-        notes.push(format!("{} picture{} not shown", pictures, if pictures == 1 { "" } else { "s" }));
-    }
-    if tables {
-        notes.push(String::from("tables shown as plain lines"));
+        notes.push(format!("{} drawing{} or text box{} not shown", pictures, if pictures == 1 { "" } else { "s" }, if pictures == 1 { "" } else { "es" }));
     }
     let note = if notes.is_empty() { None } else { Some(format!("Note: {} (saving here leaves them out)", notes.join(", "))) };
     Ok((doc, note))
@@ -614,16 +731,58 @@ fn style_xml(id: &str, name: &str, b: Block) -> String {
 
 pub fn write(doc: &Doc) -> Vec<u8> {
     let mut body = String::from(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><w:body>",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\"><w:body>",
     );
     // Each run of numbered paragraphs gets its own numbering (so it starts at 1).
     let mut next_num = 3u32;
+    let mut used_images: alloc::collections::BTreeSet<usize> = alloc::collections::BTreeSet::new();
+    let mut pic_id = 0u32;
     let mut num_runs: Vec<u32> = Vec::new();
     let mut in_numbers = false;
-    for p in &doc.paras {
+    for (pk, p) in doc.paras.iter().enumerate() {
         if p.is_page_break() {
             body += "<w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>";
             in_numbers = false;
+            continue;
+        }
+        if let Some(row) = &p.row {
+            in_numbers = false;
+            let same = |q: Option<&Para>| q.and_then(|q| q.row.as_ref()).map(|r| r.table) == Some(row.table);
+            let prev_same = pk > 0 && same(doc.paras.get(pk - 1));
+            let next_same = same(doc.paras.get(pk + 1));
+            // Cells: split at the tabs.
+            let mut cells = Vec::new();
+            let mut s = 0;
+            for (i, &ch) in p.text.iter().enumerate() {
+                if ch == '\t' {
+                    cells.push((s, i));
+                    s = i + 1;
+                }
+            }
+            cells.push((s, p.text.len()));
+            let cw = doc.page_w - doc.margin[0] - doc.margin[2];
+            let widths: Vec<i32> = (0..cells.len()).map(|k| row.widths.get(k).copied().filter(|&w| w > 0).unwrap_or(cw / cells.len() as i32)).collect();
+            if !prev_same {
+                body += "<w:tbl><w:tblPr><w:tblW w:w=\"0\" w:type=\"auto\"/><w:tblBorders>";
+                for side in ["top", "left", "bottom", "right", "insideH", "insideV"] {
+                    body += &format!("<w:{} w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"808080\"/>", side);
+                }
+                body += "</w:tblBorders><w:tblLayout w:type=\"fixed\"/></w:tblPr><w:tblGrid>";
+                for w in &widths {
+                    body += &format!("<w:gridCol w:w=\"{}\"/>", w * 20);
+                }
+                body += "</w:tblGrid>";
+            }
+            body += "<w:tr>";
+            for (k, &(s, e)) in cells.iter().enumerate() {
+                body += &format!("<w:tc><w:tcPr><w:tcW w:w=\"{}\" w:type=\"dxa\"/></w:tcPr><w:p><w:pPr><w:spacing w:after=\"0\"/></w:pPr>", widths[k] * 20);
+                write_runs(doc, &p.text[s..e], &p.st[s..e], &mut body, &mut used_images, &mut pic_id);
+                body += "</w:p></w:tc>";
+            }
+            body += "</w:tr>";
+            if !next_same {
+                body += "</w:tbl>";
+            }
             continue;
         }
         body += "<w:p><w:pPr>";
@@ -666,43 +825,7 @@ pub fn write(doc: &Doc) -> Vec<u8> {
         }
         body += &rpr(&p.end).replace("w:rPr", "w:rPr");
         body += "</w:pPr>";
-        let mut i = 0;
-        while i < p.text.len() {
-            let st = p.st[i];
-            let mut j = i;
-            while j < p.text.len() && p.st[j] == st {
-                j += 1;
-            }
-            body += "<w:r>";
-            body += &rpr(&st);
-            let mut chunk = String::new();
-            let flush = |chunk: &mut String, body: &mut String| {
-                if !chunk.is_empty() {
-                    *body += &format!("<w:t xml:space=\"preserve\">{}</w:t>", escape(chunk));
-                    chunk.clear();
-                }
-            };
-            for &ch in &p.text[i..j] {
-                match ch {
-                    '\t' => {
-                        flush(&mut chunk, &mut body);
-                        body += "<w:tab/>";
-                    }
-                    '\n' => {
-                        flush(&mut chunk, &mut body);
-                        body += "<w:br/>";
-                    }
-                    PAGE_BREAK => {
-                        flush(&mut chunk, &mut body);
-                        body += "<w:br w:type=\"page\"/>";
-                    }
-                    c => chunk.push(c),
-                }
-            }
-            flush(&mut chunk, &mut body);
-            body += "</w:r>";
-            i = j;
-        }
+        write_runs(doc, &p.text, &p.st, &mut body, &mut used_images, &mut pic_id);
         body += "</w:p>";
     }
     body += &format!(
@@ -743,13 +866,101 @@ pub fn write(doc: &Doc) -> Vec<u8> {
 
     let types = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/><Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/><Override PartName=\"/word/numbering.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml\"/></Types>";
     let rels = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>";
-    let doc_rels = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/><Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering\" Target=\"numbering.xml\"/></Relationships>";
-    zip::write(&[
+    // Pictures: their files, how to find them, and their kinds.
+    let mut img_rels = String::new();
+    let mut media: Vec<(String, &[u8])> = Vec::new();
+    let mut exts: alloc::collections::BTreeSet<String> = alloc::collections::BTreeSet::new();
+    for &k in &used_images {
+        let im = &doc.images[k - 1];
+        let name = format!("media/image{}.{}", k, im.ext);
+        img_rels += &format!("<Relationship Id=\"rIdImg{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"{}\"/>", k, name);
+        media.push((format!("word/{}", name), &im.data));
+        exts.insert(im.ext.clone());
+    }
+    let mut type_defaults = String::new();
+    for e in &exts {
+        let mime = match e.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "bmp" => "image/bmp",
+            "tif" | "tiff" => "image/tiff",
+            "emf" => "image/x-emf",
+            "wmf" => "image/x-wmf",
+            "svg" => "image/svg+xml",
+            _ => "application/octet-stream",
+        };
+        type_defaults += &format!("<Default Extension=\"{}\" ContentType=\"{}\"/>", e, mime);
+    }
+    let types = types.replacen("<Default Extension=\"xml\"", &format!("{}<Default Extension=\"xml\"", type_defaults), 1);
+    let doc_rels = format!("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/><Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering\" Target=\"numbering.xml\"/>{}</Relationships>", img_rels);
+    let mut files: Vec<(&str, &[u8])> = Vec::from([
         ("[Content_Types].xml", types.as_bytes()),
         ("_rels/.rels", rels.as_bytes()),
         ("word/document.xml", body.as_bytes()),
         ("word/styles.xml", styles.as_bytes()),
         ("word/numbering.xml", numbering.as_bytes()),
         ("word/_rels/document.xml.rels", doc_rels.as_bytes()),
-    ])
+    ]);
+    for (n, d) in &media {
+        files.push((n.as_str(), d));
+    }
+    zip::write(&files)
+}
+
+/// The runs (text, tabs, breaks, pictures) of one paragraph or table cell.
+fn write_runs(doc: &Doc, text: &[char], sts: &[Style], body: &mut String, used_images: &mut alloc::collections::BTreeSet<usize>, pic_id: &mut u32) {
+        let mut i = 0;
+        while i < text.len() {
+            let st = sts[i];
+            let mut j = i;
+            while j < text.len() && sts[j] == st {
+                j += 1;
+            }
+            if st.img != 0 {
+                if let Some(im) = doc.image_of(&st) {
+                    let k = st.img as usize;
+                    used_images.insert(k);
+                    let (cx, cy) = (im.w as i64 * 12700, im.h as i64 * 12700);
+                    for _ in i..j {
+                        *pic_id += 1;
+                        *body += &format!(
+                            "<w:r><w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\"><wp:extent cx=\"{cx}\" cy=\"{cy}\"/><wp:docPr id=\"{pic_id}\" name=\"Picture {pic_id}\"/><a:graphic xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\"><pic:pic xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\"><pic:nvPicPr><pic:cNvPr id=\"{pic_id}\" name=\"image{k}.{ext}\"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed=\"rIdImg{k}\"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>",
+                            ext = im.ext
+                        );
+                    }
+                }
+                i = j;
+                continue;
+            }
+            *body += "<w:r>";
+            *body += &rpr(&st);
+            let mut chunk = String::new();
+            let flush = |chunk: &mut String, body: &mut String| {
+                if !chunk.is_empty() {
+                    *body += &format!("<w:t xml:space=\"preserve\">{}</w:t>", escape(chunk));
+                    chunk.clear();
+                }
+            };
+            for &ch in &text[i..j] {
+                match ch {
+                    '\t' => {
+                        flush(&mut chunk, body);
+                        *body += "<w:tab/>";
+                    }
+                    '\n' => {
+                        flush(&mut chunk, body);
+                        *body += "<w:br/>";
+                    }
+                    PAGE_BREAK => {
+                        flush(&mut chunk, body);
+                        *body += "<w:br w:type=\"page\"/>";
+                    }
+                    c => chunk.push(c),
+                }
+            }
+            flush(&mut chunk, body);
+            *body += "</w:r>";
+            i = j;
+        }
 }
