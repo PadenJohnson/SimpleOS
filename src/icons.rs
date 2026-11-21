@@ -25,6 +25,8 @@ pub fn tile_color(app: App) -> u32 {
         App::Writer => rgb(43, 87, 184),
         App::Pdf => rgb(214, 48, 49),
         App::TextEdit => rgb(90, 100, 116),
+        App::Calculator => rgb(255, 149, 0),
+        App::Calendar => rgb(240, 242, 246),
     }
 }
 
@@ -133,6 +135,26 @@ pub fn draw(c: &mut Canvas, app: App, x: i32, y: i32) {
                 c.circle(x + 20 + k * 8, y + 12, 3, rgb(200, 205, 214));
                 c.fill_rect(x + 20, y + 24 + k * 7, if k == 3 { 14 } else { 24 }, 2, bg);
             }
+        }
+        App::Calculator => {
+            // A calculator: screen and a grid of keys.
+            c.round_rect(x + 16, y + 10, 32, 44, 5, rgb(255, 255, 255));
+            c.round_rect(x + 20, y + 14, 24, 9, 2, rgb(60, 60, 66));
+            for row in 0..3 {
+                for col in 0..3 {
+                    let k = if col == 2 { rgb(255, 149, 0) } else { rgb(200, 204, 212) };
+                    c.round_rect(x + 20 + col * 9, y + 27 + row * 8, 6, 6, 1, k);
+                }
+            }
+        }
+        App::Calendar => {
+            // A calendar page: red band with rings, a big day number.
+            c.round_rect(x + 10, y + 12, 44, 42, 6, rgb(255, 255, 255));
+            c.round_rect(x + 10, y + 12, 44, 14, 6, rgb(214, 64, 64));
+            c.fill_rect(x + 10, y + 20, 44, 6, rgb(214, 64, 64));
+            c.round_rect(x + 20, y + 8, 4, 9, 2, rgb(90, 96, 106));
+            c.round_rect(x + 40, y + 8, 4, 9, 2, rgb(90, 96, 106));
+            c.text_face((x + 22) * 64, y + 49, "31", crate::font::Face::SansBold, 20, rgb(40, 44, 52));
         }
         App::Pinball => {
             // A ball, a flipper and a star.

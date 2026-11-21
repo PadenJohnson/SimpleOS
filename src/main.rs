@@ -6,6 +6,8 @@ extern crate alloc;
 
 #[macro_use]
 mod serial; // must come first so kprintln! is visible to later modules
+mod calculator;
+mod calendar;
 mod crash;
 mod cursor;
 mod ahci;
@@ -47,6 +49,8 @@ mod phone;
 mod photos;
 mod power;
 mod print;
+mod printers;
+mod printlang;
 mod printui;
 mod ps2;
 mod rtc;

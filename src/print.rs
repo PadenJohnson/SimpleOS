@@ -86,21 +86,59 @@ pub struct PrinterInfo {
     pub id: PrinterId,
     pub name: String,
     pub ipp: bool,
+    pub lang: Lang,
     pub color: bool,
     pub papers: Vec<Paper>,
     pub dpi: u32,
 }
 
-/// Test printer kinds (boot option "testprinter=ipp|pcl|pclmono").
+/// Test printer kinds (boot option "testprinter=ipp|urf|pcl|pclmono|pclxl|ps").
 pub fn test_printer(kind: &str) -> Option<PrinterInfo> {
-    let (ipp, color, name) = match kind {
-        "ipp" => (true, true, "Test printer (IPP)"),
-        "pcl" => (false, true, "Test printer (PCL color)"),
-        "pclmono" => (false, false, "Test printer (PCL)"),
+    let (lang, color, name) = match kind {
+        "ipp" => (Lang::Pwg, true, "Test printer (IPP)"),
+        "urf" => (Lang::Urf, true, "Test printer (AirPrint raster)"),
+        "pcl" => (Lang::Pcl, true, "Test printer (PCL color)"),
+        "pclmono" => (Lang::Pcl, false, "Test printer (PCL)"),
+        "pclxl" => (Lang::PclXl, true, "Test printer (PCL 6)"),
+        "ps" => (Lang::PostScript, true, "Test printer (PostScript)"),
         _ => return None,
     };
-    let papers = Paper::ALL.iter().copied().filter(|p| ipp || p.pcl_ok()).collect();
-    Some(PrinterInfo { id: PrinterId::Test, name: String::from(name), ipp, color, papers, dpi: 100 })
+    let papers = Paper::ALL.iter().copied().filter(|p| lang.any_paper() || p.pcl_ok()).collect();
+    Some(PrinterInfo { id: PrinterId::Test, name: String::from(name), ipp: lang.ipp(), lang, color, papers, dpi: 100 })
+}
+
+/// The language Solon talks to a printer in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Lang {
+    /// IPP over USB with PWG raster ("driverless": IPP Everywhere, Mopria).
+    Pwg,
+    /// IPP over USB with Apple raster (AirPrint).
+    Urf,
+    /// PCL 3/5 raster (HP and compatibles).
+    Pcl,
+    /// PCL XL / PCL 6.
+    PclXl,
+    PostScript,
+}
+
+impl Lang {
+    pub fn ipp(self) -> bool {
+        matches!(self, Lang::Pwg | Lang::Urf)
+    }
+    /// Paper sizes beyond Letter and A4 (only the driverless kinds take any size by name).
+    pub fn any_paper(self) -> bool {
+        matches!(self, Lang::Pwg | Lang::Urf | Lang::PostScript)
+    }
+    /// In plain words, for the Printers app.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Lang::Pwg => "Driverless printing (IPP over USB)",
+            Lang::Urf => "AirPrint printing (IPP over USB)",
+            Lang::Pcl => "PCL (HP's printer language)",
+            Lang::PclXl => "PCL 6",
+            Lang::PostScript => "PostScript",
+        }
+    }
 }
 
 pub const DPI: u32 = 300;
@@ -508,7 +546,7 @@ fn ipp_header(op: u16, id: u32) -> Vec<u8> {
 /// Get-Printer-Attributes request (asks for what we need to know).
 pub fn ipp_get_attributes() -> Vec<u8> {
     let mut v = ipp_header(0x000B, 1);
-    for (i, name) in ["printer-make-and-model", "document-format-supported", "media-supported", "print-color-mode-supported", "pwg-raster-document-resolution-supported", "printer-state", "printer-state-reasons"]
+    for (i, name) in ["printer-make-and-model", "document-format-supported", "media-supported", "print-color-mode-supported", "pwg-raster-document-resolution-supported", "printer-state", "printer-state-reasons", "urf-supported"]
         .iter()
         .enumerate()
     {
@@ -520,11 +558,11 @@ pub fn ipp_get_attributes() -> Vec<u8> {
 }
 
 /// Print-Job request carrying a PWG Raster document.
-pub fn ipp_print_job(layout: &Layout, document: &[u8]) -> Vec<u8> {
+pub fn ipp_print_job(layout: &Layout, document: &[u8], format: &str) -> Vec<u8> {
     let mut v = ipp_header(0x0002, 2);
     attr(&mut v, TAG_NAME, "requesting-user-name", b"solon");
     attr(&mut v, TAG_NAME, "job-name", b"Solon photos");
-    attr(&mut v, TAG_MIME, "document-format", b"image/pwg-raster");
+    attr(&mut v, TAG_MIME, "document-format", format.as_bytes());
     v.push(TAG_JOB);
     attr(&mut v, TAG_INTEGER, "copies", &layout.copies.clamp(1, 99).to_be_bytes());
     attr(&mut v, TAG_KEYWORD, "media", layout.paper.pwg().as_bytes());
@@ -552,6 +590,8 @@ pub struct IppInfo {
     pub status: u16,
     pub model: String,
     pub formats: Vec<String>,
+    /// AirPrint raster abilities ("RS300", "SRGB24", ...).
+    pub urf: Vec<String>,
     pub media: Vec<String>,
     pub color_modes: Vec<String>,
     pub resolutions: Vec<u32>,
@@ -594,6 +634,7 @@ pub fn ipp_parse(b: &[u8]) -> Option<IppInfo> {
         match last.as_str() {
             "printer-make-and-model" => info.model = text(),
             "document-format-supported" => info.formats.push(text()),
+            "urf-supported" => info.urf.push(text()),
             "media-supported" => info.media.push(text()),
             "print-color-mode-supported" => info.color_modes.push(text()),
             "pwg-raster-document-resolution-supported" if vl == 9 => {

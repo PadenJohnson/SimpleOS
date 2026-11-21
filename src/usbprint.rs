@@ -24,6 +24,12 @@ pub struct UsbPrinter {
     /// Languages from the IEEE 1284 device ID ("CMD:"), upper-case.
     pub langs: Vec<String>,
     pub info: Option<IppInfo>,
+    /// Maker and model from the device ID.
+    pub make: String,
+    pub model: String,
+    /// The language Solon will use, or why it can't print.
+    pub lang: Option<print::Lang>,
+    pub problem: Option<&'static str>,
     buf: Dma,
 }
 
@@ -54,6 +60,7 @@ impl UsbPrinter {
             idstr = b[2..len].iter().map(|&c| if (0x20..0x7F).contains(&c) { c as char } else { ' ' }).collect();
         }
         let (mfg, mdl, langs) = parse_device_id(&idstr);
+        let model_name = mdl.clone();
         let name = if mdl.is_empty() {
             String::from(if product.is_empty() { "USB printer" } else { product })
         } else if mdl.to_ascii_lowercase().starts_with(&mfg.to_ascii_lowercase()) || mfg.is_empty() {
@@ -71,6 +78,10 @@ impl UsbPrinter {
             name,
             langs,
             info: None,
+            make: mfg.clone(),
+            model: String::new(),
+            lang: None,
+            problem: None,
             buf: Dma::new(64 * 1024, 64 * 1024),
         };
         if p.ipp {
@@ -87,8 +98,12 @@ impl UsbPrinter {
                             info.color_modes,
                             info.resolutions
                         );
-                        if !info.formats.iter().any(|f| f == "image/pwg-raster") {
-                            kprintln!("usb:   printer doesn't accept PWG Raster; falling back to raw");
+                        if info.formats.iter().any(|f| f == "image/pwg-raster") {
+                            p.lang = Some(print::Lang::Pwg);
+                        } else if info.formats.iter().any(|f| f == "image/urf") {
+                            p.lang = Some(print::Lang::Urf);
+                        } else {
+                            kprintln!("usb:   printer takes neither PWG nor Apple raster; trying raw");
                             p.ipp = false;
                         }
                         p.info = Some(info);
@@ -100,27 +115,39 @@ impl UsbPrinter {
                 }
             }
         }
+        p.model = model_name;
+        if p.lang.is_none() {
+            p.ipp = false;
+            p.lang = raw_language(&p.langs);
+        }
+        if p.lang.is_none() {
+            p.problem = Some(why_not(&p.make, &p.langs));
+        }
         p
-    }
-
-    pub fn speaks_pcl(&self) -> bool {
-        self.langs.iter().any(|l| l.starts_with("PCL"))
     }
 
     /// Can we print to it at all?
     pub fn usable(&self) -> bool {
-        self.ipp || self.speaks_pcl()
+        self.lang.is_some()
     }
 
     pub fn color(&self) -> bool {
         match &self.info {
             Some(i) if self.ipp => i.color_modes.iter().any(|m| m == "color"),
-            _ => self.name.to_ascii_lowercase().contains("color") || self.langs.iter().any(|l| l == "PCL5C"),
+            _ => {
+                let n = self.name.to_ascii_lowercase();
+                n.contains("color") || n.contains("colour") || self.langs.iter().any(|l| l == "PCL5C" || l == "PCL3GUI" || l == "PCL3")
+            }
         }
     }
 
     pub fn dpi(&self) -> u32 {
         match &self.info {
+            Some(i) if self.lang == Some(print::Lang::Urf) => {
+                // "RS300" or "RS300-600": the resolutions it takes.
+                let rs = i.urf.iter().find_map(|u| u.strip_prefix("RS")).and_then(|r| r.split('-').next()?.parse::<u32>().ok());
+                rs.unwrap_or(300).clamp(150, 600)
+            }
             Some(i) if self.ipp && !i.resolutions.is_empty() => {
                 if i.resolutions.contains(&300) {
                     300
@@ -138,7 +165,7 @@ impl UsbPrinter {
             .copied()
             .filter(|p| match &self.info {
                 Some(i) if self.ipp => i.media.is_empty() || i.media.iter().any(|m| m == p.pwg()),
-                _ => p.pcl_ok(),
+                _ => self.lang == Some(print::Lang::PostScript) || p.pcl_ok(),
             })
             .collect()
     }
@@ -180,5 +207,44 @@ impl UsbPrinter {
                 return Err("the printer didn't answer");
             }
         }
+    }
+}
+
+/// The language to use for a printer that isn't driverless, from what its device ID lists.
+fn raw_language(langs: &[String]) -> Option<print::Lang> {
+    let has = |f: &dyn Fn(&str) -> bool| langs.iter().any(|l| f(l));
+    if has(&|l| (l.starts_with("PCL") && !l.starts_with("PCLXL") && !l.starts_with("PCL6") && l != "PCLM") || l == "HPGL2") {
+        Some(print::Lang::Pcl)
+    } else if has(&|l| l.starts_with("PCLXL") || l.starts_with("PCL6") || l == "PXL") {
+        Some(print::Lang::PclXl)
+    } else if has(&|l| l.contains("POSTSCRIPT") || l == "PS" || l == "PS2" || l == "PS3" || l.contains("BR-SCRIPT") || l.contains("BRSCRIPT") || l == "KPDL") {
+        Some(print::Lang::PostScript)
+    } else {
+        None
+    }
+}
+
+/// Why a printer can't be used, in words people understand.
+fn why_not(make: &str, langs: &[String]) -> &'static str {
+    let m = make.to_ascii_lowercase();
+    let has = |k: &str| langs.iter().any(|l| l.contains(k));
+    if has("ZJS") || has("ZJSTREAM") || has("ZJ") {
+        "This HP printer is a \"host-based\" model: it only works with HP's own software, which isn't available for Solon."
+    } else if has("CAPT") || has("UFR") || has("LIPS") {
+        "This Canon printer only speaks Canon's own language (CAPT/UFR), which Solon can't use."
+    } else if has("SPL") || has("QPDL") || has("GDI") || has("SPLC") {
+        "This printer uses Samsung/Xerox's own \"GDI\" language, which Solon can't use."
+    } else if m.contains("epson") || has("ESCPR") || has("ESCPL2") {
+        "This Epson printer only speaks Epson's own language over USB. Epson models with AirPrint or Mopria (most from 2016 on) work."
+    } else if m.contains("canon") || has("BJRASTER") || has("BJL") || has("IVEC") {
+        "This Canon printer only speaks Canon's own language over USB. Canon models with AirPrint or Mopria work."
+    } else if m.contains("brother") {
+        "This Brother printer only speaks Brother's own language over USB. Brother models with PCL, BR-Script or AirPrint work."
+    } else if m.contains("lexmark") {
+        "This Lexmark printer only speaks Lexmark's own language. Lexmark lasers (PCL or PostScript) work."
+    } else if m.contains("dymo") || m.contains("zebra") {
+        "Label printers aren't supported yet."
+    } else {
+        "This printer didn't say it speaks any language Solon knows (driverless/AirPrint, PCL, PCL 6 or PostScript)."
     }
 }

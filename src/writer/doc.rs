@@ -437,7 +437,7 @@ pub fn layout(doc: &Doc) -> Layout {
         let breaks = break_lines(p, &adv, 0, n, width, false);
         let marker = match p.p.list {
             List::None => None,
-            List::Bullet => Some(alloc::string::String::from(if p.p.indent % 2 == 1 { "\u{25E6}" } else { "\u{2022}" })),
+            List::Bullet => Some(alloc::string::String::from(if p.p.indent % 2 == 1 { "\u{2013}" } else { "\u{2022}" })),
             List::Number => Some(alloc::format!("{}.", number)),
         };
         let nb = breaks.len();

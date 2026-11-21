@@ -9,7 +9,7 @@ nothing to download.
 
 **Working now**
 - Desktop with Photos, Videos, Video Editor, Documents (Writer, Spreadsheets, PDF, Text Editor),
-  Printers, Import, Files, Disks, Settings and Games
+  Calendar, Calculator, Printers, Import, Files, Disks, Settings and Games
 - Desktop: light wallpapers with a big clock, a floating dock (Applications button, pinned
   apps and folders, open apps, clock, power) and a centred Applications launcher; several
   apps open at once in rounded windows that move, minimize and maximize. Smooth Noto Sans
@@ -94,10 +94,20 @@ nothing to download.
 - Boots from a USB stick on UEFI and older BIOS PCs; on-screen diagnostics (F12) and a crash
   screen for reporting problems
 
-- Printing to USB printers: IPP over USB with PWG Raster (most printers since about 2015)
-  and PCL (older HP printers). Letter, A4, 4x6 and 5x7; fit or fill; 1, 4 or 9 photos per
-  page; colour or black & white; copies. Checked with a test printer and GhostPCL; not yet
-  tried on a real printer.
+- Printing to USB printers in five languages, chosen per printer: driverless IPP over USB
+  with PWG raster or AirPrint (URF) raster (most printers since about 2015, every brand),
+  PCL (HP and compatibles), PCL 6 and PostScript (Brother, Kyocera, Lexmark, Ricoh, Xerox,
+  Samsung, Konica Minolta, Canon imageCLASS lasers). Letter, A4, 4x6 and 5x7; fit or fill;
+  1, 4 or 9 photos per page; colour or black & white; copies. The Printers app shows each
+  printer, how Solon talks to it and its status, prints a test page, and explains printers
+  that only speak a closed format (HP host-based, Canon CAPT, Samsung GDI, older Epson and
+  Canon inkjets). Checked with test printers and decoders (tools/printtest); not yet tried
+  on a real printer.
+- Calendar: month view with today marked, US holidays, and events (times, every
+  week/month/year for birthdays) kept in Solon storage; today's appear under the desktop
+  clock, and clicking the dock clock opens the Calendar.
+- Calculator: big buttons, x and / before + and -, percent, square root, squares, 1/x,
+  a history of sums, and the keyboard.
 
 **Planned:** HEVC (iPhone "High Efficiency") videos; faster decoding of 1080p and 4K video.
 
@@ -129,7 +139,7 @@ QEMU for Windows.
 
 `test.ps1` options include `-Usb` (keyboard, mouse, read-only or writable USB drives, hot-plugging), `-Internal`
 (NVMe/SATA disk images), `-BootStick` / `-LegacyBios` (boot from a USB image like a real PC)
-and `-Cmdline "testprinter=pcl"` (a fake printer whose jobs are captured for checking) or
+and `-Cmdline "testprinter=pcl"` (or ipp, urf, pclmono, pclxl, ps) (a fake printer whose jobs are captured for checking) or
 `-Cmdline "testphone"` (a pretend phone with photos, a video and a document), `-Sound` (a sound
 card whose output is saved to `test-outsound.wav`; with `-Cmdline "soundtest"` it plays a tone).
 

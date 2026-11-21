@@ -44,6 +44,8 @@ pub enum App {
     Writer,
     Pdf,
     TextEdit,
+    Calculator,
+    Calendar,
 }
 
 impl App {
@@ -56,6 +58,8 @@ impl App {
             App::Writer => "Writer",
             App::Pdf => "PDF",
             App::TextEdit => "Text Editor",
+            App::Calculator => "Calculator",
+            App::Calendar => "Calendar",
             App::Printers => "Printers",
             App::Import => "Import",
             App::Files => "Files",
@@ -111,7 +115,7 @@ const INK_DIM: u32 = rgb(96, 104, 116);
 const WIN_BG: u32 = rgb(251, 251, 253);
 
 /// The Applications menu, in order (folders open in place).
-const APPS: [MenuEntry; 10] = [
+const APPS: [MenuEntry; 12] = [
     MenuEntry::App(App::Photos),
     MenuEntry::Folder(Folder::Documents),
     MenuEntry::App(App::Files),
@@ -119,18 +123,22 @@ const APPS: [MenuEntry; 10] = [
     MenuEntry::App(App::Videos),
     MenuEntry::App(App::Movie),
     MenuEntry::Folder(Folder::Games),
+    MenuEntry::App(App::Calendar),
+    MenuEntry::App(App::Calculator),
     MenuEntry::App(App::Printers),
     MenuEntry::App(App::Disks),
     MenuEntry::App(App::Settings),
 ];
 
 /// Always in the dock (after the Applications button).
-const PINNED: [MenuEntry; 6] = [
+const PINNED: [MenuEntry; 8] = [
     MenuEntry::App(App::Photos),
     MenuEntry::App(App::Videos),
     MenuEntry::Folder(Folder::Documents),
     MenuEntry::App(App::Files),
     MenuEntry::Folder(Folder::Games),
+    MenuEntry::App(App::Calendar),
+    MenuEntry::App(App::Calculator),
     MenuEntry::App(App::Settings),
 ];
 
@@ -288,6 +296,9 @@ pub struct Desktop {
     /// Writer, PDF and the Text Editor.
     doc_apps: Vec<(App, alloc::boxed::Box<dyn crate::docshell::DocApp>)>,
     movie: MovieApp,
+    calculator: crate::calculator::Calculator,
+    printers_app: crate::printers::PrintersApp,
+    calendar: crate::calendar::CalendarApp,
     videos: VideosApp,
     /// Spreadsheet pages waiting to be printed (on the next tick, after the notice shows).
     pending_sheet_print: Option<(Vec<Canvas>, Layout, PrinterInfo)>,
@@ -407,6 +418,9 @@ impl Desktop {
             docs: DocsApp::new(),
             doc_apps: crate::docapps::all(),
             movie: MovieApp::new(),
+            calculator: crate::calculator::Calculator::new(),
+            printers_app: crate::printers::PrintersApp::new(),
+            calendar: crate::calendar::CalendarApp::new(),
             videos: VideosApp::new(),
             pending_sheet_print: None,
             pending_phone_import: None,
@@ -772,6 +786,12 @@ impl Desktop {
             redraw |= matches!(self.videos.tick(now, &mut self.storage, &mut self.usb, visible), VideosAction::Redraw);
         }
         // Started in a resolution being tried? Ask whether to keep it; go back if nobody answers.
+        // Load the calendar once Solon storage is there (for today's events on the desktop).
+        if !self.calendar.loaded() && self.storage.library.is_some() {
+            let t = self.storage.read_root_file(&mut self.usb, "Calendar.txt");
+            self.calendar.load(t.as_deref().and_then(|b| core::str::from_utf8(b).ok()));
+            redraw = true;
+        }
         if !self.display_checked {
             self.display_checked = true;
             if let Ok(text) = crate::display::read_config(&mut self.storage, &mut self.usb) {
@@ -958,7 +978,7 @@ impl Desktop {
             .printers
             .iter()
             .filter(|p| p.usable())
-            .map(|p| PrinterInfo { id: PrinterId::Usb(p.id), name: p.name.clone(), ipp: p.ipp, color: p.color(), papers: p.papers(), dpi: p.dpi() })
+            .map(|p| PrinterInfo { id: PrinterId::Usb(p.id), name: p.name.clone(), ipp: p.ipp, lang: p.lang.unwrap_or(print::Lang::Pcl), color: p.color(), papers: p.papers(), dpi: p.dpi() })
             .collect();
         if let Some(t) = &self.test_printer {
             v.push(t.clone());
@@ -1030,7 +1050,7 @@ impl Desktop {
     /// Send a finished job (PCL, or an IPP request) to the printer.
     fn send_job(&mut self, bytes: Vec<u8>, pages: usize, layout: &Layout, printer: &PrinterInfo) -> Result<String, &'static str> {
         let t0 = Self::now();
-        kprintln!("print: {} job {} bytes, {} page(s), {} cop{}", if printer.ipp { "IPP/PWG Raster" } else { "PCL" }, bytes.len(), pages, layout.copies, if layout.copies == 1 { "y" } else { "ies" });
+        kprintln!("print: {:?} job {} bytes, {} page(s), {} cop{}", printer.lang, bytes.len(), pages, layout.copies, if layout.copies == 1 { "y" } else { "ies" });
         match printer.id {
             PrinterId::Test => {
                 // What would go over USB: raw PCL, or the HTTP request for IPP.
@@ -1183,8 +1203,62 @@ impl Desktop {
         }
     }
 
-    fn doc_index(&self, app: App) -> Option<usize> {
-        self.doc_apps.iter().position(|(a, _)| *a == app)
+    /// The Calendar's events changed: keep them in Solon storage.
+    fn cal_action(&mut self, a: crate::calendar::CalAction) -> bool {
+        use crate::calendar::CalAction;
+        match a {
+            CalAction::None => false,
+            CalAction::Redraw => true,
+            CalAction::Save(text) => {
+                if self.storage.library.is_some() {
+                    if let Err(e) = self.storage.write_root_file(&mut self.usb, "Calendar.txt", text.as_bytes()) {
+                        kprintln!("calendar: couldn't save: {:?}", e);
+                        self.toast = Some((String::from("Couldn't save the calendar"), Self::now() + 5 * HZ));
+                    }
+                } else {
+                    self.toast = Some((String::from("Events are kept until the computer is turned off (no Solon storage)"), Self::now() + 6 * HZ));
+                }
+                true
+            }
+        }
+    }
+
+    /// Every printer for the Printers app, usable or not.
+    fn printer_views(&self) -> Vec<crate::printers::PrinterView> {
+        let mut v: Vec<crate::printers::PrinterView> = self
+            .usb
+            .printers
+            .iter()
+            .map(|p| crate::printers::PrinterView {
+                id: PrinterId::Usb(p.id),
+                name: p.name.clone(),
+                make: p.make.clone(),
+                lang: p.lang,
+                problem: p.problem,
+                color: p.color(),
+                papers: p.papers(),
+                status: p.info.as_ref().filter(|_| p.ipp).map(|i| crate::printers::status_text(i.state, &i.state_reasons)),
+            })
+            .collect();
+        if let Some(t) = &self.test_printer {
+            v.push(crate::printers::PrinterView { id: t.id, name: t.name.clone(), make: String::new(), lang: Some(t.lang), problem: None, color: t.color, papers: t.papers.clone(), status: None });
+        }
+        v
+    }
+
+    fn print_test_page(&mut self, id: PrinterId, now: u64) -> bool {
+        let Some(info) = self.printers().into_iter().find(|p| p.id == id) else { return false };
+        let paper = if info.papers.contains(&print::Paper::Letter) { print::Paper::Letter } else { info.papers.first().copied().unwrap_or(print::Paper::A4) };
+        let (w, h) = print::page_pixels(paper, 100);
+        let date = settings::long_date_text(self.date.0, self.date.1, self.date.2);
+        let page = crate::printers::test_page(w, h, &info.name, info.lang, &date);
+        let layout = Layout { paper, per_page: 1, fill: false, color: info.color, copies: 1 };
+        self.toast = Some((format!("Printing a test page on {}...", info.name), now + 60 * HZ));
+        self.pending_sheet_print = Some((alloc::vec![page], layout, info));
+        true
+    }
+
+    fn doc_index(&self, app: App) -> Option<usize> {        self.doc_apps.iter().position(|(a, _)| *a == app)
     }
 
     /// What Writer, PDF or the Text Editor asked for.
@@ -1465,17 +1539,27 @@ impl Desktop {
         }
         let work = self.work();
         let n = self.windows.len() as i32;
-        let w = (work.w * 82 / 100).clamp(560.min(work.w), work.w);
-        let h = (work.h * 86 / 100).clamp(360.min(work.h), work.h);
+        let (w, h) = if app == App::Calculator {
+            (720.min(work.w), 600.min(work.h))
+        } else {
+            ((work.w * 82 / 100).clamp(560.min(work.w), work.w), (work.h * 86 / 100).clamp(360.min(work.h), work.h))
+        };
         let x = ((work.w - w) / 2 + (n % 6) * 28 - 70).clamp(0, (work.w - w).max(0));
         let y = ((work.h - h) / 2 + (n % 6) * 28 - 50).clamp(0, (work.h - h).max(0));
         self.windows.push(Window { app, x, y, w, h, minimized: false, restore: None });
         self.order.push(app);
         // The editors want all the room they can get.
-        if matches!(app, App::Photos | App::Documents | App::Movie | App::Videos | App::Pinball | App::Shooter | App::Writer | App::Pdf | App::TextEdit) {
+        if matches!(app, App::Photos | App::Documents | App::Movie | App::Videos | App::Pinball | App::Shooter | App::Writer | App::Pdf | App::TextEdit | App::Calendar) {
             self.set_maximized(app, true);
         }
         kprintln!("solon: open {}", app.name());
+        if app == App::Calendar {
+            if !self.calendar.loaded() {
+                let t = self.storage.read_root_file(&mut self.usb, "Calendar.txt");
+                self.calendar.load(t.as_deref().and_then(|b| core::str::from_utf8(b).ok()));
+            }
+            self.calendar.opened(self.date);
+        }
         if app == App::Settings {
             self.settings_app.reload_time();
         }
@@ -1746,6 +1830,17 @@ impl Desktop {
             let date = settings::long_date_text(self.date.0, self.date.1, self.date.2);
             let dpx = (big / 4).max(18);
             c.text_face((w / 2 - width(&date, Face::Sans, dpx) / 2) * 64, top + dpx as i32 * 2, &date, Face::Sans, dpx, ink);
+            // Today's holiday and events, from the Calendar.
+            let (y, m, d) = self.date;
+            let lines = crate::calendar::today_lines(&self.calendar.events, y, m, d, &self.settings);
+            let mut ly = top + dpx as i32 * 2 + 24;
+            for l in lines.iter().take(4) {
+                let l = crate::photos::ellipsize(l, w - 80, Size::Medium, false);
+                let lw = text_width(&l, Size::Medium, false) + 36;
+                c.round_rect_alpha(w / 2 - lw / 2, ly, lw, 32, 16, 0xFF_FFFF, 150);
+                c.text_centered(w / 2, ly + 6, &l, Size::Medium, false, ink);
+                ly += 40;
+            }
             if self.windows.is_empty() {
                 let hint = "Click the blue button at the bottom to see all your apps";
                 c.text_centered(w / 2, h - BAR_H - 48, hint, Size::Small, false, ink);
@@ -1778,6 +1873,15 @@ impl Desktop {
                 }
                 App::Movie => self.movie.draw(c, body),
                 App::Videos => self.videos.draw(c, body),
+                App::Calculator => self.calculator.draw(c, body),
+                App::Printers => {
+                    let v = self.printer_views();
+                    self.printers_app.draw(c, body, &v)
+                }
+                App::Calendar => {
+                    self.calendar.set_today(self.date);
+                    self.calendar.draw(c, body, &self.settings)
+                }
                 app if app.game().is_some() => self.games.draw(app.game().unwrap(), c, body),
                 app => draw_placeholder(c, app, body),
             }
@@ -1818,6 +1922,7 @@ impl Desktop {
             }
             App::Movie => self.movie.on_wheel(wheel, x, y, body),
             App::Videos => self.videos.on_wheel(wheel, body),
+            App::Calendar => self.calendar.on_wheel(wheel),
             _ => false,
         }
     }
@@ -1862,6 +1967,22 @@ impl Desktop {
                 let a = self.videos.on_press(x, y, body, now, &mut self.storage, &mut self.usb);
                 self.capture = true;
                 redraw |= matches!(a, VideosAction::Redraw);
+            }
+            App::Printers => {
+                let v = self.printer_views();
+                match self.printers_app.on_press(x, y, body, &v) {
+                    crate::printers::PrintersAction::None => {}
+                    crate::printers::PrintersAction::Redraw => redraw = true,
+                    crate::printers::PrintersAction::TestPage(id) => redraw |= self.print_test_page(id, now),
+                }
+            }
+            App::Calculator => {
+                redraw |= self.calculator.on_press(x, y, body);
+                self.capture = true;
+            }
+            App::Calendar => {
+                let a = self.calendar.on_press(x, y, body, now);
+                redraw |= self.cal_action(a);
             }
             app if app.game().is_some() => {
                 redraw |= self.games.press(app.game().unwrap(), x, y, body, now, false);
@@ -1926,6 +2047,12 @@ impl Desktop {
             }
             App::Movie => self.movie.on_key(sc).map(|a| self.movie_action(a, Self::now())),
             App::Videos => self.videos.on_key(sc).map(|a| matches!(a, VideosAction::Redraw)),
+            App::Calculator => self.calculator.on_key(sc),
+            App::Printers => {
+                let n = self.printer_views().len();
+                self.printers_app.on_key(sc, n)
+            }
+            App::Calendar => self.calendar.on_key(sc).map(|a| self.cal_action(a)),
             app if app.game().is_some() => self.games.key(app.game().unwrap(), sc, Self::now()),
             _ => None,
         }
@@ -1980,6 +2107,7 @@ impl Desktop {
                         }
                         App::Movie => self.movie.on_release(),
                         App::Videos => self.videos.on_release(),
+                        App::Calculator => self.calculator.on_release(),
                         app if app.game().is_some() => self.games.release(app.game().unwrap(), body),
                         _ => self.photos.on_release(),
                     };
@@ -2079,6 +2207,15 @@ impl Desktop {
                 Some(DockItem::Entry(MenuEntry::Folder(f))) if shown_folder != Some(f) => {
                     self.folder = Some(f);
                     self.apps_menu = Some(0);
+                }
+                None => {
+                    // The clock and date open the Calendar.
+                    let (dock, items) = self.dock_layout();
+                    let px = items.last().map(|i| i.1.x).unwrap_or(dock.x + dock.w);
+                    let cx = px - 10 - self.dock_clock_w();
+                    if x >= cx - 4 && x < px - 4 && dock.contains(x, y) {
+                        self.open(App::Calendar);
+                    }
                 }
                 _ => {}
             }
@@ -2292,9 +2429,22 @@ fn draw_placeholder(c: &mut Canvas, app: App, r: Rect) {
 
 /// Compose `pages` pages (made one at a time by `make`) into a PCL or IPP job.
 fn build_job(pages: usize, layout: &Layout, printer: &PrinterInfo, make: &mut dyn FnMut(usize) -> print::Page) -> Result<Vec<u8>, &'static str> {
+    use crate::printlang::{PclXlJob, PsJob, UrfJob};
+    enum Job {
+        Pcl(print::PclJob),
+        Pwg(print::PwgJob),
+        Urf(UrfJob),
+        Xl(PclXlJob),
+        Ps(PsJob),
+    }
     let dpi = printer.dpi;
-    let mut pcl = if printer.ipp { None } else { Some(print::PclJob::start(layout)) };
-    let mut pwg = if printer.ipp { Some(print::PwgJob::start()) } else { None };
+    let mut job = match printer.lang {
+        print::Lang::Pwg => Job::Pwg(print::PwgJob::start()),
+        print::Lang::Urf => Job::Urf(UrfJob::start()),
+        print::Lang::Pcl => Job::Pcl(print::PclJob::start(layout)),
+        print::Lang::PclXl => Job::Xl(PclXlJob::start(layout, dpi)),
+        print::Lang::PostScript => Job::Ps(PsJob::start(layout)),
+    };
     for n in 0..pages {
         let mut page = make(n);
         if !layout.color {
@@ -2304,17 +2454,20 @@ fn build_job(pages: usize, layout: &Layout, printer: &PrinterInfo, make: &mut dy
                 *p = y << 16 | y << 8 | y;
             }
         }
-        if let Some(j) = &mut pcl {
-            j.page(&page, layout.color, dpi);
-        }
-        if let Some(j) = &mut pwg {
-            j.page(&page, layout, dpi, pages as u32);
+        match &mut job {
+            Job::Pcl(j) => j.page(&page, layout.color, dpi),
+            Job::Pwg(j) => j.page(&page, layout, dpi, pages as u32),
+            Job::Urf(j) => j.page(&page, layout, dpi),
+            Job::Xl(j) => j.page(&page, layout.color, dpi),
+            Job::Ps(j) => j.page(&page, layout.color, dpi),
         }
         kprintln!("print: page {} of {} ready ({}x{} at {} dpi)", n + 1, pages, page.w, page.h, dpi);
     }
-    match (pcl, pwg) {
-        (Some(j), _) => Ok(j.finish()),
-        (_, Some(j)) => Ok(print::ipp_print_job(layout, &j.finish())),
-        _ => Err("No printer language"),
-    }
+    Ok(match job {
+        Job::Pcl(j) => j.finish(),
+        Job::Pwg(j) => print::ipp_print_job(layout, &j.finish(), "image/pwg-raster"),
+        Job::Urf(j) => print::ipp_print_job(layout, &j.finish(), "image/urf"),
+        Job::Xl(j) => j.finish(),
+        Job::Ps(j) => j.finish(),
+    })
 }
