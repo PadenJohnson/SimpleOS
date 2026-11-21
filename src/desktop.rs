@@ -35,6 +35,11 @@ pub enum App {
     Files,
     Disks,
     Settings,
+    Mines,
+    Solitaire,
+    FreeCell,
+    Sudoku,
+    Pinball,
 }
 
 impl App {
@@ -49,9 +54,27 @@ impl App {
             App::Files => "Files",
             App::Disks => "Disks",
             App::Settings => "Settings",
+            App::Mines => "Mines",
+            App::Solitaire => "Solitaire",
+            App::FreeCell => "FreeCell",
+            App::Sudoku => "Sudoku",
+            App::Pinball => "Star Pinball",
         }
     }
 
+
+    /// The game this app is, if it's one.
+    pub fn game(self) -> Option<crate::games::Game> {
+        use crate::games::Game;
+        Some(match self {
+            App::Mines => Game::Mines,
+            App::Solitaire => Game::Solitaire,
+            App::FreeCell => Game::FreeCell,
+            App::Sudoku => Game::Sudoku,
+            App::Pinball => Game::Pinball,
+            _ => return None,
+        })
+    }
     fn placeholder(self) -> [&'static str; 2] {
         match self {
             App::Photos => ["No photos yet.", "Plug in a USB drive or SD card, then open Import."],
@@ -60,7 +83,7 @@ impl App {
             App::Printers => ["No printers found.", "Connect a USB printer to this computer."],
             App::Import => ["No USB drives or cameras detected.", "USB support arrives in an upcoming milestone."],
             App::Settings => ["", ""],
-            App::Files | App::Disks | App::Movie => ["", ""],
+            _ => ["", ""],
         }
     }
 }
@@ -76,6 +99,16 @@ const WIN_BG: u32 = rgb(250, 250, 252);
 
 /// Every app, in the order the Applications menu shows them.
 const APPS: [App; 9] = [App::Photos, App::Documents, App::Files, App::Import, App::Videos, App::Movie, App::Printers, App::Disks, App::Settings];
+
+/// The games, shown in the Games folder of the Applications menu.
+const GAMES: [App; 5] = [App::Solitaire, App::Mines, App::FreeCell, App::Sudoku, App::Pinball];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MenuEntry {
+    App(App),
+    Games,
+    Back,
+}
 
 struct Window {
     app: App,
@@ -124,6 +157,9 @@ pub struct Desktop {
     last_title: Option<(App, u64)>,
     /// The Applications menu is open (and which item the keyboard is on).
     apps_menu: Option<usize>,
+    /// The Applications menu is showing the Games folder.
+    games_menu: bool,
+    games: crate::games::Games,
     photos: Photos,
     import: Import,
     usb: Usb,
@@ -243,6 +279,8 @@ impl Desktop {
             clock: (0, 0),
             last_title: None,
             apps_menu: None,
+            games_menu: false,
+            games: crate::games::Games::new(),
             photos,
             import: Import::new(),
             drive_ids: usb.drives.iter().map(|d| d.id).chain(usb.phones.iter().map(|p| p.id)).collect(),
@@ -650,6 +688,19 @@ impl Desktop {
         if let Some(win) = self.windows.iter().find(|w| w.app == App::Videos) {
             let visible = !win.minimized;
             redraw |= matches!(self.videos.tick(now, &mut self.storage, &mut self.usb, visible), VideosAction::Redraw);
+        }
+        // Games: timers, animations, pinball physics, sound; save new best scores.
+        let visible: Vec<crate::games::Game> = self.windows.iter().filter(|w| !w.minimized).filter_map(|w| w.app.game()).collect();
+        let focused_game = self.focused_app().and_then(|a| a.game());
+        if !visible.is_empty() || focused_game.is_some() {
+            redraw |= self.games.tick(&visible, focused_game, now);
+        }
+        if let Some(text) = self.games.take_save() {
+            if self.storage.library.is_some() {
+                if let Err(e) = self.storage.write_root_file(&mut self.usb, "Games.txt", text.as_bytes()) {
+                    kprintln!("games: couldn't save scores: {:?}", e);
+                }
+            }
         }
         if let Some((i, choice, edits)) = self.pending_save.take() {
             match self.save_edit(i, choice, edits) {
@@ -1229,7 +1280,7 @@ impl Desktop {
         self.windows.push(Window { app, x, y, w, h, minimized: false, restore: None });
         self.order.push(app);
         // The editors want all the room they can get.
-        if matches!(app, App::Photos | App::Documents | App::Movie | App::Videos) {
+        if matches!(app, App::Photos | App::Documents | App::Movie | App::Videos | App::Pinball) {
             self.set_maximized(app, true);
         }
         kprintln!("solon: open {}", app.name());
@@ -1251,6 +1302,10 @@ impl Desktop {
         if app == App::Videos {
             self.videos.opened(&mut self.storage, &mut self.usb);
         }
+        if app.game().is_some() && !self.games.loaded {
+            let t = self.storage.read_root_file(&mut self.usb, "Games.txt");
+            self.games.load(t.as_deref().and_then(|b| core::str::from_utf8(b).ok()));
+        }
     }
 
     fn close_app(&mut self, app: App) {
@@ -1263,6 +1318,9 @@ impl Desktop {
         }
         if app == App::Videos {
             self.videos.closed();
+        }
+        if let Some(g) = app.game() {
+            self.games.closed(g);
         }
         self.windows.retain(|w| w.app != app);
         self.order.retain(|a| *a != app);
@@ -1293,9 +1351,38 @@ impl Desktop {
         if 64 + 4 * 100 + BAR_H + 24 > self.h { 4 } else { 2 }
     }
 
+    /// What the Applications menu shows: the apps and the Games folder, or the games.
+    fn menu_entries(&self) -> Vec<MenuEntry> {
+        if self.games_menu {
+            core::iter::once(MenuEntry::Back).chain(GAMES.iter().map(|&a| MenuEntry::App(a))).collect()
+        } else {
+            let mut v: Vec<MenuEntry> = APPS.iter().map(|&a| MenuEntry::App(a)).collect();
+            let at = APPS.iter().position(|&a| a == App::Movie).map(|i| i + 1).unwrap_or(v.len());
+            v.insert(at, MenuEntry::Games);
+            v
+        }
+    }
+
+    fn activate(&mut self, e: MenuEntry) {
+        match e {
+            MenuEntry::App(a) => {
+                self.games_menu = false;
+                self.open(a);
+            }
+            MenuEntry::Games => {
+                self.games_menu = true;
+                self.apps_menu = Some(0);
+            }
+            MenuEntry::Back => {
+                self.games_menu = false;
+                self.apps_menu = Some(0);
+            }
+        }
+    }
+
     fn menu_box(&self) -> Rect {
         let cols = self.menu_cols() as i32;
-        let rows = APPS.len().div_ceil(cols as usize) as i32;
+        let rows = self.menu_entries().len().div_ceil(cols as usize) as i32;
         Rect::new(6, self.h - BAR_H - 12 - (64 + rows * 100), cols * 170 + 32, 64 + rows * 100)
     }
 
@@ -1352,14 +1439,28 @@ impl Desktop {
         let b = self.menu_box();
         c.round_rect_alpha(b.x + 3, b.y + 6, b.w, b.h, 14, 0, 100);
         c.round_rect(b.x, b.y, b.w, b.h, 14, rgb(246, 247, 250));
-        c.text(b.x + 20, b.y + 16, "Applications", Size::Medium, true, rgb(40, 44, 52));
-        for (i, &app) in APPS.iter().enumerate() {
+        c.text(b.x + 20, b.y + 16, if self.games_menu { "Games" } else { "Applications" }, Size::Medium, true, rgb(40, 44, 52));
+        for (i, &e) in self.menu_entries().iter().enumerate() {
             let r = self.menu_item(i);
             if i == sel {
                 c.round_rect(r.x, r.y, r.w, r.h, 10, rgb(222, 232, 246));
             }
-            icons::draw(c, app, r.x + (r.w - 64) / 2, r.y + 2);
-            c.text_centered(r.x + r.w / 2, r.y + 72, app.name(), Size::Small, true, rgb(40, 44, 52));
+            let (ix, iy) = (r.x + (r.w - 64) / 2, r.y + 2);
+            let name = match e {
+                MenuEntry::App(app) => {
+                    icons::draw(c, app, ix, iy);
+                    app.name()
+                }
+                MenuEntry::Games => {
+                    icons::games_folder(c, ix, iy);
+                    "Games"
+                }
+                MenuEntry::Back => {
+                    icons::back(c, ix, iy);
+                    "Back"
+                }
+            };
+            c.text_centered(r.x + r.w / 2, r.y + 72, name, Size::Small, true, rgb(40, 44, 52));
         }
     }
 
@@ -1402,6 +1503,7 @@ impl Desktop {
                 App::Documents => self.docs.draw(c, body),
                 App::Movie => self.movie.draw(c, body),
                 App::Videos => self.videos.draw(c, body),
+                app if app.game().is_some() => self.games.draw(app.game().unwrap(), c, body),
                 app => draw_placeholder(c, app, body),
             }
             c.reset_clip();
@@ -1475,6 +1577,10 @@ impl Desktop {
                 self.capture = true;
                 redraw |= matches!(a, VideosAction::Redraw);
             }
+            app if app.game().is_some() => {
+                redraw |= self.games.press(app.game().unwrap(), x, y, body, now, false);
+                self.capture = true;
+            }
             App::Settings => {
                 let screen = self.screen;
                 match self.settings_app.on_press(x, y, body, &self.settings, screen) {
@@ -1519,6 +1625,7 @@ impl Desktop {
             App::Documents => self.docs.on_key(sc, body, &mut self.storage, &mut self.usb).map(|a| self.docs_action(a, Self::now())),
             App::Movie => self.movie.on_key(sc).map(|a| self.movie_action(a, Self::now())),
             App::Videos => self.videos.on_key(sc).map(|a| matches!(a, VideosAction::Redraw)),
+            app if app.game().is_some() => self.games.key(app.game().unwrap(), sc, Self::now()),
             _ => None,
         }
     }
@@ -1544,6 +1651,20 @@ impl Desktop {
             }
         }
 
+
+        // Right button: games use it (flags in Mines).
+        let rpressed = buttons & 2 != 0 && prev & 2 == 0;
+        if rpressed && self.apps_menu.is_none() {
+            if let Some(i) = self.windows.iter().rposition(|w| !w.minimized && w.rect().contains(x, y)) {
+                let (app, body) = (self.windows[i].app, self.windows[i].body());
+                if let Some(g) = app.game() {
+                    if body.contains(x, y) {
+                        self.raise(app);
+                        return true | self.games.press(g, x, y, body, now, true);
+                    }
+                }
+            }
+        }
         // A press inside Photos/Documents keeps getting moves until release (editor drags).
         if self.capture {
             if let Some(i) = self.focused() {
@@ -1554,6 +1675,7 @@ impl Desktop {
                         App::Documents => self.docs.on_release(),
                         App::Movie => self.movie.on_release(),
                         App::Videos => self.videos.on_release(),
+                        app if app.game().is_some() => self.games.release(app.game().unwrap(), body),
                         _ => self.photos.on_release(),
                     };
                 }
@@ -1562,6 +1684,7 @@ impl Desktop {
                         App::Documents => self.docs.on_drag(x, y, body),
                         App::Movie => self.movie.on_drag(x, y, body),
                         App::Videos => self.videos.on_drag(x, y, body),
+                        app if app.game().is_some() => self.games.drag(app.game().unwrap(), x, y),
                         _ => self.photos.on_drag(x, y, body),
                     };
                 }
@@ -1601,8 +1724,9 @@ impl Desktop {
 
         // Applications menu and taskbar.
         if self.apps_menu.is_some() {
-            if let Some(i) = (0..APPS.len()).find(|&i| self.menu_item(i).contains(x, y)) {
-                self.open(APPS[i]);
+            let entries = self.menu_entries();
+            if let Some(i) = (0..entries.len()).find(|&i| self.menu_item(i).contains(x, y)) {
+                self.activate(entries[i]);
                 return true;
             }
             let on_menu = self.menu_box().contains(x, y);
@@ -1614,6 +1738,7 @@ impl Desktop {
             redraw = true;
         } else if self.apps_button().contains(x, y) {
             self.apps_menu = Some(0);
+            self.games_menu = false;
             return true;
         }
         if y >= self.h - BAR_H {
@@ -1731,10 +1856,12 @@ impl Desktop {
         }
         // Applications menu: arrows move, Enter opens, Esc closes.
         if let Some(sel) = self.apps_menu {
-            let n = APPS.len();
+            let entries = self.menu_entries();
+            let n = entries.len();
             match sc {
+                0x01 if self.games_menu => self.activate(MenuEntry::Back),
                 0x01 => self.apps_menu = None,
-                0x1C => self.open(APPS[sel]),
+                0x1C => self.activate(entries[sel.min(n - 1)]),
                 0x4B => self.apps_menu = Some((sel + n - 1) % n),
                 0x4D => self.apps_menu = Some((sel + 1) % n),
                 0x48 => self.apps_menu = Some((sel + n - self.menu_cols()) % n),
@@ -1758,6 +1885,7 @@ impl Desktop {
         // Nothing open: Enter or Space opens the Applications menu.
         if sc == 0x1C || sc == 0x39 {
             self.apps_menu = Some(0);
+            self.games_menu = false;
             return true;
         }
         false

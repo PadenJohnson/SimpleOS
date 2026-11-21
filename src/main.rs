@@ -19,6 +19,7 @@ mod edit;
 mod ehci;
 mod files;
 mod fs;
+mod games;
 mod gfx;
 mod hda;
 mod hc;

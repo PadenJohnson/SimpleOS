@@ -8,7 +8,7 @@ SimpleOS (internally "Solon") is a small operating system written from scratch i
 nothing to download.
 
 **Working now**
-- Desktop with Photos, Videos, Video Editor, Documents, Printers, Import, Files, Disks and Settings
+- Desktop with Photos, Videos, Video Editor, Documents, Printers, Import, Files, Disks, Settings and Games
 - Desktop: a taskbar along the bottom with an Applications menu and a button per open
   window; several apps open at once in windows that move, minimize and maximize
 - Photos: thumbnail grid, full-screen viewer, and a Lightroom-style editor: histogram, Auto,
@@ -43,6 +43,12 @@ nothing to download.
   photos; titles in the middle, at the bottom or on black; volume and fades. The project
   saves itself. "Export video" makes an MP4 (H.264 picture, FLAC sound, 480p / 720p / 1080p)
   in the Videos folder, written by Solon's own encoders.
+- Games (a folder in the Applications menu): Solitaire (draw 1 or 3), FreeCell, Mines (easy,
+  medium, hard; right-click or "Flag" for flags), Sudoku (puzzles made on the spot, always
+  with one answer; notes) and Star Pinball (an original space table with planet bumpers,
+  rollover lanes, star targets, a wormhole and a ball saver; flippers on Shift or by clicking
+  either half of the table). Cards move by dragging or with a single click. Best times, wins
+  and the pinball high score are saved; little sound effects play through the sound card.
 - Sound: Intel High Definition Audio (the sound chip in nearly every PC since about 2005),
   through the speakers, headphones and line out. Checked in QEMU; not yet on a real PC.
 - Phones over USB: Android phones (MTP, "File transfer") and iPhones and cameras (PTP) show up
@@ -111,7 +117,7 @@ card whose output is saved to `test-outsound.wav`; with `-Cmdline "soundtest"` i
 
 - `src/`: the kernel. `main.rs` boots; `desktop.rs`, `photos.rs`, `editor.rs`, `import.rs`,
   `files.rs`, `diskmgr.rs`, `documents.rs`, `sheetui.rs`, `movieui.rs`, `settingsui.rs` and `printui.rs` are
-  the apps; `movie.rs` is the video editor's engine; `video/` holds the H.264 encoder and decoder (CAVLC and CABAC), AAC, FLAC, MP4 and AVI/WAV code (`tables.rs`: standard tables from FFmpeg); `videos.rs` is the player;
+  the apps; `movie.rs` is the video editor's engine; `video/` holds the H.264 encoder and decoder (CAVLC and CABAC), AAC, FLAC, MP4 and AVI/WAV code (`tables.rs`: standard tables from FFmpeg); `videos.rs` is the player; `games/` holds the games;
   `doc/` reads and writes spreadsheets (zip, XML, formulas, xlsx, csv); `xhci.rs`, `ehci.rs`, `usb.rs`, `msc.rs`, `usbprint.rs`, `nvme.rs`, `hda.rs` and
   `ahci.rs` are drivers; `fs/` holds partition tables, FAT and exFAT; `library.rs` is the
   photo library; `print.rs` lays out pages and speaks PCL / IPP.

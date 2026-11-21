@@ -16,7 +16,31 @@ pub fn tile_color(app: App) -> u32 {
         App::Files => rgb(22, 160, 133),
         App::Disks => rgb(52, 73, 94),
         App::Settings => rgb(96, 110, 128),
+        App::Mines => rgb(60, 90, 140),
+        App::Solitaire => rgb(30, 130, 80),
+        App::FreeCell => rgb(20, 110, 120),
+        App::Sudoku => rgb(200, 140, 40),
+        App::Pinball => rgb(70, 40, 130),
     }
+}
+
+/// The Games folder in the Applications menu: a joystick.
+pub fn games_folder(c: &mut Canvas, x: i32, y: i32) {
+    let bg = rgb(230, 80, 140);
+    c.round_rect_alpha(x + 2, y + 4, 64, 64, 14, 0, 70);
+    c.round_rect(x, y, 64, 64, 14, bg);
+    c.round_rect(x + 12, y + 36, 40, 16, 6, WHITE);
+    c.fill_rect(x + 30, y + 18, 4, 20, WHITE);
+    c.circle(x + 32, y + 18, 8, WHITE);
+    c.circle(x + 44, y + 44, 3, bg);
+}
+
+/// "Back" in the Games folder.
+pub fn back(c: &mut Canvas, x: i32, y: i32) {
+    let bg = rgb(150, 158, 170);
+    c.round_rect(x, y, 64, 64, 14, bg);
+    c.triangle([(x + 16, y + 32), (x + 34, y + 16), (x + 34, y + 48)], WHITE);
+    c.fill_rect(x + 32, y + 27, 18, 10, WHITE);
 }
 
 /// Draw a 64x64 icon with its top-left at (x, y).
@@ -36,6 +60,45 @@ pub fn draw(c: &mut Canvas, app: App, x: i32, y: i32) {
             c.circle(x + 32, y + 32, 19, WHITE);
             c.circle(x + 32, y + 32, 16, bg);
             c.triangle([(x + 27, y + 22), (x + 27, y + 42), (x + 43, y + 32)], WHITE);
+        }
+        App::Mines => {
+            // A mine and a flag.
+            c.circle(x + 26, y + 36, 12, WHITE);
+            for (dx, dy) in [(16, 0), (0, 16), (12, 12), (12, -12)] {
+                c.fill_rect(x + 26 - dx / 2 - 1, y + 36 - dy / 2 - 1, 3, 3, WHITE);
+                c.fill_rect(x + 26 + dx / 2 - 1, y + 36 + dy / 2 - 1, 3, 3, WHITE);
+            }
+            c.circle(x + 22, y + 32, 3, bg);
+            c.fill_rect(x + 44, y + 14, 3, 26, WHITE);
+            c.triangle([(x + 47, y + 14), (x + 47, y + 26), (x + 58, y + 20)], rgb(240, 80, 70));
+        }
+        App::Solitaire | App::FreeCell => {
+            // Two fanned cards.
+            c.round_rect(x + 12, y + 14, 26, 36, 4, rgb(220, 226, 236));
+            c.round_rect(x + 24, y + 18, 28, 38, 4, WHITE);
+            let red = app == App::Solitaire;
+            let col = if red { rgb(210, 40, 40) } else { rgb(30, 30, 34) };
+            c.circle(x + 34, y + 33, 5, col);
+            c.circle(x + 42, y + 33, 5, col);
+            c.triangle([(x + 29, y + 35), (x + 47, y + 35), (x + 38, y + 46)], col);
+        }
+        App::Sudoku => {
+            c.round_rect(x + 12, y + 12, 40, 40, 4, WHITE);
+            for k in 1..3 {
+                c.fill_rect(x + 12 + k * 13, y + 14, 2, 36, bg);
+                c.fill_rect(x + 14, y + 12 + k * 13, 36, 2, bg);
+            }
+            c.text(x + 16, y + 14, "5", crate::gfx::Size::Small, true, bg);
+            c.text(x + 42, y + 40, "9", crate::gfx::Size::Small, true, bg);
+            c.text(x + 29, y + 27, "3", crate::gfx::Size::Small, true, rgb(40, 90, 200));
+        }
+        App::Pinball => {
+            // A ball, a flipper and a star.
+            c.circle(x + 24, y + 22, 9, WHITE);
+            c.circle(x + 21, y + 19, 3, rgb(200, 200, 230));
+            c.triangle([(x + 14, y + 46), (x + 50, y + 52), (x + 14, y + 54)], rgb(255, 210, 90));
+            c.triangle([(x + 46, y + 14), (x + 42, y + 26), (x + 50, y + 26)], rgb(255, 230, 120));
+            c.triangle([(x + 46, y + 30), (x + 38, y + 20), (x + 54, y + 20)], rgb(255, 230, 120));
         }
         App::Movie => {
             // A film strip with a timeline under it.
