@@ -67,7 +67,10 @@ nothing to download.
   internal disk (with a one-time notice at startup). It erases that disk after two warnings,
   copies Solon's boot area from the stick (so it starts on UEFI and old BIOS PCs) and
   copies everything in the stick's Solon storage. Remove the stick and restart.
-- Settings: background colour, text and icon size (Normal / Large / Extra large; the whole
+- Settings: screen resolution (any mode the PC offers; Solon restarts in it and asks "Keep
+  this resolution?", going back by itself after 15 seconds; the monitor's refresh rate and name
+  are shown but the refresh rate can't be changed without a graphics driver), background colour,
+  text and icon size (Normal / Large / Extra large; the whole
   desktop is scaled, which also helps on 4K screens), 12/24-hour clock, date in the top bar,
   setting the time and date, mouse speed. Saved in the library.
 - Power button (top right): turn off screen, restart, shut down (ACPI, with confirmation)

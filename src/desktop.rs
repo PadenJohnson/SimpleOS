@@ -186,6 +186,9 @@ pub struct Desktop {
     power_menu: bool,
     /// One-time notice: Solon runs from its USB stick and could be installed.
     install_notice: bool,
+    /// A new screen resolution being tried: the one to go back to, and when.
+    display_trial: Option<(Option<(u32, u32)>, u64)>,
+    display_checked: bool,
     /// The internal disk Solon started from (it's installed there), for update notices.
     installed_disk: Option<usize>,
     confirm: Option<PowerRequest>,
@@ -300,6 +303,8 @@ impl Desktop {
             date: crate::rtc::date(),
             power_menu: false,
             install_notice: false,
+            display_trial: None,
+            display_checked: false,
             installed_disk: None,
             confirm: None,
             screen_off: false,
@@ -688,6 +693,25 @@ impl Desktop {
         if let Some(win) = self.windows.iter().find(|w| w.app == App::Videos) {
             let visible = !win.minimized;
             redraw |= matches!(self.videos.tick(now, &mut self.storage, &mut self.usb, visible), VideosAction::Redraw);
+        }
+        // Started in a resolution being tried? Ask whether to keep it; go back if nobody answers.
+        if !self.display_checked {
+            self.display_checked = true;
+            if let Ok(text) = crate::display::read_config(&mut self.storage, &mut self.usb) {
+                if let Some(prev) = crate::display::trial(&text) {
+                    kprintln!("display: trying a new resolution (previous {:?})", prev);
+                    self.display_trial = Some((prev, now + 15 * HZ));
+                    redraw = true;
+                }
+            }
+        }
+        if let Some((_, end)) = self.display_trial {
+            if now >= end {
+                self.end_display_trial(false);
+            }
+            if now % HZ == 0 {
+                redraw = true;
+            }
         }
         // Games: timers, animations, pinball physics, sound; save new best scores.
         let visible: Vec<crate::games::Game> = self.windows.iter().filter(|w| !w.minimized).filter_map(|w| w.app.game()).collect();
@@ -1165,6 +1189,57 @@ impl Desktop {
         Rect::new(o.x - 12 - 110, o.y, 110, 38)
     }
 
+    // ---- screen resolution ---------------------------------------------------------------
+
+    /// Write a new resolution into the boot settings as a trial (restart follows).
+    fn try_resolution(&mut self, m: Option<(u32, u32)>) -> Result<(), String> {
+        let text = crate::display::read_config(&mut self.storage, &mut self.usb)?;
+        let previous = crate::display::configured(&text);
+        let new = crate::display::with_resolution(&text, m, Some(previous));
+        crate::display::write_config(&mut self.storage, &mut self.usb, &new)?;
+        kprintln!("display: trying {:?} (was {:?}), restarting", m, previous);
+        Ok(())
+    }
+
+    /// Keep the resolution being tried, or go back to the old one (and restart).
+    fn end_display_trial(&mut self, keep: bool) {
+        let Some((previous, _)) = self.display_trial.take() else { return };
+        let r = crate::display::read_config(&mut self.storage, &mut self.usb).and_then(|text| {
+            let res = if keep { crate::display::configured(&text) } else { previous };
+            crate::display::write_config(&mut self.storage, &mut self.usb, &crate::display::with_resolution(&text, res, None))
+        });
+        match r {
+            Ok(()) if keep => self.toast = Some((String::from("Resolution kept"), Self::now() + 3 * HZ)),
+            Ok(()) => {
+                kprintln!("display: going back to {:?}", previous);
+                self.request = Some(PowerRequest::Restart);
+            }
+            Err(e) => self.toast = Some((format!("Couldn't save the resolution: {}", e), Self::now() + 8 * HZ)),
+        }
+    }
+
+    fn trial_buttons(&self) -> (Rect, Rect) {
+        let (w, h) = (460, 190);
+        let (x, y) = ((self.w - w) / 2, (self.h - BAR_H - h) / 2);
+        (Rect::new(x + w - 300, y + h - 58, 140, 40), Rect::new(x + w - 150, y + h - 58, 130, 40))
+    }
+
+    fn draw_display_trial(&self, c: &mut Canvas) {
+        let Some((_, end)) = self.display_trial else { return };
+        let (w, h) = (460, 190);
+        let (x, y) = ((self.w - w) / 2, (self.h - BAR_H - h) / 2);
+        c.fill_rect_alpha(0, 0, self.w, self.h, 0, 120);
+        c.round_rect(x, y, w, h, 14, rgb(250, 250, 252));
+        c.text(x + 24, y + 22, "Keep this resolution?", Size::Medium, true, rgb(40, 44, 52));
+        let left = end.saturating_sub(Self::now()).div_ceil(HZ);
+        c.text(x + 24, y + 62, &format!("{} x {}. Going back in {} seconds.", self.screen.0, self.screen.1, left), Size::Small, false, rgb(90, 96, 106));
+        let (keep, back) = self.trial_buttons();
+        c.round_rect(keep.x, keep.y, keep.w, keep.h, 8, rgb(46, 134, 222));
+        c.text_centered(keep.x + keep.w / 2, keep.y + 12, "Keep it", Size::Small, true, rgb(255, 255, 255));
+        c.round_rect(back.x, back.y, back.w, back.h, 8, rgb(226, 230, 236));
+        c.text_centered(back.x + back.w / 2, back.y + 12, "Go back", Size::Small, true, rgb(40, 44, 52));
+    }
+
     fn draw_install_notice(&self, c: &mut Canvas) {
         c.fill_rect_alpha(0, 0, self.w, self.h, 0, 110);
         let b = self.notice_box();
@@ -1521,6 +1596,7 @@ impl Desktop {
         if self.install_notice {
             self.draw_install_notice(c);
         }
+        self.draw_display_trial(c);
         self.draw_power(c);
         if self.show_log {
             self.draw_log(c);
@@ -1596,6 +1672,16 @@ impl Desktop {
                         self.clock = (h, mi);
                         self.toast = Some((String::from("Clock set"), now + 3 * HZ));
                         redraw = true;
+                    }
+                    SettingsAction::Resolution(m) => {
+                        redraw = true;
+                        match self.try_resolution(m) {
+                            Ok(()) => self.request = Some(PowerRequest::Restart),
+                            Err(e) => {
+                                kprintln!("display: {}", e);
+                                self.toast = Some((format!("Couldn't change the resolution: {}", e), now + 8 * HZ));
+                            }
+                        }
                     }
                 }
             }
@@ -1710,6 +1796,15 @@ impl Desktop {
             return redraw;
         }
         kprintln!("solon: click at {},{}", x, y);
+        if self.display_trial.is_some() {
+            let (keep, back) = self.trial_buttons();
+            if keep.contains(x, y) {
+                self.end_display_trial(true);
+            } else if back.contains(x, y) {
+                self.end_display_trial(false);
+            }
+            return true;
+        }
         if self.install_notice {
             let (open, later) = (self.notice_open(), self.notice_later());
             if open.contains(x, y) || later.contains(x, y) {
@@ -1800,6 +1895,14 @@ impl Desktop {
 
     /// Scancode set 1. Returns true if the screen needs redrawing.
     pub fn on_key(&mut self, sc: u8) -> bool {
+        if self.display_trial.is_some() && sc & 0x80 == 0 {
+            match sc {
+                0x1C => self.end_display_trial(true),
+                0x01 => self.end_display_trial(false),
+                _ => return false,
+            }
+            return true;
+        }
         if self.install_notice && sc & 0x80 == 0 {
             match sc {
                 0x1C => self.dismiss_install_notice(true),

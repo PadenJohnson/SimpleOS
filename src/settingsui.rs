@@ -2,6 +2,7 @@
 
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use crate::gfx::{mix, rgb, Canvas, Rect, Size};
 use crate::settings::{days_in_month, Settings, BACKGROUNDS, MONTHS, MOUSE, SIZES};
@@ -18,12 +19,16 @@ pub enum SettingsAction {
     Redraw,
     Change(Settings),
     SetClock { y: u16, mo: u8, d: u8, h: u8, mi: u8 },
+    /// Restart in this resolution (None = the firmware's choice).
+    Resolution(Option<(u32, u32)>),
 }
 
 pub struct SettingsApp {
     /// Date and time being edited: year, month, day, hour, minute.
     t: (u16, u8, u8, u8, u8),
     edited: bool,
+    /// The resolution list is open.
+    picker: bool,
 }
 
 fn button(c: &mut Canvas, b: Rect, label: &str, on: bool, enabled: bool) {
@@ -38,7 +43,7 @@ fn button(c: &mut Canvas, b: Rect, label: &str, on: bool, enabled: bool) {
 
 impl SettingsApp {
     pub fn new() -> SettingsApp {
-        let mut s = SettingsApp { t: (2026, 1, 1, 0, 0), edited: false };
+        let mut s = SettingsApp { t: (2026, 1, 1, 0, 0), edited: false, picker: false };
         s.reload_time();
         s
     }
@@ -142,12 +147,18 @@ impl SettingsApp {
             button(c, Self::mouse_btn(r, i), name, s.mouse == i, true);
         }
 
+        label(c, 5, "Screen");
+        self.draw_screen_row(c, r);
+
         let note = if saved {
             "Changes are saved and kept after a restart."
         } else {
             "Changes last until the computer is turned off (no Solon storage to save them in)."
         };
-        c.text(r.x + 24, Self::row_y(r, 5) + 30, note, Size::Small, false, DIM);
+        c.text(r.x + 24, Self::row_y(r, 5) + 64, note, Size::Small, false, DIM);
+        if self.picker {
+            self.draw_picker(c, r);
+        }
     }
 
     // ---- input ------------------------------------------------------------------
@@ -170,6 +181,27 @@ impl SettingsApp {
     }
 
     pub fn on_press(&mut self, x: i32, y: i32, r: Rect, s: &Settings, screen: (usize, usize)) -> SettingsAction {
+        if self.picker {
+            if Self::picker_close(r).contains(x, y) {
+                self.picker = false;
+                return SettingsAction::Redraw;
+            }
+            let current = crate::display::INFO.lock().as_ref().map(|i| i.current);
+            for (m, b) in Self::picker_items(r) {
+                if b.contains(x, y) {
+                    self.picker = false;
+                    if m == current {
+                        return SettingsAction::Redraw;
+                    }
+                    return SettingsAction::Resolution(m);
+                }
+            }
+            return SettingsAction::None;
+        }
+        if Self::res_btn(r).contains(x, y) {
+            self.picker = true;
+            return SettingsAction::Redraw;
+        }
         let mut n = *s;
         for i in 0..BACKGROUNDS.len() {
             if Self::swatch(r, i).contains(x, y) {
@@ -215,5 +247,66 @@ impl SettingsApp {
             return SettingsAction::SetClock { y: yy, mo, d, h, mi };
         }
         SettingsAction::None
+    }
+}
+
+// ---- screen resolution ----------------------------------------------------------------
+
+impl SettingsApp {
+    fn res_btn(r: Rect) -> Rect {
+        Rect::new(Self::x0(r), Self::row_y(r, 5) + 4, 190, 36)
+    }
+
+    fn draw_screen_row(&self, c: &mut Canvas, r: Rect) {
+        button(c, Self::res_btn(r), "Change resolution", false, true);
+        let info = crate::display::INFO.lock().clone().unwrap_or_default();
+        let mut line = format!("{} x {}", info.current.0, info.current.1);
+        if let Some(hz) = info.refresh {
+            line += &format!(", {} Hz", (hz + 50) / 100);
+        }
+        if let Some(name) = &info.monitor {
+            line += &format!(", {}", name);
+        }
+        c.text(Self::x0(r) + 206, Self::row_y(r, 5) + 6, &line, Size::Small, true, INK);
+        let sub = match info.native {
+            Some((w, h)) if (w, h) != info.current => format!("The monitor's best: {} x {}. Refresh rate is set by the monitor.", w, h),
+            _ => String::from("Refresh rate is set by the monitor and can't be changed here."),
+        };
+        c.text(Self::x0(r) + 206, Self::row_y(r, 5) + 26, &sub, Size::Small, false, DIM);
+    }
+
+    /// The list of resolutions: (mode, button).
+    fn picker_items(r: Rect) -> Vec<(Option<(u32, u32)>, Rect)> {
+        let info = crate::display::INFO.lock().clone().unwrap_or_default();
+        let cols = ((r.w - 48) / 170).max(1);
+        let mut v: Vec<(Option<(u32, u32)>, Rect)> = Vec::new();
+        for (k, &m) in info.modes.iter().take(24).enumerate() {
+            let k = k as i32;
+            v.push((Some(m), Rect::new(r.x + 24 + (k % cols) * 170, r.y + 130 + (k / cols) * 46, 160, 38)));
+        }
+        v
+    }
+    fn picker_close(r: Rect) -> Rect {
+        Rect::new(r.x + r.w - 140, r.y + 16, 116, 36)
+    }
+
+    fn draw_picker(&self, c: &mut Canvas, r: Rect) {
+        c.fill_rect(r.x, r.y, r.w, r.h, rgb(250, 250, 252));
+        c.text(r.x + 24, r.y + 20, "Choose a screen resolution", Size::Medium, true, INK);
+        button(c, Self::picker_close(r), "Cancel", false, true);
+        c.text(r.x + 24, r.y + 62, "Solon restarts in the new resolution and asks whether to keep it.", Size::Small, false, DIM);
+        c.text(r.x + 24, r.y + 84, "If the screen stays dark, just wait: after 15 seconds the old one comes back.", Size::Small, false, DIM);
+        let info = crate::display::INFO.lock().clone().unwrap_or_default();
+        for (m, b) in Self::picker_items(r) {
+            let Some((w, h)) = m else { continue };
+            let mut label = format!("{} x {}", w, h);
+            if info.native == Some((w, h)) {
+                label += " (best)";
+            }
+            button(c, b, &label, info.current == (w, h), true);
+        }
+        if info.modes.len() <= 1 {
+            c.text(r.x + 24, r.y + 130, "This computer only offers one resolution.", Size::Small, true, INK);
+        }
     }
 }

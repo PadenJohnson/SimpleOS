@@ -11,6 +11,7 @@ mod cursor;
 mod ahci;
 mod desktop;
 mod disk;
+mod display;
 mod doc;
 mod diskmgr;
 mod documents;
@@ -157,6 +158,11 @@ extern "C" fn kmain() -> ! {
     let (w, h) = (screen.width, screen.height);
     screen.register_for_crashes();
     kprintln!("solon: framebuffer {}x{}", w, h);
+    // The screen modes the firmware offers, and what the monitor says about itself.
+    if let Some(fb) = FRAMEBUFFER_REQUEST.get_response().and_then(|resp| resp.framebuffers().next()) {
+        let modes: alloc::vec::Vec<(u32, u32, u16)> = fb.modes().unwrap_or(&[]).iter().map(|m| (m.width as u32, m.height as u32, m.bpp)).collect();
+        display::init(&modes, (w as u32, h as u32), fb.edid());
+    }
 
     // Which disk did we boot from? (Its GPT disk ID; lets Solon keep its library on its own stick.)
     let boot_disk: Option<[u8; 16]> = EXECUTABLE_FILE_REQUEST.get_response().and_then(|r| r.file().gpt_disk_id()).map(|u| {
