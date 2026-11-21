@@ -9,7 +9,7 @@ nothing to download.
 
 **Working now**
 - Desktop with Photos, Videos, Video Editor, Documents (Writer, Spreadsheets, PDF, Text Editor),
-  Calendar, Calculator, Printers, Import, Files, Disks, Settings and Games
+  Paint, Calendar, Calculator, Printers, Import, Files, Disks, Settings and Games
 - Desktop: light wallpapers with a big clock, a floating dock (Applications button, pinned
   apps and folders, open apps, clock, power) and a centred Applications launcher; several
   apps open at once in rounded windows that move, minimize and maximize. Smooth Noto Sans
@@ -106,6 +106,10 @@ nothing to download.
 - Calendar: month view with today marked, US holidays, and events (times, every
   week/month/year for birthdays) kept in Solon storage; today's appear under the desktop
   clock, and clicking the dock clock opens the Calendar.
+- Paint: a drawing program like MS Paint with a clean Mac-style look: pencil, brush, spray,
+  eraser, fill, colour picker, text, lines, rectangles, rounded rectangles and ellipses
+  (outline, filled or both), select and move, copy/cut/paste, crop, rotate, flip, resize,
+  zoom, undo/redo; opens and saves PNG and JPEG, and prints.
 - Calculator: big buttons, x and / before + and -, percent, square root, squares, 1/x,
   a history of sums, and the keyboard.
 

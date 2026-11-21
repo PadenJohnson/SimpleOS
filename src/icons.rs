@@ -27,6 +27,7 @@ pub fn tile_color(app: App) -> u32 {
         App::TextEdit => rgb(90, 100, 116),
         App::Calculator => rgb(255, 149, 0),
         App::Calendar => rgb(240, 242, 246),
+        App::Paint => rgb(255, 255, 255),
     }
 }
 
@@ -155,6 +156,18 @@ pub fn draw(c: &mut Canvas, app: App, x: i32, y: i32) {
             c.round_rect(x + 20, y + 8, 4, 9, 2, rgb(90, 96, 106));
             c.round_rect(x + 40, y + 8, 4, 9, 2, rgb(90, 96, 106));
             c.text_face((x + 22) * 64, y + 49, "31", crate::font::Face::SansBold, 20, rgb(40, 44, 52));
+        }
+        App::Paint => {
+            // A painter's palette with dots of colour, and a brush.
+            c.circle(x + 30, y + 34, 20, rgb(236, 200, 150));
+            c.circle(x + 38, y + 44, 6, rgb(255, 255, 255));
+            for (dx, dy, col) in [(-10, -8, rgb(237, 28, 36)), (0, -12, rgb(255, 200, 0)), (10, -7, rgb(34, 177, 76)), (-12, 4, rgb(0, 122, 255)), (-4, 12, rgb(163, 73, 164))] {
+                c.circle(x + 30 + dx, y + 34 + dy, 4, col);
+            }
+            for k in 0..14 {
+                c.fill_rect(x + 40 + k, y + 22 - k, 3, 3, rgb(150, 100, 60));
+            }
+            c.circle(x + 40, y + 24, 3, rgb(60, 60, 70));
         }
         App::Pinball => {
             // A ball, a flipper and a star.

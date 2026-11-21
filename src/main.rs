@@ -42,6 +42,7 @@ mod movie;
 mod msc;
 mod nvme;
 mod pci;
+mod paint;
 mod pdf;
 mod pdfui;
 mod raster;

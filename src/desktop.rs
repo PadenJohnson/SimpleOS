@@ -46,6 +46,7 @@ pub enum App {
     TextEdit,
     Calculator,
     Calendar,
+    Paint,
 }
 
 impl App {
@@ -60,6 +61,7 @@ impl App {
             App::TextEdit => "Text Editor",
             App::Calculator => "Calculator",
             App::Calendar => "Calendar",
+            App::Paint => "Paint",
             App::Printers => "Printers",
             App::Import => "Import",
             App::Files => "Files",
@@ -115,13 +117,14 @@ const INK_DIM: u32 = rgb(96, 104, 116);
 const WIN_BG: u32 = rgb(251, 251, 253);
 
 /// The Applications menu, in order (folders open in place).
-const APPS: [MenuEntry; 12] = [
+const APPS: [MenuEntry; 13] = [
     MenuEntry::App(App::Photos),
     MenuEntry::Folder(Folder::Documents),
     MenuEntry::App(App::Files),
     MenuEntry::App(App::Import),
     MenuEntry::App(App::Videos),
     MenuEntry::App(App::Movie),
+    MenuEntry::App(App::Paint),
     MenuEntry::Folder(Folder::Games),
     MenuEntry::App(App::Calendar),
     MenuEntry::App(App::Calculator),
@@ -1549,7 +1552,7 @@ impl Desktop {
         self.windows.push(Window { app, x, y, w, h, minimized: false, restore: None });
         self.order.push(app);
         // The editors want all the room they can get.
-        if matches!(app, App::Photos | App::Documents | App::Movie | App::Videos | App::Pinball | App::Shooter | App::Writer | App::Pdf | App::TextEdit | App::Calendar) {
+        if matches!(app, App::Photos | App::Documents | App::Movie | App::Videos | App::Pinball | App::Shooter | App::Writer | App::Pdf | App::TextEdit | App::Calendar | App::Paint) {
             self.set_maximized(app, true);
         }
         kprintln!("solon: open {}", app.name());

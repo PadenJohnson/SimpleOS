@@ -167,3 +167,52 @@ impl Image {
         Image { w: dw, h: dh, px, opaque }
     }
 }
+
+/// Encode as a PNG (8-bit RGB, or RGBA if any pixel isn't opaque).
+pub fn encode_png(img: &Image) -> Vec<u8> {
+    let alpha = !img.opaque && img.px.iter().any(|p| p >> 24 != 255);
+    let bpp = if alpha { 4 } else { 3 };
+    let mut raw = Vec::with_capacity((img.w * bpp + 1) * img.h);
+    for y in 0..img.h {
+        // Filter "Up" for rows after the first (compresses pictures well, costs nothing).
+        let filt = if y == 0 { 0 } else { 2 };
+        raw.push(filt);
+        for x in 0..img.w {
+            let p = img.px[y * img.w + x];
+            let px = [(p >> 16) as u8, (p >> 8) as u8, p as u8, (p >> 24) as u8];
+            if filt == 2 {
+                let q = img.px[(y - 1) * img.w + x];
+                let up = [(q >> 16) as u8, (q >> 8) as u8, q as u8, (q >> 24) as u8];
+                for k in 0..bpp {
+                    raw.push(px[k].wrapping_sub(up[k]));
+                }
+            } else {
+                raw.extend_from_slice(&px[..bpp]);
+            }
+        }
+    }
+    let z = miniz_oxide::deflate::compress_to_vec_zlib(&raw, 6);
+    let mut out = Vec::from(&b"\x89PNG\r\n\x1a\n"[..]);
+    let chunk = |out: &mut Vec<u8>, t: &[u8], d: &[u8]| {
+        out.extend_from_slice(&(d.len() as u32).to_be_bytes());
+        let start = out.len();
+        out.extend_from_slice(t);
+        out.extend_from_slice(d);
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in &out[start..] {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 { 0xEDB8_8320 ^ (crc >> 1) } else { crc >> 1 };
+            }
+        }
+        out.extend_from_slice(&(!crc).to_be_bytes());
+    };
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&(img.w as u32).to_be_bytes());
+    ihdr.extend_from_slice(&(img.h as u32).to_be_bytes());
+    ihdr.extend_from_slice(&[8, if alpha { 6 } else { 2 }, 0, 0, 0]);
+    chunk(&mut out, b"IHDR", &ihdr);
+    chunk(&mut out, b"IDAT", &z);
+    chunk(&mut out, b"IEND", &[]);
+    out
+}

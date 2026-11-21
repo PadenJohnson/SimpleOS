@@ -11,6 +11,7 @@ pub fn all() -> Vec<(App, Box<dyn DocApp>)> {
         (App::Writer, DocShell::new(&crate::writer::KIND, crate::writer::new_doc, crate::writer::load) as Box<dyn DocApp>),
         (App::Pdf, DocShell::new(&crate::pdfui::KIND, crate::pdfui::new_doc, crate::pdfui::load) as Box<dyn DocApp>),
         (App::TextEdit, DocShell::new(&crate::textedit::KIND, crate::textedit::new_doc, crate::textedit::load) as Box<dyn DocApp>),
+        (App::Paint, DocShell::new(&crate::paint::KIND, crate::paint::new_doc, crate::paint::load) as Box<dyn DocApp>),
     ])
 }
 
