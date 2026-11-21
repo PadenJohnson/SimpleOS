@@ -8,9 +8,12 @@ SimpleOS (internally "Solon") is a small operating system written from scratch i
 nothing to download.
 
 **Working now**
-- Desktop with Photos, Videos, Video Editor, Documents, Printers, Import, Files, Disks, Settings and Games
-- Desktop: a taskbar along the bottom with an Applications menu and a button per open
-  window; several apps open at once in windows that move, minimize and maximize
+- Desktop with Photos, Videos, Video Editor, Documents (Writer, Spreadsheets, PDF, Text Editor),
+  Printers, Import, Files, Disks, Settings and Games
+- Desktop: light wallpapers with a big clock, a floating dock (Applications button, pinned
+  apps and folders, open apps, clock, power) and a centred Applications launcher; several
+  apps open at once in rounded windows that move, minimize and maximize. Smooth Noto Sans
+  and Noto Serif fonts throughout
 - Photos: thumbnail grid, full-screen viewer, and a Lightroom-style editor: histogram, Auto,
   Light (exposure, contrast, highlights, shadows, whites, blacks), Color (temperature, tint,
   vibrance, saturation, black & white), Effects (clarity, vignette, sharpen, fade), 12
@@ -25,11 +28,21 @@ nothing to download.
 - Files: browse Solon storage and USB drives; new folder, rename, move; Delete goes to a
   Recycle bin (restore, delete forever, empty); copy folders and files from USB drives into
   Solon and from Solon onto USB drives. Photos shows every photo in Solon storage.
-- Documents: a spreadsheet app that opens and saves Excel (.xlsx) and CSV files from Solon
-  storage or USB drives. Formulas (SUM, AVERAGE, IF, ROUND, SUMIF and more, recalculated as
-  you type), bold, text and fill colours, number formats (money, percent, dates), column
-  widths, several sheets, undo, copy/paste, fill down, and printing. Charts, pictures and
-  merged cells in Excel files aren't kept when saving.
+- Documents (a folder in the Applications menu):
+  - Writer: a word processor that opens and saves Word (.docx) files: fonts and sizes, bold,
+    italic, underline, colours, highlighting, headings, alignment, bullets and numbering,
+    page breaks, undo, printing and Save as PDF. Pictures and table layout in Word files
+    aren't kept yet.
+  - PDF: view any PDF, add text, draw, highlight, sign with the mouse, turn/move/delete
+    pages, add pages from other PDFs or photos, save and print; "PDF from photos" makes new
+    PDFs. Opens protected PDFs that have no open password.
+  - Text Editor: plain text and code files, keeping their encoding and line endings; wrap,
+    find and replace, bigger text, printing.
+  - Spreadsheets: opens and saves Excel (.xlsx) and CSV files from Solon
+    storage or USB drives. Formulas (SUM, AVERAGE, IF, ROUND, SUMIF and more, recalculated as
+    you type), bold, text and fill colours, number formats (money, percent, dates), column
+    widths, several sheets, undo, copy/paste, fill down, and printing. Charts, pictures and
+    merged cells in Excel files aren't kept when saving.
 - Videos: every video in Solon storage with a picture of each; plays phone and camera
   videos with sound (play/pause, drag along the bar to jump, arrow keys for 5 seconds).
   Solon's own decoders: H.264 (Baseline, Main and High profile, as phones and cameras record
@@ -123,7 +136,7 @@ card whose output is saved to `test-outsound.wav`; with `-Cmdline "soundtest"` i
 
 - `src/`: the kernel. `main.rs` boots; `desktop.rs`, `photos.rs`, `editor.rs`, `import.rs`,
   `files.rs`, `diskmgr.rs`, `documents.rs`, `sheetui.rs`, `movieui.rs`, `settingsui.rs` and `printui.rs` are
-  the apps; `movie.rs` is the video editor's engine; `video/` holds the H.264 encoder and decoder (CAVLC and CABAC), AAC, FLAC, MP4 and AVI/WAV code (`tables.rs`: standard tables from FFmpeg); `videos.rs` is the player; `games/` holds the games;
+  the apps; `movie.rs` is the video editor's engine; `video/` holds the H.264 encoder and decoder (CAVLC and CABAC), AAC, FLAC, MP4 and AVI/WAV code (`tables.rs`: standard tables from FFmpeg); `videos.rs` is the player; `games/` holds the games; `writer/` is Writer (with .docx), `pdf/` reads, draws and writes PDFs (`pdfui.rs` is the PDF app), `textedit.rs` the Text Editor and `docshell.rs` what those three share; `font.rs` and `raster.rs` draw text (fonts/: Noto Sans and Noto Serif, SIL Open Font License, see fonts/OFL.txt);
   `doc/` reads and writes spreadsheets (zip, XML, formulas, xlsx, csv); `xhci.rs`, `ehci.rs`, `usb.rs`, `msc.rs`, `usbprint.rs`, `nvme.rs`, `hda.rs` and
   `ahci.rs` are drivers; `fs/` holds partition tables, FAT and exFAT; `library.rs` is the
   photo library; `print.rs` lays out pages and speaks PCL / IPP.
