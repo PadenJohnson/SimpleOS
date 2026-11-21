@@ -822,6 +822,9 @@ impl Desktop {
             if self.is_open(App::Disks) {
                 self.disks.refresh(&mut self.storage, &mut self.usb);
             }
+            if self.is_open(App::Videos) && !self.videos.playing() {
+                self.videos.opened(&mut self.storage, &mut self.usb);
+            }
             if !self.backup.busy() {
                 let before: Vec<(u32, usize)> = self.backup.drives.iter().map(|d| (d.drive, d.vol)).collect();
                 self.backup.refresh(&mut self.storage, &mut self.usb);
@@ -862,7 +865,7 @@ impl Desktop {
             redraw |= self.movie_action(a, now);
         }
         if let Some(win) = self.windows.iter().find(|w| w.app == App::Videos) {
-            let visible = !win.minimized;
+            let visible = !win.minimized || self.videos.fullscreen();
             redraw |= matches!(self.videos.tick(now, &mut self.storage, &mut self.usb, visible), VideosAction::Redraw);
         }
         // Started in a resolution being tried? Ask whether to keep it; go back if nobody answers.
@@ -2030,6 +2033,10 @@ impl Desktop {
             ss.draw(c, &self.settings);
             return;
         }
+        if self.videos.fullscreen() {
+            self.videos.draw(c, Rect::new(0, 0, w, h));
+            return;
+        }
 
         if self.dock_icons.is_empty() {
             self.make_icons();
@@ -2373,6 +2380,26 @@ impl Desktop {
             }
             self.last_input = now;
         }
+        if self.videos.fullscreen() && !self.screen_off {
+            let full = Rect::new(0, 0, self.w, self.h);
+            let released = buttons & 1 == 0 && prev & 1 != 0;
+            let mut redraw = moved && self.videos.on_move();
+            if wheel != 0 {
+                redraw |= self.videos.on_wheel(wheel, full);
+            }
+            if pressed {
+                let a = self.videos.on_press(x, y, full, now, &mut self.storage, &mut self.usb);
+                self.capture = true;
+                redraw |= matches!(a, VideosAction::Redraw);
+            } else if released && self.capture {
+                self.capture = false;
+                redraw |= self.videos.on_release();
+            } else if buttons & 1 != 0 && self.capture {
+                redraw |= self.videos.on_drag(x, y, full);
+            }
+            // Leaving full screen (Back or Exit full) shows the desktop again.
+            return redraw || !self.videos.fullscreen();
+        }
         if self.screen_off {
             // Any mouse movement or click wakes the screen.
             self.screen_off = false;
@@ -2611,6 +2638,9 @@ impl Desktop {
             }
             self.end_slideshow();
             return true;
+        }
+        if self.videos.fullscreen() {
+            return self.videos.on_key(sc).is_some_and(|a| matches!(a, VideosAction::Redraw));
         }
         if self.display_trial.is_some() && sc & 0x80 == 0 {
             match sc {

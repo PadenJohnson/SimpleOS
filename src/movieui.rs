@@ -56,14 +56,21 @@ impl Io for LibIo<'_> {
                 let len = (len as u64).min(entry.size.saturating_sub(off)) as usize;
                 self.storage.read_part(self.usb, entry, off, len).ok()
             }
-            Source::Usb { .. } => None,
+            Source::Usb { drive, vol, entry } => {
+                let len = (len as u64).min(entry.size.saturating_sub(off)) as usize;
+                if self.usb.is_phone(*drive) {
+                    self.usb.read_part(*drive, entry, off, len).ok()
+                } else {
+                    self.usb.drive_read_part(*drive, *vol, entry, off, len).ok()
+                }
+            }
         }
     }
     fn read_all(&mut self, src: &Source) -> Option<Vec<u8>> {
         match src {
             Source::Memory(b) => Some(b.to_vec()),
             Source::Library { entry, .. } => self.storage.read_file(self.usb, entry).ok(),
-            Source::Usb { .. } => None,
+            Source::Usb { drive, vol, entry } => self.usb.read_file(*drive, *vol, entry).ok(),
         }
     }
 }

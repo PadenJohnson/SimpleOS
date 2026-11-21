@@ -420,15 +420,11 @@ impl Volume {
 }
 
 impl Volume {
-    /// Part of a file (exFAT reads just that part; FAT reads the file and cuts it).
+    /// Part of a file.
     pub fn read_part(&mut self, dev: &mut dyn BlockDev, file: &DirEntry, offset: u64, len: usize) -> Result<Vec<u8>, FsError> {
         match &mut self.fs {
             FsImpl::ExFat(e) => e.read_part(&mut self.io, dev, file, offset, len),
-            FsImpl::Fat(_) => {
-                let all = self.read_file(dev, file)?;
-                let s = (offset as usize).min(all.len());
-                Ok(all[s..(s + len).min(all.len())].to_vec())
-            }
+            FsImpl::Fat(f) => f.read_part(&mut self.io, dev, file, offset, len),
         }
     }
 }

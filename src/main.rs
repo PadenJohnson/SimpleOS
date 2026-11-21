@@ -26,6 +26,7 @@ mod ehci;
 mod files;
 mod font;
 mod frame;
+mod media;
 mod fs;
 mod games;
 mod gfx;

@@ -24,6 +24,9 @@ pub struct Fat {
     /// FSInfo free count has been invalidated (FAT32) since mounting.
     fsinfo_cleared: bool,
     fsinfo_sector: u64,
+    /// The cluster chain of the file last read in parts (videos), so each part doesn't
+    /// walk the FAT from the start.
+    chain_cache: Option<(u32, Vec<u32>)>,
 }
 
 /// Does this boot sector look like FAT (any variant)?
@@ -93,6 +96,7 @@ impl Fat {
             hint: 2,
             fsinfo_cleared: false,
             fsinfo_sector: if kind == FsKind::Fat32 { le16(b, 48) as u64 } else { 0 },
+            chain_cache: None,
         };
         let mut io = VolumeIo::new(start, bps as usize);
         // The label in the root directory wins over the (often stale) boot sector copy.
@@ -284,6 +288,29 @@ impl Fat {
         self.read_clusters(io, dev, &chain[..need], &mut out)?;
         out.truncate(f.size as usize);
         Ok(out)
+    }
+
+    /// Part of a file (videos are read a piece at a time).
+    pub fn read_part(&mut self, io: &mut VolumeIo, dev: &mut dyn BlockDev, f: &DirEntry, offset: u64, len: usize) -> Result<Vec<u8>, FsError> {
+        let end = (offset + len as u64).min(f.size);
+        if offset >= end {
+            return Ok(Vec::new());
+        }
+        let cb = self.cluster_bytes() as u64;
+        if !matches!(&self.chain_cache, Some((first, _)) if *first == f.first_cluster) {
+            let need = ((f.size + cb - 1) / cb) as usize;
+            let chain = self.chain(io, dev, f.first_cluster, need + 1)?;
+            if chain.len() < need {
+                return Err(FsError::Corrupt);
+            }
+            self.chain_cache = Some((f.first_cluster, chain));
+        }
+        let (c0, c1) = ((offset / cb) as usize, ((end + cb - 1) / cb) as usize);
+        let chain = self.chain_cache.as_ref().map(|c| c.1[c0..c1].to_vec()).unwrap_or_default();
+        let mut out = Vec::with_capacity(chain.len() * cb as usize);
+        self.read_clusters(io, dev, &chain, &mut out)?;
+        let s = (offset - c0 as u64 * cb) as usize;
+        Ok(out[s..s + (end - offset) as usize].to_vec())
     }
 }
 
@@ -633,6 +660,7 @@ impl Fat {
     /// Add a new file (`data` = Some) or folder (None) to `dir`. Nothing existing is changed
     /// except that `dir` may grow.
     pub fn create(&mut self, io: &mut VolumeIo, dev: &mut dyn BlockDev, dir: &DirEntry, name: &str, data: Option<&[u8]>) -> Result<DirEntry, FsError> {
+        self.chain_cache = None; // the drive is changing
         if name.is_empty() || name.len() > 255 || name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) {
             return Err(FsError::Exists);
         }
@@ -768,6 +796,7 @@ impl Fat {
 
     /// Delete a file (not a folder). Ok(false) if there's no such file.
     pub fn delete_file(&mut self, io: &mut VolumeIo, dev: &mut dyn BlockDev, dir: &DirEntry, name: &str) -> Result<bool, FsError> {
+        self.chain_cache = None; // the drive is changing
         let Some((lfn, short, e)) = self.records(io, dev, dir, name)? else { return Ok(false) };
         if e[11] & 0x10 != 0 {
             return Err(FsError::Exists);
@@ -787,6 +816,7 @@ impl Fat {
     /// `source`'s entry and `target`'s old data. The switch is one 32-byte record in one
     /// sector, so after a power cut either the old or the new data is there, never neither.
     pub fn swap_in(&mut self, io: &mut VolumeIo, dev: &mut dyn BlockDev, dir: &DirEntry, target: &str, source: &str) -> Result<(), FsError> {
+        self.chain_cache = None; // the drive is changing
         let (_, t_short, t) = self.records(io, dev, dir, target)?.ok_or(FsError::Io)?;
         let (s_lfn, s_short, s) = self.records(io, dev, dir, source)?.ok_or(FsError::Io)?;
         self.clear_fsinfo(io, dev)?;

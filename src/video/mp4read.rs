@@ -39,6 +39,10 @@ pub struct Track {
     /// Rotation from the track matrix (phones filming upright): 0, 90, 180 or 270.
     pub rotation: u32,
     pub samples: Vec<Sample>,
+    /// The sample entry's four-character code and the boxes inside it (codec settings),
+    /// for formats this reader doesn't decode itself.
+    pub fourcc: [u8; 4],
+    pub kids: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -58,7 +62,7 @@ fn be64(b: &[u8], o: usize) -> u64 {
 }
 
 /// Boxes inside `d`: (type, body start, body end).
-fn boxes(d: &[u8]) -> Vec<([u8; 4], usize, usize)> {
+pub fn boxes(d: &[u8]) -> Vec<([u8; 4], usize, usize)> {
     let mut out = Vec::new();
     let mut p = 0;
     while p + 8 <= d.len() {
@@ -80,7 +84,7 @@ fn boxes(d: &[u8]) -> Vec<([u8; 4], usize, usize)> {
     out
 }
 
-fn find<'a>(d: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
+pub fn find<'a>(d: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
     boxes(d).into_iter().find(|b| &b.0 == kind).map(|b| &d[b.1..b.2])
 }
 
@@ -159,12 +163,13 @@ fn parse_trak(t: &[u8]) -> Option<Track> {
     let entry = boxes(stsd.get(8..)?).into_iter().next()?;
     let e = &stsd[8 + entry.1..8 + entry.2];
     let fourcc = entry.0;
-    let mut tr = Track { video, codec: Codec::Other(String::from_utf8_lossy(&fourcc).into_owned()), timescale: timescale.max(1), duration, width: 0, height: 0, channels: 0, rate: 0, rotation, samples: Vec::new() };
+    let mut tr = Track { video, codec: Codec::Other(String::from_utf8_lossy(&fourcc).into_owned()), timescale: timescale.max(1), duration, width: 0, height: 0, channels: 0, rate: 0, rotation, samples: Vec::new(), fourcc, kids: Vec::new() };
     if video {
         if e.len() >= 78 {
             tr.width = be16(e, 24) as u32;
             tr.height = be16(e, 26) as u32;
         }
+        tr.kids = e.get(78..).unwrap_or(&[]).to_vec();
         if &fourcc == b"avc1" || &fourcc == b"avc3" {
             if let Some(avcc) = e.get(78..).and_then(|x| find(x, b"avcC")) {
                 tr.codec = Codec::H264 { avcc: avcc.to_vec() };
@@ -179,6 +184,7 @@ fn parse_trak(t: &[u8]) -> Option<Track> {
             2 => 28 + 36,
             _ => 28,
         };
+        tr.kids = e.get(skip..).unwrap_or(&[]).to_vec();
         if &fourcc == b"mp4a" {
             // esds may sit directly inside, or inside a 'wave' box (old QuickTime).
             let kids = e.get(skip..).unwrap_or(&[]);
