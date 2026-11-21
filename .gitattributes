@@ -1,0 +1,3 @@
+# Secure Boot: shim reads the SBAT data byte for byte, and the boot programs are binary.
+secureboot/sbat.csv text eol=lf
+*.efi binary
