@@ -9,11 +9,12 @@ use crate::docshell::{has_ext, DocApp, DocShell};
 pub fn all() -> Vec<(App, Box<dyn DocApp>)> {
     Vec::from([
         (App::Writer, DocShell::new(&crate::writer::KIND, crate::writer::new_doc, crate::writer::load) as Box<dyn DocApp>),
+        (App::Pdf, DocShell::new(&crate::pdfui::KIND, crate::pdfui::new_doc, crate::pdfui::load) as Box<dyn DocApp>),
         (App::TextEdit, DocShell::new(&crate::textedit::KIND, crate::textedit::new_doc, crate::textedit::load) as Box<dyn DocApp>),
     ])
 }
 
 /// Does one of them open this file?
 pub fn opens_any(name: &str) -> bool {
-    has_ext(name, crate::writer::KIND.exts) || has_ext(name, crate::textedit::KIND.exts)
+    has_ext(name, crate::writer::KIND.exts) || has_ext(name, crate::pdfui::KIND.exts) || has_ext(name, crate::textedit::KIND.exts)
 }

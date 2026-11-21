@@ -41,6 +41,7 @@ mod msc;
 mod nvme;
 mod pci;
 mod pdf;
+mod pdfui;
 mod raster;
 mod phone;
 mod photos;

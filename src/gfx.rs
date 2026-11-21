@@ -69,6 +69,7 @@ impl Rect {
     }
 }
 
+#[derive(Clone)]
 pub struct Canvas {
     pub w: usize,
     pub h: usize,
@@ -376,6 +377,19 @@ impl Canvas {
                     }
                 }
             }
+        }
+    }
+}
+
+impl Canvas {
+    /// Copy another canvas in with its top-left at (x, y) (clipped).
+    pub fn blit(&mut self, src: &Canvas, x: i32, y: i32) {
+        let Some((x0, y0, x1, y1)) = self.clip(x, y, src.w as i32, src.h as i32) else { return };
+        for row in y0..y1 {
+            let sy = (row as i32 - y) as usize;
+            let sx = (x0 as i32 - x) as usize;
+            let s = &src.px[sy * src.w + sx..sy * src.w + sx + (x1 - x0)];
+            self.px[row * self.w + x0..row * self.w + x1].copy_from_slice(s);
         }
     }
 }
