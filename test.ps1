@@ -147,9 +147,15 @@ try {
             }
             "type"     {
                 # "type:text" types letters, digits, space and = - . , ; / (lowercase)
+                # Capitals and ! ? : ( ) ' " are typed with Shift.
                 foreach ($ch in $arg.ToCharArray()) {
-                    $q = switch ($ch) { " " { "spc" } "=" { "equal" } "-" { "minus" } "." { "dot" } "," { "comma" } ";" { "semicolon" } "/" { "slash" } default { [string]$ch } }
-                    Send-Qmp "{`"execute`":`"send-key`",`"arguments`":{`"keys`":[{`"type`":`"qcode`",`"data`":`"$q`"}]}}"; Start-Sleep -Milliseconds 60
+                    $shifted = @{ '!' = '1'; '@' = '2'; '#' = '3'; '$' = '4'; '%' = '5'; '(' = '9'; ')' = '0'; '?' = 'slash'; ':' = 'semicolon'; '"' = 'apostrophe'; '_' = 'minus'; '+' = 'equal' }
+                    $shift = $false
+                    if ($shifted.ContainsKey([string]$ch)) { $q = $shifted[[string]$ch]; $shift = $true }
+                    elseif ([char]::IsUpper($ch)) { $q = [string]([char]::ToLower($ch)); $shift = $true }
+                    else { $q = switch ($ch) { " " { "spc" } "=" { "equal" } "-" { "minus" } "." { "dot" } "," { "comma" } ";" { "semicolon" } "/" { "slash" } "'" { "apostrophe" } default { [string]$ch } } }
+                    $keys = if ($shift) { "{`"type`":`"qcode`",`"data`":`"shift`"},{`"type`":`"qcode`",`"data`":`"$q`"}" } else { "{`"type`":`"qcode`",`"data`":`"$q`"}" }
+                    Send-Qmp "{`"execute`":`"send-key`",`"arguments`":{`"keys`":[$keys]}}"; Start-Sleep -Milliseconds 60
                 }
             }
             "move"     {

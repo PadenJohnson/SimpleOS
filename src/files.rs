@@ -529,7 +529,7 @@ impl Files {
             self.scroll = 0;
             self.refresh(storage, usb);
             FilesAction::Redraw
-        } else if crate::library::is_document(&e.name) {
+        } else if crate::library::is_document(&e.name) || crate::docapps::opens_any(&e.name) {
             let dir = self.path.last().cloned().unwrap();
             FilesAction::OpenDocument(match self.place {
                 Place::Usb { drive, vol } => crate::documents::DocSrc::Usb { drive, vol, entry: e },
@@ -538,7 +538,7 @@ impl Files {
         } else if is_photo(&e.name) {
             self.photos_here(&e)
         } else {
-            self.dialog = Dialog::Message(String::from("Solon can only open photos and spreadsheets (.xlsx, .csv) so far."));
+            self.dialog = Dialog::Message(String::from("Solon can't open this kind of file yet."));
             FilesAction::Redraw
         }
     }

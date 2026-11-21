@@ -285,6 +285,8 @@ pub struct Desktop {
     disks: DiskMgr,
     copy: Option<CopyJob>,
     docs: DocsApp,
+    /// Writer, PDF and the Text Editor.
+    doc_apps: Vec<(App, alloc::boxed::Box<dyn crate::docshell::DocApp>)>,
     movie: MovieApp,
     videos: VideosApp,
     /// Spreadsheet pages waiting to be printed (on the next tick, after the notice shows).
@@ -403,6 +405,7 @@ impl Desktop {
             disks: DiskMgr::new(),
             copy: None,
             docs: DocsApp::new(),
+            doc_apps: crate::docapps::all(),
             movie: MovieApp::new(),
             videos: VideosApp::new(),
             pending_sheet_print: None,
@@ -1180,8 +1183,48 @@ impl Desktop {
         }
     }
 
-    /// Open a spreadsheet from the Files app.
+    fn doc_index(&self, app: App) -> Option<usize> {
+        self.doc_apps.iter().position(|(a, _)| *a == app)
+    }
+
+    /// What Writer, PDF or the Text Editor asked for.
+    fn doc_app_action(&mut self, k: usize, a: DocsAction, now: u64) -> bool {
+        match a {
+            DocsAction::None => false,
+            DocsAction::Redraw => true,
+            DocsAction::Toast(msg) => {
+                self.toast = Some((msg, now + 5 * HZ));
+                if !self.doc_apps[k].1.editing() {
+                    self.doc_apps[k].1.refresh(&mut self.storage, &mut self.usb);
+                }
+                self.refresh_storage_view();
+                true
+            }
+            DocsAction::WantPrinters => {
+                let printers = self.printers();
+                kprintln!("print: {} dialog opened, {} printer(s)", self.doc_apps[k].0.name(), printers.len());
+                self.doc_apps[k].1.start_print(printers);
+                true
+            }
+            DocsAction::Print { pages, layout, printer } => {
+                self.toast = Some((format!("Preparing {} page(s) for {}...", pages.len(), printer.name), now + 60 * HZ));
+                self.pending_sheet_print = Some((pages, layout, printer));
+                true
+            }
+        }
+    }
+
+    /// Open a document from the Files app, in whichever app handles it.
     fn open_document(&mut self, src: DocSrc, now: u64) -> bool {
+        let name = match &src {
+            DocSrc::Library { entry, .. } | DocSrc::Usb { entry, .. } => entry.name.clone(),
+        };
+        if let Some(k) = self.doc_apps.iter().position(|(_, d)| d.opens(&name)) {
+            let app = self.doc_apps[k].0;
+            self.open(app);
+            let a = self.doc_apps[k].1.open_src(src, &mut self.storage, &mut self.usb);
+            return self.doc_app_action(k, a, now);
+        }
         self.open(App::Documents);
         let a = self.docs.open_src(src, &mut self.storage, &mut self.usb);
         self.docs_action(a, now)
@@ -1429,7 +1472,7 @@ impl Desktop {
         self.windows.push(Window { app, x, y, w, h, minimized: false, restore: None });
         self.order.push(app);
         // The editors want all the room they can get.
-        if matches!(app, App::Photos | App::Documents | App::Movie | App::Videos | App::Pinball | App::Shooter) {
+        if matches!(app, App::Photos | App::Documents | App::Movie | App::Videos | App::Pinball | App::Shooter | App::Writer | App::Pdf | App::TextEdit) {
             self.set_maximized(app, true);
         }
         kprintln!("solon: open {}", app.name());
@@ -1441,6 +1484,11 @@ impl Desktop {
         }
         if app == App::Disks {
             self.disks.refresh(&mut self.storage, &mut self.usb);
+        }
+        if let Some(k) = self.doc_index(app) {
+            if !self.doc_apps[k].1.editing() {
+                self.doc_apps[k].1.refresh(&mut self.storage, &mut self.usb);
+            }
         }
         if app == App::Documents && !self.docs.editing() {
             self.docs.refresh(&mut self.storage, &mut self.usb);
@@ -1711,7 +1759,7 @@ impl Desktop {
             if win.minimized {
                 continue;
             }
-            let title = if win.app == App::Documents { self.docs.title() } else { None };
+            let title = if win.app == App::Documents { self.docs.title() } else { self.doc_index(win.app).and_then(|k| self.doc_apps[k].1.title()) };
             let icon = Self::icon_img(&self.title_icons, icons::Icon::App(win.app));
             draw_frame(c, win, title.as_deref().unwrap_or(win.app.name()), focus == Some(i), icon);
             let body = win.body();
@@ -1724,6 +1772,10 @@ impl Desktop {
                 App::Files => self.files.draw(c, body, &self.storage, &self.usb),
                 App::Disks => self.disks.draw(c, body, &self.storage),
                 App::Documents => self.docs.draw(c, body),
+                app if self.doc_index(app).is_some() => {
+                    let k = self.doc_index(app).unwrap();
+                    self.doc_apps[k].1.draw(c, body)
+                }
                 App::Movie => self.movie.draw(c, body),
                 App::Videos => self.videos.draw(c, body),
                 app if app.game().is_some() => self.games.draw(app.game().unwrap(), c, body),
@@ -1760,6 +1812,10 @@ impl Desktop {
             App::Files => self.files.on_wheel(wheel, body),
             App::Disks => self.disks.on_wheel(wheel, body),
             App::Documents => self.docs.on_wheel(wheel, body),
+            app if self.doc_index(app).is_some() => {
+                let k = self.doc_index(app).unwrap();
+                self.doc_apps[k].1.on_wheel(wheel, body)
+            }
             App::Movie => self.movie.on_wheel(wheel, x, y, body),
             App::Videos => self.videos.on_wheel(wheel, body),
             _ => false,
@@ -1790,6 +1846,12 @@ impl Desktop {
                 let a = self.docs.on_press(x, y, body, now, &mut self.storage, &mut self.usb);
                 self.capture = true;
                 redraw |= self.docs_action(a, now);
+            }
+            app if self.doc_index(app).is_some() => {
+                let k = self.doc_index(app).unwrap();
+                let a = self.doc_apps[k].1.on_press(x, y, body, now, &mut self.storage, &mut self.usb);
+                self.capture = true;
+                redraw |= self.doc_app_action(k, a, now);
             }
             App::Movie => {
                 let a = self.movie.on_press(x, y, body, now, &mut self.storage, &mut self.usb);
@@ -1857,6 +1919,11 @@ impl Desktop {
             App::Files => self.files.on_key(sc, body, &mut self.storage, &mut self.usb).map(|a| self.files_action(a, Self::now())),
             App::Disks => self.disks.on_key(sc).map(|a| self.disk_action(a, Self::now())),
             App::Documents => self.docs.on_key(sc, body, &mut self.storage, &mut self.usb).map(|a| self.docs_action(a, Self::now())),
+            app if self.doc_index(app).is_some() => {
+                let k = self.doc_index(app).unwrap();
+                let a = self.doc_apps[k].1.on_key(sc, body, &mut self.storage, &mut self.usb)?;
+                Some(self.doc_app_action(k, a, Self::now()))
+            }
             App::Movie => self.movie.on_key(sc).map(|a| self.movie_action(a, Self::now())),
             App::Videos => self.videos.on_key(sc).map(|a| matches!(a, VideosAction::Redraw)),
             app if app.game().is_some() => self.games.key(app.game().unwrap(), sc, Self::now()),
@@ -1907,6 +1974,10 @@ impl Desktop {
                     self.capture = false;
                     return redraw | match app {
                         App::Documents => self.docs.on_release(),
+                        app if self.doc_index(app).is_some() => {
+                            let k = self.doc_index(app).unwrap();
+                            self.doc_apps[k].1.on_release()
+                        }
                         App::Movie => self.movie.on_release(),
                         App::Videos => self.videos.on_release(),
                         app if app.game().is_some() => self.games.release(app.game().unwrap(), body),
@@ -1916,6 +1987,10 @@ impl Desktop {
                 if buttons & 1 != 0 {
                     return redraw | match app {
                         App::Documents => self.docs.on_drag(x, y, body),
+                        app if self.doc_index(app).is_some() => {
+                            let k = self.doc_index(app).unwrap();
+                            self.doc_apps[k].1.on_drag(x, y, body)
+                        }
                         App::Movie => self.movie.on_drag(x, y, body),
                         App::Videos => self.videos.on_drag(x, y, body),
                         app if app.game().is_some() => self.games.drag(app.game().unwrap(), x, y),

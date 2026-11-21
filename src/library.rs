@@ -462,6 +462,11 @@ impl Storage {
 
     /// Every spreadsheet (.xlsx, .csv) in Solon storage as (folder, file).
     pub fn all_documents(&mut self, usb: &mut Usb) -> Vec<(DirEntry, DirEntry)> {
+        self.all_files(usb, &is_document)
+    }
+
+    /// Every file whose name passes `want`, in Solon storage, as (folder, file).
+    pub fn all_files(&mut self, usb: &mut Usb, want: &dyn Fn(&str) -> bool) -> Vec<(DirEntry, DirEntry)> {
         let mut out = Vec::new();
         let Ok(root) = self.root(usb) else { return out };
         let mut stack = Vec::from([(root, 0u32)]);
@@ -472,7 +477,7 @@ impl Storage {
                     if !hidden && depth < 8 {
                         stack.push((e, depth + 1));
                     }
-                } else if is_document(&e.name) {
+                } else if want(&e.name) {
                     out.push((dir.clone(), e));
                 }
             }

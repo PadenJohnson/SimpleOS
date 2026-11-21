@@ -347,3 +347,35 @@ impl Canvas {
         }
     }
 }
+
+/// Monospaced text (the built-in Noto Sans Mono bitmaps), for the text editor: 16, 20 or 32 px.
+pub fn mono_raster(px: u8) -> noto_sans_mono_bitmap::RasterHeight {
+    use noto_sans_mono_bitmap::RasterHeight;
+    match px {
+        0..=17 => RasterHeight::Size16,
+        18..=25 => RasterHeight::Size20,
+        _ => RasterHeight::Size32,
+    }
+}
+
+/// Width of one monospaced character cell.
+pub fn mono_width(px: u8) -> i32 {
+    noto_sans_mono_bitmap::get_raster_width(noto_sans_mono_bitmap::FontWeight::Regular, mono_raster(px)) as i32
+}
+
+impl Canvas {
+    /// One monospaced character with its cell's top-left at (x, y).
+    pub fn mono_char(&mut self, x: i32, y: i32, ch: char, px: u8, c: u32) {
+        use noto_sans_mono_bitmap::{get_raster, FontWeight};
+        let g = get_raster(ch, FontWeight::Regular, mono_raster(px)).or_else(|| get_raster('?', FontWeight::Regular, mono_raster(px)));
+        if let Some(g) = g {
+            for (gy, row) in g.rows().enumerate() {
+                for (gx, &a) in row.iter().enumerate() {
+                    if a > 0 {
+                        self.blend(x + gx as i32, y + gy as i32, c, a as u32);
+                    }
+                }
+            }
+        }
+    }
+}
