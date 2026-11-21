@@ -314,6 +314,8 @@ pub struct Desktop {
     frame_app: crate::frame::FrameApp,
     /// The photo frame / screensaver, while it's showing.
     slideshow: Option<crate::frame::Slideshow>,
+    /// A scroll bar being dragged: the app, and where on the bar it was grabbed.
+    sb_drag: Option<(App, i32)>,
     /// When the mouse or keyboard was last used, and where the pointer was.
     last_input: u64,
     pointer: (i32, i32),
@@ -458,6 +460,7 @@ impl Desktop {
             backup: crate::backup::BackupApp::new(),
             frame_app: crate::frame::FrameApp::new(),
             slideshow: None,
+            sb_drag: None,
             last_input: 0,
             pointer: (-1, -1),
             calendar: crate::calendar::CalendarApp::new(),
@@ -618,7 +621,7 @@ impl Desktop {
 
     /// True while there's background work (photos to decode, an import), so the main loop shouldn't sleep.
     pub fn busy(&self) -> bool {
-        self.photos.needs_loading() || self.job.is_some() || self.copy.is_some() || self.disks.busy() || self.movie.exporting() || self.backup.busy() || self.slideshow.as_ref().map_or(false, |s| s.busy())
+        self.photos.needs_loading() || self.job.is_some() || self.copy.is_some() || self.disks.busy() || self.movie.exporting() || self.backup.busy() || self.import.busy() || self.slideshow.as_ref().map_or(false, |s| s.busy())
     }
 
     fn step_import(&mut self, now: u64) -> bool {
@@ -876,6 +879,9 @@ impl Desktop {
         if !self.backup.last_loaded && self.storage.library.is_some() {
             self.backup.load_last(&mut self.storage, &mut self.usb);
             redraw = true;
+        }
+        if self.import.busy() {
+            redraw |= self.import.step(&mut self.usb, now);
         }
         if self.backup.busy() {
             let a = self.backup.step(&mut self.storage, &mut self.usb, now);
@@ -2114,6 +2120,9 @@ impl Desktop {
                 app if app.game().is_some() => self.games.draw(app.game().unwrap(), c, body),
                 app => draw_placeholder(c, app, body),
             }
+            if let Some((area, max, scroll)) = self.scroll_info(app, body) {
+                crate::scrollbar::draw(c, area, max, scroll);
+            }
             c.reset_clip();
         }
 
@@ -2156,8 +2165,46 @@ impl Desktop {
         }
     }
 
+    /// Where an app's scrolling list is, how far it scrolls and where it is now (for the
+    /// scroll bar the desktop draws). None = no list to scroll right now.
+    fn scroll_info(&self, app: App, body: Rect) -> Option<(Rect, i32, i32)> {
+        match app {
+            App::Photos => self.photos.scroll_info(body),
+            App::Import => self.import.scroll_info(body, &self.usb),
+            App::Files => self.files.scroll_info(body),
+            App::Disks => self.disks.scroll_info(body),
+            App::Documents => self.docs.scroll_info(body),
+            App::Videos => self.videos.scroll_info(body),
+            app => self.doc_index(app).and_then(|k| self.doc_apps[k].1.scroll_info(body)),
+        }
+    }
+
+    fn set_scroll(&mut self, app: App, body: Rect, v: i32) {
+        match app {
+            App::Photos => self.photos.set_scroll(v),
+            App::Import => self.import.set_scroll(v),
+            App::Files => self.files.set_scroll(v),
+            App::Disks => self.disks.set_scroll(v),
+            App::Documents => self.docs.set_scroll(v),
+            App::Videos => self.videos.set_scroll(v),
+            app => {
+                if let Some(k) = self.doc_index(app) {
+                    self.doc_apps[k].1.set_scroll(v, body);
+                }
+            }
+        }
+    }
+
     fn app_press(&mut self, app: App, x: i32, y: i32, body: Rect, now: u64) -> bool {
         let mut redraw = false;
+        if let Some((area, max, scroll)) = self.scroll_info(app, body) {
+            if max > 0 && crate::scrollbar::hit(area).contains(x, y) {
+                let (v, grab) = crate::scrollbar::press(area, max, scroll, y);
+                self.set_scroll(app, body, v);
+                self.sb_drag = Some((app, grab));
+                return true;
+            }
+        }
         match app {
             App::Photos => {
                 redraw |= self.photos.on_press(x, y, body, now);
@@ -2356,6 +2403,22 @@ impl Desktop {
             }
         }
         // A press inside Photos/Documents keeps getting moves until release (editor drags).
+        if let Some((app, grab)) = self.sb_drag {
+            if released || buttons & 1 == 0 {
+                self.sb_drag = None;
+                return true;
+            }
+            if let Some(i) = self.index_of(app) {
+                let body = self.windows[i].body();
+                if let Some((area, max, _)) = self.scroll_info(app, body) {
+                    let v = crate::scrollbar::drag_to(area, max, y, grab);
+                    self.set_scroll(app, body, v);
+                    return true;
+                }
+            }
+            self.sb_drag = None;
+            return redraw;
+        }
         if self.capture {
             if let Some(i) = self.focused() {
                 let (app, body) = (self.windows[i].app, self.windows[i].body());

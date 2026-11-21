@@ -58,6 +58,7 @@ mod printui;
 mod ps2;
 mod rtc;
 mod screen;
+mod scrollbar;
 mod settings;
 mod settingsui;
 mod sheetui;

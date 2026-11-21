@@ -665,6 +665,21 @@ impl DocsApp {
         }
     }
 
+    pub fn scroll_info(&self, r: Rect) -> Option<(Rect, i32, i32)> {
+        if self.open.is_some() || !matches!(self.dialog, Dialog::None) {
+            return None;
+        }
+        let lib_extra = if self.usb_count > 0 { 34 } else { 0 };
+        let total = self.items.len() as i32 * ROW_H + 40 + lib_extra;
+        let top = Self::list_top(r);
+        let max = (total - (r.y + r.h - top)).max(0);
+        Some((Rect::new(r.x, top, r.w, r.y + r.h - top), max, self.scroll))
+    }
+    pub fn set_scroll(&mut self, v: i32) {
+        self.scroll = v.max(0);
+    }
+
+
     pub fn on_wheel(&mut self, delta: i8, r: Rect) -> bool {
         if let Some(o) = &mut self.open {
             return o.ed.on_wheel(delta);

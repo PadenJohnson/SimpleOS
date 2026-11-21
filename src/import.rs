@@ -69,6 +69,9 @@ pub struct Import {
     message: Option<String>,
     /// Waiting for the user to confirm storage setup: (disk, name, bytes, blank).
     confirm: Option<(usize, String, u64, bool)>,
+    /// A phone folder to open on a later tick (after "Reading the phone..." is on screen),
+    /// and the tick it was asked for.
+    pending: Option<(DirEntry, u64)>,
 }
 
 pub fn is_photo(name: &str) -> bool {
@@ -119,7 +122,7 @@ fn drive_rows(usb: &Usb) -> Vec<DriveRow> {
 
 impl Import {
     pub fn new() -> Self {
-        Import { folder: None, selected: None, scroll: 0, last_click: None, message: None, confirm: None }
+        Import { folder: None, selected: None, scroll: 0, last_click: None, message: None, confirm: None, pending: None }
     }
 
     fn row_count(&self, usb: &Usb) -> usize {
@@ -151,6 +154,14 @@ impl Import {
         Rect::new(r.x + 12, r.y + HEADER_H + 8 + v * ROW_H - self.scroll, r.w - 24, ROW_H - 4)
     }
 
+    pub fn scroll_info(&self, r: Rect, usb: &Usb) -> Option<(Rect, i32, i32)> {
+        self.confirm.is_none().then(|| (Self::list_area(r), self.max_scroll(usb, r), self.scroll))
+    }
+    pub fn set_scroll(&mut self, v: i32) {
+        self.scroll = v.max(0);
+    }
+
+
     fn max_scroll(&self, usb: &Usb, r: Rect) -> i32 {
         let rows = if self.folder.is_some() { self.row_count(usb) } else { drive_rows(usb).len().max(1) + 2 };
         (rows as i32 * ROW_H + 16 - Self::list_area(r).h).max(0)
@@ -161,11 +172,11 @@ impl Import {
     }
 
     fn import_button(r: Rect) -> Rect {
-        Rect::new(r.x + r.w - 12 - 200, r.y + 10, 200, 32)
+        Rect::new(r.x + r.w - 12 - 250, r.y + 10, 250, 32)
     }
 
     fn photos_button(r: Rect) -> Rect {
-        Rect::new(r.x + r.w - 12 - 200 - 12 - 170, r.y + 10, 170, 32)
+        Rect::new(r.x + r.w - 12 - 250 - 12 - 150, r.y + 10, 150, 32)
     }
 
     fn dialog(r: Rect) -> Rect {
@@ -189,6 +200,7 @@ impl Import {
     pub fn drives_changed(&mut self, usb: &Usb) {
         if let Some(f) = &self.folder {
             if !usb.has_drive(f.drive) {
+                self.pending = None;
                 self.folder = None;
                 self.selected = None;
                 self.scroll = 0;
@@ -415,7 +427,35 @@ impl Import {
         self.enter(usb, root);
     }
 
+    /// Open folder `dir`. Phones can take a while to answer, so for them the folder is
+    /// opened on a later tick, with a message on screen meanwhile.
     fn enter(&mut self, usb: &mut Usb, dir: DirEntry) {
+        if self.folder.as_ref().is_some_and(|f| f.phone && !f.path.is_empty()) {
+            self.message = Some(String::from("Reading the phone... this can take a moment"));
+            self.pending = Some((dir, crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed)));
+            return;
+        }
+        self.enter_now(usb, dir);
+    }
+
+    /// True while a phone folder is waiting to be read.
+    pub fn busy(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Read a waiting phone folder (once the message has been drawn). True = redraw.
+    pub fn step(&mut self, usb: &mut Usb, now: u64) -> bool {
+        match &self.pending {
+            Some((_, asked)) if now >= asked + 3 => {
+                let (dir, _) = self.pending.take().unwrap();
+                self.enter_now(usb, dir);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn enter_now(&mut self, usb: &mut Usb, dir: DirEntry) {
         let Some(f) = &mut self.folder else { return };
         self.message = None;
         match usb.list(f.drive, f.vol, &dir) {
@@ -439,6 +479,9 @@ impl Import {
     }
 
     fn back(&mut self, usb: &mut Usb) {
+        if self.pending.is_some() {
+            return;
+        }
         let Some(f) = &mut self.folder else { return };
         if f.path.len() <= 1 {
             self.folder = None;
@@ -524,6 +567,7 @@ impl Import {
                 }
                 Action::Redraw
             }
+            Some(_) if self.pending.is_some() => Action::None,
             Some(f) => {
                 let Some(e) = f.entries.get(i).cloned() else { return Action::None };
                 if e.is_dir {

@@ -676,6 +676,17 @@ impl DiskMgr {
         DiskAction::None
     }
 
+    pub fn scroll_info(&self, r: Rect) -> Option<(Rect, i32, i32)> {
+        if !matches!(self.dialog, Dialog::None) {
+            return None;
+        }
+        let total: i32 = self.views.iter().map(|v| card_h(v) + 12).sum::<i32>() + 2 * PAD + self.banner_h();
+        Some((r, (total - r.h).max(0), self.scroll))
+    }
+    pub fn set_scroll(&mut self, v: i32) {
+        self.scroll = v.max(0);
+    }
+
     pub fn on_wheel(&mut self, delta: i8, r: Rect) -> bool {
         let total: i32 = self.views.iter().map(|v| card_h(v) + 12).sum::<i32>() + 2 * PAD + self.banner_h();
         let max = (total - r.h).max(0);

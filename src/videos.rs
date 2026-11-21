@@ -462,6 +462,18 @@ impl VideosApp {
 
     // ---- input -------------------------------------------------------------------------------------
 
+    pub fn scroll_info(&self, r: Rect) -> Option<(Rect, i32, i32)> {
+        if self.player.is_some() {
+            return None;
+        }
+        let per = ((r.w - 20) / 230).max(1);
+        let rows = (self.items.len() as i32 + per - 1) / per;
+        Some((r, (rows * 190 + 60 - r.h).max(0), self.scroll))
+    }
+    pub fn set_scroll(&mut self, v: i32) {
+        self.scroll = v.max(0);
+    }
+
     pub fn on_wheel(&mut self, wheel: i8, r: Rect) -> bool {
         if self.player.is_some() {
             return false;

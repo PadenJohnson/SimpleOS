@@ -1,4 +1,4 @@
-﻿//! What Writer, PDF and the Text Editor have in common: the list of files they can open (in
+//! What Writer, PDF and the Text Editor have in common: the list of files they can open (in
 //! Solon storage and on USB drives), a "New" button, opening, saving (in place, or under a
 //! new name in Solon's Documents folder), "Save changes?", printing, and a file picker.
 //! Each app supplies an editor (the `DocEditor` trait) and a `Kind` describing itself.
@@ -64,6 +64,11 @@ pub trait DocEditor {
     }
     /// The file's name changed (after a save).
     fn renamed(&mut self, _name: &str) {}
+    /// For the desktop's scroll bar, if the editor wants one: (area, how far, where).
+    fn scroll_info(&self, _r: Rect) -> Option<(Rect, i32, i32)> {
+        None
+    }
+    fn set_scroll(&mut self, _v: i32, _r: Rect) {}
 }
 
 /// Describes one document app.
@@ -232,6 +237,9 @@ pub trait DocApp {
     fn on_release(&mut self) -> bool;
     fn on_wheel(&mut self, delta: i8, r: Rect) -> bool;
     fn on_key(&mut self, sc: u8, r: Rect, storage: &mut Storage, usb: &mut Usb) -> Option<DocsAction>;
+    /// For the desktop's scroll bar: (area, how far it scrolls, where it is).
+    fn scroll_info(&self, r: Rect) -> Option<(Rect, i32, i32)>;
+    fn set_scroll(&mut self, v: i32, r: Rect);
 }
 
 impl<E: DocEditor> DocShell<E> {
@@ -825,6 +833,27 @@ impl<E: DocEditor> DocApp for DocShell<E> {
         match &mut self.doc {
             Some(o) => o.ed.on_release(),
             None => false,
+        }
+    }
+
+    fn scroll_info(&self, r: Rect) -> Option<(Rect, i32, i32)> {
+        if !matches!(self.dialog, Dialog::None) {
+            return None;
+        }
+        if let Some(o) = &self.doc {
+            return o.ed.scroll_info(r);
+        }
+        let extra = if self.usb_count > 0 { 34 } else { 0 };
+        let total = self.items.len() as i32 * ROW_H + 40 + extra;
+        let top = Self::list_top(r);
+        let max = (total - (r.y + r.h - top)).max(0);
+        Some((Rect::new(r.x, top, r.w, r.y + r.h - top), max, self.scroll))
+    }
+
+    fn set_scroll(&mut self, v: i32, r: Rect) {
+        match &mut self.doc {
+            Some(o) => o.ed.set_scroll(v, r),
+            None => self.scroll = v.max(0),
         }
     }
 

@@ -72,8 +72,9 @@ impl core::ops::Deref for Bytes {
 
 enum State {
     Pending,
-    /// Screen-sized copy and a thumbnail.
-    Ready { image: Image, thumb: Image },
+    /// A thumbnail, and a screen-sized copy while the photo is being looked at (only one
+    /// photo keeps it, so thousands of photos fit in memory).
+    Ready { image: Option<Image>, thumb: Image },
     Failed(&'static str),
 }
 
@@ -97,6 +98,8 @@ pub struct Photos {
     mode: Mode,
     selected: Option<usize>,
     scroll: i32,
+    /// Grid: the first photo on screen and how many fit.
+    visible: (usize, usize),
     /// The viewed photo scaled to the current view area: (index, w, h, image).
     view_cache: Option<(usize, i32, i32, Image)>,
     last_click: Option<(usize, u64)>,
@@ -163,6 +166,7 @@ impl Photos {
             mode: Mode::Grid,
             selected: None,
             scroll: 0,
+            visible: (0, 0),
             view_cache: None,
             last_click: None,
             origin: String::new(),
@@ -214,7 +218,7 @@ impl Photos {
     /// Open the editor on photo `i` (it must be loaded).
     pub fn start_edit(&mut self, i: usize, can_save: bool, can_replace: bool, has_original: bool) -> bool {
         let Some(p) = self.photos.get(i) else { return false };
-        let State::Ready { image, .. } = &p.state else { return false };
+        let State::Ready { image: Some(image), .. } = &p.state else { return false };
         kprintln!("editor: open {}", p.name);
         self.editor = Some(Editor::new(i, p.name.clone(), image, p.src_w, p.src_h, can_save, can_replace, has_original));
         self.mode = Mode::View(i);
@@ -282,16 +286,19 @@ impl Photos {
     }
 
     pub fn needs_loading(&self) -> bool {
-        self.photos.iter().any(|p| matches!(p.state, State::Pending))
+        self.photos.iter().any(|p| matches!(p.state, State::Pending)) || self.needs_full().is_some()
     }
 
     /// Decode the next pending photo (the one being viewed first). Returns true if one was processed.
     pub fn load_next(&mut self, fetch: &mut dyn FnMut(&Source) -> Result<Bytes, &'static str>) -> bool {
         let viewing = match self.mode {
             Mode::View(i) if matches!(self.photos[i].state, State::Pending) => Some(i),
-            _ => None,
+            _ => self.needs_full(),
         };
-        let Some(i) = viewing.or_else(|| self.photos.iter().position(|p| matches!(p.state, State::Pending))) else {
+        // The ones on screen first, then the rest in order.
+        let (first, count) = self.visible;
+        let on_screen = (first..first + count).take_while(|&k| k < self.photos.len()).find(|&k| matches!(self.photos[k].state, State::Pending));
+        let Some(i) = viewing.or(on_screen).or_else(|| self.photos.iter().position(|p| matches!(p.state, State::Pending))) else {
             return false;
         };
         let t0 = ticks();
@@ -304,17 +311,38 @@ impl Photos {
                 let image = shrink_owned(full, max_w, max_h);
                 let thumb = image.shrink_to_fit(THUMB_W as usize, THUMB_H as usize);
                 kprintln!("solon: photo {} {}x{} loaded in {} ms", p.name, p.src_w, p.src_h, (ticks() - t0) * 1000 / HZ);
-                State::Ready { image, thumb }
+                State::Ready { image: (viewing == Some(i)).then_some(image), thumb }
             }
             Err(e) => {
                 kprintln!("solon: photo {} failed: {}", p.name, e);
                 State::Failed(e)
             }
         };
+        if viewing == Some(i) {
+            // Only the photo being looked at keeps its big copy.
+            for (k, q) in self.photos.iter_mut().enumerate() {
+                if let (true, State::Ready { image, .. }) = (k != i, &mut q.state) {
+                    *image = None;
+                }
+            }
+        }
         if !self.needs_loading() {
             kprintln!("solon: all photos loaded");
         }
         true
+    }
+
+    /// The photo being looked at, if its big copy has to be made (again).
+    fn needs_full(&self) -> Option<usize> {
+        match self.mode {
+            Mode::View(i) if matches!(self.photos.get(i).map(|p| &p.state), Some(State::Ready { image: None, .. })) => Some(i),
+            _ => None,
+        }
+    }
+
+    /// Photo `i` is ready to look at full size (Edit, Print and so on can be used).
+    fn has_full(&self, i: usize) -> bool {
+        matches!(self.photos.get(i).map(|p| &p.state), Some(State::Ready { image: Some(_), .. }))
     }
 
     /// A drive went away: photos from it that weren't loaded yet can't be anymore.
@@ -322,7 +350,7 @@ impl Photos {
         for p in &mut self.photos {
             if let (State::Pending, Source::Usb { drive, .. }) = (&p.state, &p.source) {
                 if gone(*drive) {
-                    p.state = State::Failed("The drive was removed");
+                    p.state = State::Failed("Unplugged - open it again");
                 }
             }
         }
@@ -348,6 +376,15 @@ impl Photos {
         let (col, row) = (i as i32 % cols, i as i32 / cols);
         Rect::new(left + col * CELL_W, r.y + HEADER_H + 8 + row * CELL_H - self.scroll, CELL_W, CELL_H)
     }
+
+    /// For the desktop's scroll bar: (list area, how far it scrolls, where it is).
+    pub fn scroll_info(&self, r: Rect) -> Option<(Rect, i32, i32)> {
+        (self.editor.is_none() && self.print.is_none() && matches!(self.mode, Mode::Grid)).then(|| (Self::grid_area(r), self.max_scroll(r), self.scroll))
+    }
+    pub fn set_scroll(&mut self, v: i32) {
+        self.scroll = v.max(0);
+    }
+
 
     fn max_scroll(&self, r: Rect) -> i32 {
         let rows = (self.photos.len() as i32 + Self::cols(r) - 1) / Self::cols(r);
@@ -388,6 +425,12 @@ impl Photos {
         if let Some(e) = &mut self.editor {
             e.draw(c, r);
             return;
+        }
+        if matches!(self.mode, Mode::Grid) {
+            // Which photos are on screen (they're loaded first).
+            let cols = Self::cols(r) as usize;
+            let first_row = ((self.scroll - 8).max(0) / CELL_H) as usize;
+            self.visible = (first_row * cols, (Self::grid_area(r).h / CELL_H + 2) as usize * cols);
         }
         match self.mode {
             Mode::Grid => self.draw_grid(c, r),
@@ -503,14 +546,7 @@ impl Photos {
             c.text_centered(cell.x + CELL_W / 2, cell.y + THUMB_H + 16, &label, Size::Small, false, INK);
         }
 
-        // Scrollbar
-        let max = self.max_scroll(r);
-        if max > 0 {
-            let track = area.h - 16;
-            let thumb_h = (track * area.h / (area.h + max)).max(30);
-            let y = area.y + 8 + (track - thumb_h) * self.scroll / max;
-            c.round_rect_alpha(r.x + r.w - 10, y, 6, thumb_h, 3, 0, 70);
-        }
+
         c.set_clip(r);
     }
 
@@ -533,7 +569,7 @@ impl Photos {
         };
         let info = ellipsize(&info, r.w - 2 * (370 + 24), Size::Small, false);
         c.text_centered(r.x + r.w / 2, r.y + 15, &info, Size::Small, false, VIEW_TEXT);
-        if matches!(self.photos[i].state, State::Ready { .. }) {
+        if self.has_full(i) {
             let eb = Self::edit_button(r);
             c.round_rect(eb.x, eb.y, eb.w, eb.h, 8, ACCENT);
             c.text_centered(eb.x + eb.w / 2, eb.y + 7, "Edit", Size::Small, true, rgb(255, 255, 255));
@@ -547,10 +583,10 @@ impl Photos {
 
         let ia = Self::image_area(r);
         match &self.photos[i].state {
-            State::Pending => {
+            State::Pending | State::Ready { image: None, .. } => {
                 c.text_centered(ia.x + ia.w / 2, ia.y + ia.h / 2 - 10, "Loading...", Size::Medium, true, VIEW_TEXT);
             }
-            State::Ready { image: img, .. } => {
+            State::Ready { image: Some(img), .. } => {
                 let stale = !matches!(&self.view_cache, Some((ci, w, h, _)) if *ci == i && *w == ia.w && *h == ia.h);
                 if stale {
                     let scaled = img.shrink_to_fit(ia.w.max(1) as usize, ia.h.max(1) as usize);
@@ -631,7 +667,7 @@ impl Photos {
             return self.print_action(a);
         }
         if !self.photos.is_empty() && match self.mode {
-            Mode::View(i) => Self::print_button(r).contains(x, y) && matches!(self.photos[i].state, State::Ready { .. }),
+            Mode::View(i) => Self::print_button(r).contains(x, y) && self.has_full(i),
             Mode::Grid => Self::grid_print_button(r).contains(x, y),
         } {
             let i = match self.mode {
@@ -643,11 +679,11 @@ impl Photos {
         }
         match self.mode {
             Mode::View(i) => {
-                if Self::wallpaper_button(r).contains(x, y) && matches!(self.photos[i].state, State::Ready { .. }) {
+                if Self::wallpaper_button(r).contains(x, y) && self.has_full(i) {
                     self.pending = Some(PhotoAction::Wallpaper(i));
                     return true;
                 }
-                if Self::edit_button(r).contains(x, y) && matches!(self.photos[i].state, State::Ready { .. }) {
+                if Self::edit_button(r).contains(x, y) && self.has_full(i) {
                     self.pending = Some(PhotoAction::Edit(i));
                     return true;
                 }

@@ -740,6 +740,15 @@ impl Files {
         FilesAction::None
     }
 
+    pub fn scroll_info(&self, r: Rect) -> Option<(Rect, i32, i32)> {
+        let a = Self::list_area(r);
+        matches!(self.dialog, Dialog::None).then(|| (a, (self.entries.len() as i32 * ROW_H + 12 - a.h).max(0), self.scroll))
+    }
+    pub fn set_scroll(&mut self, v: i32) {
+        self.scroll = v.max(0);
+    }
+
+
     pub fn on_wheel(&mut self, delta: i8, r: Rect) -> bool {
         let a = Self::list_area(r);
         let max = (self.entries.len() as i32 * ROW_H + 12 - a.h).max(0);

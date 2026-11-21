@@ -608,6 +608,18 @@ impl TextEd {
 }
 
 impl DocEditor for TextEd {
+    fn scroll_info(&self, r: Rect) -> Option<(Rect, i32, i32)> {
+        let a = self.area(r);
+        let lh = self.line_h();
+        let rows = self.rows(self.cols(r)).len() as i32;
+        let visible = (a.h / lh).max(1);
+        Some((a, (rows - visible).max(0) * lh, self.top as i32 * lh))
+    }
+
+    fn set_scroll(&mut self, v: i32, _r: Rect) {
+        self.top = (v.max(0) / self.line_h()) as usize;
+    }
+
     fn draw(&self, c: &mut Canvas, r: Rect) {
         // Toolbar.
         c.fill_rect(r.x, r.y, r.w, r.h, rgb(255, 255, 255));

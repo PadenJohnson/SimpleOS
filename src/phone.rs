@@ -28,6 +28,10 @@ const GET_PARTIAL_OBJECT: u16 = 0x101B;
 const GET_PARTIAL_OBJECT_64: u16 = 0x95C1; // MTP
 const GET_OBJECT_PROP_VALUE: u16 = 0x9803; // MTP
 const PROP_OBJECT_SIZE: u32 = 0xDC04;
+const GET_OBJECT_PROP_LIST: u16 = 0x9805; // MTP: one property of every file in a folder at once
+const PROP_STORAGE_ID: u32 = 0xDC01;
+const PROP_OBJECT_FORMAT: u32 = 0xDC02;
+const PROP_FILE_NAME: u32 = 0xDC07;
 
 // Responses
 const OK: u16 = 0x2001;
@@ -118,6 +122,29 @@ impl<'a> Rd<'a> {
         let n = self.u32().min(1_000_000);
         (0..n).map(|_| self.u32()).collect()
     }
+}
+
+/// Skip an MTP property value of data type `ty` (None = a type Solon doesn't know).
+fn skip_value(r: &mut Rd, ty: u16) -> Option<()> {
+    let size = |t: u16| -> Option<usize> {
+        Some(match t {
+            0x0001 | 0x0002 => 1,
+            0x0003 | 0x0004 => 2,
+            0x0005 | 0x0006 => 4,
+            0x0007 | 0x0008 => 8,
+            0x0009 | 0x000A => 16,
+            _ => return None,
+        })
+    };
+    if ty == 0xFFFF {
+        let _ = r.string();
+    } else if ty & 0x4000 != 0 {
+        let n = r.u32() as usize;
+        r.p += n * size(ty & 0x3FFF)?;
+    } else {
+        r.p += size(ty)?;
+    }
+    Some(())
 }
 
 fn put_string(out: &mut Vec<u8>, s: &str) {
@@ -418,6 +445,15 @@ impl Phone {
     /// Files and folders in a folder (`first_cluster` holds the phone's object handle).
     pub fn list(&mut self, hcs: &mut [Hc], vol: usize, dir: &DirEntry) -> Result<Vec<DirEntry>, FsError> {
         let storage = self.storages.get(vol).ok_or(FsError::Io)?.id;
+        let start = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
+        let ms = move || (crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed) - start) * 10;
+        // Asking about each file one by one takes minutes in a folder of thousands of photos;
+        // MTP phones can give all the names, kinds and sizes in a few requests.
+        if let Some(mut out) = self.list_fast(hcs, storage, dir) {
+            out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| crate::fs::natural_cmp(&a.name, &b.name)));
+            kprintln!("phone: listed \"{}\": {} items in {} ms (quick)", dir.name, out.len(), ms());
+            return Ok(out);
+        }
         let handles = match self.op(hcs, GET_OBJECT_HANDLES, &[storage, 0, dir.first_cluster]) {
             Ok(d) => Rd { b: &d, p: 0 }.array32(),
             Err(e) => {
@@ -445,7 +481,60 @@ impl Phone {
             out.push(DirEntry { name: info.name, is_dir, size: if is_dir { 0 } else { size }, first_cluster: h, contiguous: false, loc: Vec::new(), mtime: 0 });
         }
         out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| crate::fs::natural_cmp(&a.name, &b.name)));
+        kprintln!("phone: listed \"{}\": {} items in {} ms (one by one)", dir.name, out.len(), ms());
         Ok(out)
+    }
+
+    /// A folder's contents with GetObjectPropList (None = not available: ask one by one).
+    fn list_fast(&mut self, hcs: &mut [Hc], storage: u32, dir: &DirEntry) -> Option<Vec<DirEntry>> {
+        // At the top, Android lists every storage area's folders together; there are few anyway.
+        if !self.supports(GET_OBJECT_PROP_LIST) || dir.first_cluster == ROOT {
+            return None;
+        }
+        // handle -> (name, format, size, storage)
+        let mut objs: BTreeMap<u32, (Option<String>, Option<u16>, Option<u64>, Option<u32>)> = BTreeMap::new();
+        for prop in [PROP_FILE_NAME, PROP_OBJECT_FORMAT, PROP_OBJECT_SIZE, PROP_STORAGE_ID] {
+            let d = match self.op(hcs, GET_OBJECT_PROP_LIST, &[dir.first_cluster, 0, prop, 0, 1]) {
+                Ok(d) => d,
+                Err(e) => {
+                    kprintln!("phone: quick listing not available ({})", e);
+                    return None;
+                }
+            };
+            let mut r = Rd { b: &d, p: 0 };
+            let n = r.u32();
+            for _ in 0..n.min(1_000_000) {
+                if r.p >= d.len() {
+                    return None;
+                }
+                let h = r.u32();
+                let code = r.u16() as u32;
+                let ty = r.u16();
+                let o = objs.entry(h).or_default();
+                match (code, ty) {
+                    (PROP_FILE_NAME, 0xFFFF) => o.0 = Some(r.string()),
+                    (PROP_OBJECT_FORMAT, 0x0004) => o.1 = Some(r.u16()),
+                    (PROP_OBJECT_SIZE, 0x0008) => o.2 = Some(r.u64()),
+                    (PROP_STORAGE_ID, 0x0006) => o.3 = Some(r.u32()),
+                    _ => skip_value(&mut r, ty)?,
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for (h, (name, format, size, st)) in objs {
+            if h == dir.first_cluster {
+                continue; // the folder itself
+            }
+            let (Some(name), Some(format)) = (name, format) else { return None };
+            if name.is_empty() || st.is_some_and(|s| s != storage) {
+                continue;
+            }
+            let is_dir = format == FORMAT_FOLDER;
+            let size = if is_dir { 0 } else { size.unwrap_or(0) };
+            self.sizes.insert(h, size);
+            out.push(DirEntry { name, is_dir, size, first_cluster: h, contiguous: false, loc: Vec::new(), mtime: 0 });
+        }
+        Some(out)
     }
 
     /// A whole file.
@@ -531,6 +620,11 @@ impl TestPhone {
         add(7, ROOT, "Documents", true, Vec::new());
         add(8, 7, "shopping.csv", false, Vec::from(&b"Item,Price\r\nMilk,3.49\r\nBread,2.99\r\n"[..]));
         add(9, ROOT, "Download", true, Vec::new());
+        add(10, 1, "Screenshots", true, Vec::new());
+        let shot = include_bytes!("../samples/tiny.png").to_vec();
+        for k in 0..1500u32 {
+            add(100 + k, 10, &alloc::format!("Screenshot_2026{:04}.png", k), false, shot.clone());
+        }
         TestPhone { objects, replies: Default::default(), session: false }
     }
 
@@ -558,7 +652,7 @@ impl TestPhone {
                 d.extend_from_slice(&100u16.to_le_bytes());
                 put_string(&mut d, "microsoft.com: 1.0; android.com: 1.0;");
                 d.extend_from_slice(&0u16.to_le_bytes());
-                let ops = [GET_DEVICE_INFO, OPEN_SESSION, CLOSE_SESSION, GET_STORAGE_IDS, GET_STORAGE_INFO, GET_OBJECT_HANDLES, GET_OBJECT_INFO, GET_OBJECT, GET_PARTIAL_OBJECT, GET_PARTIAL_OBJECT_64, GET_OBJECT_PROP_VALUE];
+                let ops = [GET_DEVICE_INFO, OPEN_SESSION, CLOSE_SESSION, GET_STORAGE_IDS, GET_STORAGE_INFO, GET_OBJECT_HANDLES, GET_OBJECT_INFO, GET_OBJECT, GET_PARTIAL_OBJECT, GET_PARTIAL_OBJECT_64, GET_OBJECT_PROP_VALUE, GET_OBJECT_PROP_LIST];
                 d.extend_from_slice(&(ops.len() as u32).to_le_bytes());
                 for o in ops {
                     d.extend_from_slice(&o.to_le_bytes());
@@ -650,6 +744,38 @@ impl TestPhone {
                     }
                     None => self.resp(0x2009, tid, &[]),
                 }
+            }
+            GET_OBJECT_PROP_LIST => {
+                // The folder itself and its children, like Android does with depth 1.
+                let (parent, prop) = (arg(0), arg(2));
+                let hs: Vec<u32> = self.objects.iter().filter(|(h, o)| o.parent == parent || **h == parent).map(|(h, _)| *h).collect();
+                let mut d = (hs.len() as u32).to_le_bytes().to_vec();
+                for h in hs {
+                    let o = &self.objects[&h];
+                    d.extend_from_slice(&h.to_le_bytes());
+                    d.extend_from_slice(&(prop as u16).to_le_bytes());
+                    match prop {
+                        PROP_FILE_NAME => {
+                            d.extend_from_slice(&0xFFFFu16.to_le_bytes());
+                            let name = o.name.clone();
+                            put_string(&mut d, &name);
+                        }
+                        PROP_OBJECT_FORMAT => {
+                            d.extend_from_slice(&4u16.to_le_bytes());
+                            d.extend_from_slice(&(if o.folder { FORMAT_FOLDER } else { 0x3000 }).to_le_bytes());
+                        }
+                        PROP_OBJECT_SIZE => {
+                            d.extend_from_slice(&8u16.to_le_bytes());
+                            d.extend_from_slice(&(o.data.len() as u64).to_le_bytes());
+                        }
+                        _ => {
+                            d.extend_from_slice(&6u16.to_le_bytes());
+                            d.extend_from_slice(&TEST_STORAGE.to_le_bytes());
+                        }
+                    }
+                }
+                self.data(code, tid, d);
+                self.resp(OK, tid, &[]);
             }
             GET_OBJECT_PROP_VALUE => match self.objects.get(&arg(0)) {
                 Some(o) if arg(1) == PROP_OBJECT_SIZE => {
