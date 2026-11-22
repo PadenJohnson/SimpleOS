@@ -50,7 +50,7 @@ mod media;
 
 /// The kernel's module layout, for `crate::video::...` paths.
 mod video {
-    pub use super::{aac, avi, bits, h264d, mp4read, mp4src};
+    pub use super::{aac, avi, bits, h264d, mp4read, mp4src, tables};
 }
 
 use std::fs::File;

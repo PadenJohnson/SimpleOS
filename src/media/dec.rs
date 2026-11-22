@@ -61,6 +61,8 @@ pub fn video(info: &VideoInfo) -> Result<Box<dyn VideoDec>, String> {
         VCodec::Mpeg2 { config } => Ok(Box::new(super::mpeg2::Mpeg2Dec::new(config))),
         VCodec::Mpeg4 { config } => Ok(Box::new(super::mpeg4::Mpeg4Dec::new(config))),
         VCodec::H263 => Ok(Box::new(super::mpeg4::Mpeg4Dec::new(&[]))),
+        VCodec::Hevc { hvcc } => Ok(Box::new(super::hevc::HevcDec::new(hvcc))),
+        VCodec::HevcAnnexB => Ok(Box::new(super::hevc::HevcDec::new(&[]))),
         other => Err(unsupported_video(other)),
     }
 }

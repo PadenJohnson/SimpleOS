@@ -22,6 +22,7 @@ pub mod mc;
 pub mod mpa;
 pub mod mpatab;
 pub mod mpeg12tab;
+pub mod hevc;
 pub mod mpeg2;
 pub mod mpeg4;
 pub mod mpeg4tab;
