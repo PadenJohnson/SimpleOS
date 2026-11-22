@@ -1,4 +1,5 @@
 # Assemble the UEFI boot folder (.\esp) with the kernel and photos.
+# make-esp.sh is the Linux version: keep the two in step.
 # Photos are loaded into memory by the bootloader (Limine modules) until Solon has USB + FAT32 support.
 param(
     [ValidateSet("debug", "release")][string]$Profile = "debug",

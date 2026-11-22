@@ -152,12 +152,15 @@ stick. Secure Boot can stay on: the first time, approve Solon once in the blue s
 ## Developing
 
 Needs Rust (the nightly toolchain is picked automatically from `rust-toolchain.toml`) and
-QEMU for Windows.
+QEMU for Windows. On Linux (including a Raspberry Pi, where QEMU emulates the PC in software, so
+booting takes about 25 seconds) use `./run.sh` and `./test.sh`, which need `qemu-system-x86`,
+`ovmf` and `python3`.
 
 | Command | What it does |
 |---|---|
 | `.\run.ps1` | Build and run in a QEMU window with the sample photos |
 | `.\test.ps1` | Build and boot headless; drives mouse/keyboard, takes screenshots, checks the log |
+| `./run.sh`, `./test.sh` | The same on Linux (`./test.sh --help`; same options as `test.ps1`, plus `--wait-for "solon: desktop ready"` to go on as soon as a log line appears) |
 | `.\tools\make-usb.ps1` | Build the real-PC USB files and disk image into `dist\` |
 | `.\tools\make-samples.ps1` | Regenerate the sample photos |
 | `tools\mkimg` | Host tool: builds FAT/exFAT/GPT test disks, checks partition tables, decodes print jobs, copies files out of disk images (`exfat-get`) |
@@ -168,7 +171,8 @@ QEMU for Windows.
 (NVMe/SATA disk images), `-BootStick` / `-LegacyBios` (boot from a USB image like a real PC)
 and `-Cmdline "testprinter=pcl"` (or ipp, urf, pclmono, pclxl, ps) (a fake printer whose jobs are captured for checking) or
 `-Cmdline "testphone"` (a pretend phone with photos, a video and a document), `-Sound` (a sound
-card whose output is saved to `test-outsound.wav`; with `-Cmdline "soundtest"` it plays a tone).
+card whose output is saved to `test-out\sound.wav`; with `-Cmdline "soundtest"` it plays a tone). `test.sh` takes the same
+options, written either way: `--usb kbd mouse` or `-Usb kbd mouse`.
 
 ## Layout
 

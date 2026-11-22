@@ -1,5 +1,6 @@
 # Headless boot test: build, boot in QEMU with no window, capture serial log + a screenshot, check for expected log lines.
 # Usage:  powershell -ExecutionPolicy Bypass -File .\test.ps1 [-Seconds 8] [-Expect "solon: desktop ready"]
+# test.sh is the Linux version: keep its options and checks in step when changing this file.
 param(
     [int]$Seconds = 8,
     [string[]]$Expect = @("solon: kernel entered", "solon: desktop ready"),

@@ -16,7 +16,9 @@ Why a fingerprint and not a signing key: when shim approves the next program by 
 requires that program to have the kernel checked by shim too, and halts with "Bootloader
 has not verified loaded image" otherwise. Limine doesn't do that; programs approved by
 fingerprint are exempt. (Tested with Fedora's OVMF Secure Boot firmware with Microsoft's
-keys: `test.ps1 -SecureBoot -BootStick <copy of dist\solon.img>`.)
+keys: `test.ps1 -SecureBoot -BootStick <copy of dist\solon.img>`; on Linux
+`./test.sh --secure-boot --boot-stick <copy of dist/solon.img>`, which falls back to Debian's
+`ovmf` Secure Boot firmware with Microsoft's keys.)
 
 ## Files
 

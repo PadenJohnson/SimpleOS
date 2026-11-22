@@ -6,18 +6,7 @@ cd "$(dirname "$0")"
 PROFILE=${PROFILE:-debug}
 if [ "$PROFILE" = release ]; then cargo build --release; else cargo build; fi
 
-LIMINE_DIR=${LIMINE_DIR:-limine}
-if [ ! -f "$LIMINE_DIR/BOOTX64.EFI" ]; then
-  echo "Limine binaries not found. Run:"
-  echo "  git clone https://github.com/limine-bootloader/limine.git --branch=v9.x-binary --depth=1"
-  exit 1
-fi
-
-rm -rf esp
-mkdir -p esp/EFI/BOOT esp/boot
-cp "$LIMINE_DIR/BOOTX64.EFI" esp/EFI/BOOT/BOOTX64.EFI
-cp limine.conf esp/boot/limine.conf
-cp "target/x86_64-unknown-none/$PROFILE/solon" esp/boot/kernel
+tools/make-esp.sh --profile "$PROFILE"
 
 OVMF=${OVMF:-}
 if [ -z "$OVMF" ]; then
