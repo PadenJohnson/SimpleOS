@@ -15,21 +15,31 @@ pub struct RefPlane<'a> {
 /// fraction (fx, fy) in 1/4 (luma, taps = 8) or 1/8 (chroma, taps = 4) units.
 #[allow(clippy::too_many_arguments)]
 pub fn predict(r: &RefPlane, x: isize, y: isize, fx: usize, fy: usize, w: usize, h: usize, luma: bool, bit_depth: u32, out: &mut [i16], src: &mut [u16], tmp: &mut [i32]) {
-    let taps: usize = if luma { 8 } else { 4 };
-    let half = taps / 2 - 1; // samples before the position
-    let mut fxc = [0i32; 8];
-    let mut fyc = [0i32; 8];
-    for k in 0..taps {
-        fxc[k] = if luma { QPEL_FILTERS[fx][k] } else { EPEL_FILTERS[fx][k] };
-        fyc[k] = if luma { QPEL_FILTERS[fy][k] } else { EPEL_FILTERS[fy][k] };
+    if luma {
+        let (mut cx, mut cy) = ([0i32; 8], [0i32; 8]);
+        cx.copy_from_slice(&QPEL_FILTERS[fx]);
+        cy.copy_from_slice(&QPEL_FILTERS[fy]);
+        filter_block::<8>(r, x, y, fx, fy, &cx, &cy, w, h, bit_depth, out, src, tmp);
+    } else {
+        let (mut cx, mut cy) = ([0i32; 4], [0i32; 4]);
+        cx.copy_from_slice(&EPEL_FILTERS[fx]);
+        cy.copy_from_slice(&EPEL_FILTERS[fy]);
+        filter_block::<4>(r, x, y, fx, fy, &cx, &cy, w, h, bit_depth, out, src, tmp);
     }
+}
+
+const BW: usize = 64 + 7;
+
+#[allow(clippy::too_many_arguments)]
+fn filter_block<const T: usize>(r: &RefPlane, x: isize, y: isize, fx: usize, fy: usize, cx: &[i32; T], cy: &[i32; T], w: usize, h: usize, bit_depth: u32, out: &mut [i16], src: &mut [u16], tmp: &mut [i32]) {
+    let half = T / 2 - 1;
     let shift1 = bit_depth.saturating_sub(8).min(4);
     let shift3 = 14 - bit_depth;
-    // The source area (with the filter's extra samples) in a local buffer, edges repeated.
-    const BW: usize = 64 + 7;
-    let (sw, sh) = (w + taps - 1, h + taps - 1);
+    // Integer position: just scale (read straight from the picture when inside).
     let (x0, y0) = (x - half as isize, y - half as isize);
-    if x0 >= 0 && y0 >= 0 && x0 as usize + sw <= r.w && y0 as usize + sh <= r.h {
+    let (sw, sh) = (w + T - 1, h + T - 1);
+    let inside = x0 >= 0 && y0 >= 0 && x0 as usize + sw <= r.w && y0 as usize + sh <= r.h;
+    if inside {
         for j in 0..sh {
             let o = (y0 as usize + j) * r.stride + x0 as usize;
             src[j * BW..j * BW + sw].copy_from_slice(&r.d[o..o + sw]);
@@ -42,52 +52,84 @@ pub fn predict(r: &RefPlane, x: isize, y: isize, fx: usize, fy: usize, w: usize,
             }
         }
     }
-    let s = |i: usize, j: usize| src[j * BW + i] as i32;
     if fx == 0 && fy == 0 {
         for j in 0..h {
+            let s = &src[(j + half) * BW + half..(j + half) * BW + half + w];
+            let o = &mut out[j * w..j * w + w];
             for i in 0..w {
-                out[j * w + i] = (s(i + half, j + half) << shift3) as i16;
+                o[i] = ((s[i] as i32) << shift3) as i16;
             }
         }
-    } else if fy == 0 {
-        for j in 0..h {
-            let row = &src[(j + half) * BW..(j + half) * BW + sw];
-            for i in 0..w {
-                let mut a = 0;
-                for k in 0..taps {
-                    a += fxc[k] * row[i + k] as i32;
+        return;
+    }
+    // Horizontal pass into tmp (rows needed by the vertical pass), or straight to out.
+    let hrows = if fy == 0 { 0..h } else { 0..sh };
+    if fx != 0 {
+        for j in hrows.clone() {
+            let sj = if fy == 0 { j + half } else { j };
+            let row = &src[sj * BW..sj * BW + sw];
+            let t = &mut tmp[j * 64..j * 64 + w];
+            for v in t.iter_mut() {
+                *v = 0;
+            }
+            for k in 0..T {
+                let c = cx[k];
+                let rk = &row[k..k + w];
+                for i in 0..w {
+                    t[i] += c * rk[i] as i32;
                 }
-                out[j * w + i] = (a >> shift1) as i16;
+            }
+            for v in t.iter_mut() {
+                *v >>= shift1;
             }
         }
-    } else if fx == 0 {
-        for j in 0..h {
-            for i in 0..w {
-                let mut a = 0;
-                for k in 0..taps {
-                    a += fyc[k] * s(i + half, j + k);
+        if fy == 0 {
+            for j in 0..h {
+                let t = &tmp[j * 64..j * 64 + w];
+                let o = &mut out[j * w..j * w + w];
+                for i in 0..w {
+                    o[i] = t[i] as i16;
                 }
-                out[j * w + i] = (a >> shift1) as i16;
+            }
+            return;
+        }
+        // Vertical over tmp, shift 6.
+        let mut acc = [0i32; 64];
+        for j in 0..h {
+            let a = &mut acc[..w];
+            for v in a.iter_mut() {
+                *v = 0;
+            }
+            for k in 0..T {
+                let c = cy[k];
+                let t = &tmp[(j + k) * 64..(j + k) * 64 + w];
+                for i in 0..w {
+                    a[i] += c * t[i];
+                }
+            }
+            let o = &mut out[j * w..j * w + w];
+            for i in 0..w {
+                o[i] = (a[i] >> 6) as i16;
             }
         }
     } else {
-        for j in 0..sh {
-            let row = &src[j * BW..j * BW + sw];
-            for i in 0..w {
-                let mut a = 0;
-                for k in 0..taps {
-                    a += fxc[k] * row[i + k] as i32;
-                }
-                tmp[j * 64 + i] = a >> shift1;
-            }
-        }
+        // Vertical only, from the samples.
+        let mut acc = [0i32; 64];
         for j in 0..h {
-            for i in 0..w {
-                let mut a = 0;
-                for k in 0..taps {
-                    a += fyc[k] * tmp[(j + k) * 64 + i];
+            let a = &mut acc[..w];
+            for v in a.iter_mut() {
+                *v = 0;
+            }
+            for k in 0..T {
+                let c = cy[k];
+                let s = &src[(j + k) * BW + half..(j + k) * BW + half + w];
+                for i in 0..w {
+                    a[i] += c * s[i] as i32;
                 }
-                out[j * w + i] = (a >> 6) as i16;
+            }
+            let o = &mut out[j * w..j * w + w];
+            for i in 0..w {
+                o[i] = (a[i] >> shift1) as i16;
             }
         }
     }

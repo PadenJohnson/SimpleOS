@@ -185,6 +185,13 @@ pub fn sao(plane: &mut [u16], stride: usize, w: usize, h: usize, ctb: usize, bit
             }
             let (x0, y0) = (cx * ctb, cy * ctb);
             let (x1, y1) = ((x0 + ctb).min(w), (y0 + ctb).min(h));
+            // Lossless/PCM samples are rare: look once per CTB.
+            let mut any_keep = false;
+            for yy in (y0..y1).step_by(2) {
+                for xx in (x0..x1).step_by(2) {
+                    any_keep |= keep(xx, yy);
+                }
+            }
             if p.kind == 1 {
                 let shift = bit_depth - 5;
                 let mut table = [0usize; 32];
@@ -193,7 +200,7 @@ pub fn sao(plane: &mut [u16], stride: usize, w: usize, h: usize, ctb: usize, bit
                 }
                 for yy in y0..y1 {
                     for xx in x0..x1 {
-                        if keep(xx, yy) {
+                        if any_keep && keep(xx, yy) {
                             continue;
                         }
                         let s = src[yy * stride + xx] as i32;
@@ -209,7 +216,11 @@ pub fn sao(plane: &mut [u16], stride: usize, w: usize, h: usize, ctb: usize, bit
                         if xa < 0 || ya < 0 || xb < 0 || yb < 0 || xa >= w as isize || xb >= w as isize || ya >= h as isize || yb >= h as isize {
                             continue;
                         }
-                        if keep(xx, yy) || !same(xx, yy, xa, ya) || !same(xx, yy, xb, yb) {
+                        if any_keep && keep(xx, yy) {
+                            continue;
+                        }
+                        let border = xx == x0 || xx + 1 == x1 || yy == y0 || yy + 1 == y1;
+                        if border && (!same(xx, yy, xa, ya) || !same(xx, yy, xb, yb)) {
                             continue;
                         }
                         let s = src[yy * stride + xx] as i32;
