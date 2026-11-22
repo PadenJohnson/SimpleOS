@@ -623,7 +623,7 @@ impl HevcDec {
 
 /// Simple HDR (PQ/HLG) to SDR brightness mapping of 8-bit luma: lifts the mid-tones that
 /// HDR keeps dark for highlights.
-fn tone(v: u8) -> u8 {
+pub(crate) fn tone(v: u8) -> u8 {
     // Limited range 16..235: normalise, apply a soft curve, back.
     let x = ((v as i32 - 16).clamp(0, 219)) as u32;
     let y = (x * (219 * 2) / (x + 219)).min(219);

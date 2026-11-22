@@ -39,9 +39,9 @@ const ZERO_MVREF: MvRef = MvRef { mv: [Mv { x: 0, y: 0 }; 2], rf: [0, 0] };
 
 /// A decoded picture with what later pictures need from it.
 pub struct Pic {
-    pub y: Vec<u8>,
-    pub u: Vec<u8>,
-    pub v: Vec<u8>,
+    pub y: Vec<u16>,
+    pub u: Vec<u16>,
+    pub v: Vec<u16>,
     pub stride: usize,
     pub uv_stride: usize,
     pub w: usize,
@@ -265,7 +265,7 @@ pub struct Vp9Dec {
     above_ref: Vec<u8>,
     above_filter: Vec<u8>,
     above_mv: Vec<[Mv; 2]>,
-    intra_pred: [Vec<u8>; 3],
+    intra_pred: [Vec<u16>; 3],
     lflvl: Vec<Filter>,
     // Left contexts and tile state.
     left_y_nnz: [u8; 16],
@@ -288,11 +288,10 @@ pub struct Vp9Dec {
     min_mv: (i32, i32),
     max_mv: (i32, i32),
     b: Block,
-    block: Vec<i16>,
-    uvblock: [Vec<i16>; 2],
+    block: Vec<i32>,
+    uvblock: [Vec<i32>; 2],
     eob: [u16; 256],
     uveob: [[u16; 64]; 2],
-    mvscale: [[u32; 2]; 3],
     // Pictures.
     cur: Option<Pic>,
     refs: [Option<Rc<Pic>>; 8],
@@ -301,6 +300,12 @@ pub struct Vp9Dec {
     mvpair_ref: Option<Rc<Pic>>,
     full_range: bool,
     bt709: bool,
+    /// Bits per sample (8, 10 or 12) and the colour space code (5 = BT.2020).
+    pub(super) bpp: u32,
+    colorspace: u32,
+    /// Per reference: position scale (1/16384 steps; 0 = same size, -1 = unusable) and step.
+    pub(super) mvscale: [[i32; 2]; 3],
+    pub(super) mvstep: [[i32; 2]; 3],
     out: VecDeque<Frame>,
     error: bool,
 }
@@ -363,7 +368,6 @@ impl Vp9Dec {
             uvblock: [vec![0; 32 * 32], vec![0; 32 * 32]],
             eob: [0; 256],
             uveob: [[0; 64]; 2],
-            mvscale: [[0; 2]; 3],
             cur: None,
             refs: Default::default(),
             last: None,
@@ -371,6 +375,10 @@ impl Vp9Dec {
             mvpair_ref: None,
             full_range: false,
             bt709: false,
+            bpp: 8,
+            colorspace: 0,
+            mvscale: [[0; 2]; 3],
+            mvstep: [[0; 2]; 3],
             out: VecDeque::new(),
             error: false,
         }
@@ -456,8 +464,8 @@ impl Vp9Dec {
         if profile == 3 {
             profile += g.get(1) as u8;
         }
-        if profile != 0 {
-            // 10/12-bit and 4:4:4 / 4:2:2 aren't supported.
+        if profile & 1 != 0 {
+            // Profiles 1 and 3 are 4:4:4 / 4:2:2 / 4:4:0, which aren't supported.
             self.error = true;
             return Err(None);
         }
@@ -477,13 +485,15 @@ impl Vp9Dec {
             if g.get(24) != 0x498342 {
                 return Err(None);
             }
-            // Colour space, range (profile 0: 8-bit 4:2:0).
+            // Bit depth (profile 2: 10 or 12), colour space and range; always 4:2:0 here.
+            self.bpp = if profile >= 2 { 10 + 2 * g.get(1) } else { 8 };
             let cs = g.get(3);
             if cs == 7 {
                 self.error = true;
                 return Err(None);
             }
-            self.bt709 = cs == 2;
+            self.colorspace = cs;
+            self.bt709 = cs == 2 || cs == 5;
             self.full_range = g.flag();
             h.refreshrefmask = 0xff;
             w = g.get(16) as usize + 1;
@@ -497,6 +507,19 @@ impl Vp9Dec {
             if h.intraonly {
                 if g.get(24) != 0x498342 {
                     return Err(None);
+                }
+                if profile >= 2 {
+                    self.bpp = 10 + 2 * g.get(1);
+                    let cs = g.get(3);
+                    if cs == 7 {
+                        self.error = true;
+                        return Err(None);
+                    }
+                    self.colorspace = cs;
+                    self.bt709 = cs == 2 || cs == 5;
+                    self.full_range = g.flag();
+                } else {
+                    self.bpp = 8;
                 }
                 h.refreshrefmask = g.get(8) as u8;
                 w = g.get(16) as usize + 1;
@@ -623,6 +646,7 @@ impl Vp9Dec {
             h.seg_temporal = false;
             h.seg_update_map = false;
         }
+        let bpp = self.bpp;
         let clip8 = |v: i32| v.clamp(0, 255) as usize;
         let clip6 = |v: i32| v.clamp(0, 63) as u8;
         for i in 0..if h.seg_enabled { 8 } else { 1 } {
@@ -641,7 +665,8 @@ impl Vp9Dec {
             let quvac = clip8(qyac0 + h.uvac_qdelta as i32);
             let qyac = clip8(qyac0);
             let ff = &mut h.feat[i];
-            ff.qmul = [[DC_QLOOKUP[qydc], AC_QLOOKUP[qyac]], [DC_QLOOKUP[quvdc], AC_QLOOKUP[quvac]]];
+            let bi = 256 * ((bpp - 8) / 2) as usize;
+            ff.qmul = [[DC_QLOOKUP[qydc + bi], AC_QLOOKUP[qyac + bi]], [DC_QLOOKUP[quvdc + bi], AC_QLOOKUP[quvac + bi]]];
             let sh = (h.filter_level >= 32) as i32;
             let lflvl = if h.seg_enabled && f.lf_enabled {
                 if h.seg_absolute {
@@ -689,8 +714,12 @@ impl Vp9Dec {
                 let r = self.refs[h.refidx[i]].as_ref().unwrap();
                 if r.w == w && r.h == hh {
                     self.mvscale[i] = [0, 0];
+                } else if w * 2 < r.w || hh * 2 < r.h || w > 16 * r.w || hh > 16 * r.h {
+                    self.mvscale[i] = [-1, -1];
                 } else {
-                    self.mvscale[i] = [((r.w << 14) / w) as u32, ((r.h << 14) / hh) as u32];
+                    let s = [((r.w << 14) / w) as i32, ((r.h << 14) / hh) as i32];
+                    self.mvscale[i] = s;
+                    self.mvstep[i] = [(16 * s[0]) >> 14, (16 * s[1]) >> 14];
                 }
             }
         }
@@ -902,8 +931,8 @@ impl Vp9Dec {
         let n = self.sb_cols * self.sb_rows * 64;
         Pic {
             y: vec![0; stride * rows],
-            u: vec![128; uv_stride * rows / 2],
-            v: vec![128; uv_stride * rows / 2],
+            u: vec![1 << (self.bpp - 1); uv_stride * rows / 2],
+            v: vec![1 << (self.bpp - 1); uv_stride * rows / 2],
             stride,
             uv_stride,
             w: self.w,
@@ -1066,16 +1095,31 @@ impl Vp9Dec {
         let (w, h) = (p.w, p.h);
         let ow = w.next_multiple_of(2);
         let oh = h.next_multiple_of(2);
+        let shift = self.bpp - 8;
+        // 10/12-bit: rounded down to 8 bits; BT.2020 (HDR on YouTube) gets a gentle tone map.
+        let hdr = shift > 0 && self.colorspace == 5;
+        let conv = |v: u16| -> u8 {
+            if shift == 0 {
+                v as u8
+            } else {
+                ((v as u32 + (1 << (shift - 1))) >> shift).min(255) as u8
+            }
+        };
         let mut y = vec![0u8; ow * oh];
         let mut u = vec![128u8; ow * oh / 4];
         let mut v = vec![128u8; ow * oh / 4];
         for r in 0..h {
-            y[r * ow..r * ow + w].copy_from_slice(&p.y[r * p.stride..r * p.stride + w]);
+            for c in 0..w {
+                let s = conv(p.y[r * p.stride + c]);
+                y[r * ow + c] = if hdr { super::hevc::tone(s) } else { s };
+            }
         }
         let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
         for r in 0..ch {
-            u[r * (ow / 2)..r * (ow / 2) + cw].copy_from_slice(&p.u[r * p.uv_stride..r * p.uv_stride + cw]);
-            v[r * (ow / 2)..r * (ow / 2) + cw].copy_from_slice(&p.v[r * p.uv_stride..r * p.uv_stride + cw]);
+            for c in 0..cw {
+                u[r * (ow / 2) + c] = conv(p.u[r * p.uv_stride + c]);
+                v[r * (ow / 2) + c] = conv(p.v[r * p.uv_stride + c]);
+            }
         }
         self.out.push_back(Frame { width: w, height: h, y, u, v, stride: ow, crop_x: 0, crop_y: 0, bt709: self.bt709, full_range: self.full_range, poc: 0 });
     }

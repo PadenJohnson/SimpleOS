@@ -6,8 +6,9 @@ use super::Vp9Dec;
 const WD: [u32; 3] = [4, 8, 16];
 
 struct Lf<'a> {
-    d: &'a mut [u8],
+    d: &'a mut [u16],
     ls: usize,
+    bd: u32,
     lim: &'a [u8; 64],
     mblim: &'a [u8; 64],
 }
@@ -15,11 +16,11 @@ struct Lf<'a> {
 impl Lf<'_> {
     /// Edge between columns (filter runs across x), 8 rows.
     fn h8(&mut self, at: usize, wd: usize, e: i32, i: i32, h: i32) {
-        loop_filter(self.d, at, e, i, h, self.ls as isize, 1, WD[wd]);
+        loop_filter(self.d, at, e, i, h, self.ls as isize, 1, WD[wd], self.bd);
     }
     /// Edge between rows (filter runs across y), 8 columns.
     fn v8(&mut self, at: usize, wd: usize, e: i32, i: i32, h: i32) {
-        loop_filter(self.d, at, e, i, h, 1, self.ls as isize, WD[wd]);
+        loop_filter(self.d, at, e, i, h, 1, self.ls as isize, WD[wd], self.bd);
     }
     fn params(&self, l: u8) -> (i32, i32, i32) {
         (self.mblim[l as usize] as i32, self.lim[l as usize] as i32, (l >> 4) as i32)
@@ -162,14 +163,14 @@ impl Vp9Dec {
         let f = self.lflvl[lf].clone();
         let cur = self.cur.as_mut().unwrap();
         let (ys, us) = (cur.stride, cur.uv_stride);
-        let mut l = Lf { d: &mut cur.y, ls: ys, lim: &self.lim_lut, mblim: &self.mblim_lut };
+        let mut l = Lf { d: &mut cur.y, ls: ys, bd: self.bpp, lim: &self.lim_lut, mblim: &self.mblim_lut };
         let yoff = row * 8 * ys + col * 8;
         l.plane_cols(col, 0, 0, &f.level, &f.mask[0][0], yoff);
         l.plane_rows(row, 0, 0, &f.level, &f.mask[0][1], yoff);
         let uvoff = row * 4 * us + col * 4;
         for p in 0..2 {
             let d = if p == 0 { &mut cur.u } else { &mut cur.v };
-            let mut l = Lf { d, ls: us, lim: &self.lim_lut, mblim: &self.mblim_lut };
+            let mut l = Lf { d, ls: us, bd: self.bpp, lim: &self.lim_lut, mblim: &self.mblim_lut };
             l.plane_cols(col, 1, 1, &f.level, &f.mask[1][0], uvoff);
             l.plane_rows(row, 1, 1, &f.level, &f.mask[1][1], uvoff);
         }

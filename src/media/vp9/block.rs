@@ -55,7 +55,7 @@ fn scans(tx: usize, txtp: usize) -> (&'static [i16], &'static [i16]) {
 
 /// One transform block's tokens. Returns the end of block (number of coefficients read).
 #[allow(clippy::too_many_arguments)]
-fn decode_coeffs_b(c: &mut Rac, coef: &mut [i16], n_coeffs: usize, is32: bool, cnt: &mut [[u32; 3]], eobc: &mut [[u32; 2]], probs: &[u8], mut nnz: usize, scan: &[i16], nb: &[i16], band_counts: &[usize; 6], qmul: [i16; 2]) -> usize {
+fn decode_coeffs_b(c: &mut Rac, coef: &mut [i32], n_coeffs: usize, is32: bool, cnt: &mut [[u32; 3]], eobc: &mut [[u32; 2]], probs: &[u8], mut nnz: usize, scan: &[i16], nb: &[i16], band_counts: &[usize; 6], qmul: [i16; 2], bpp: u32) -> usize {
     let mut i = 0usize;
     let mut band = 0usize;
     let mut band_left = band_counts[0];
@@ -137,6 +137,14 @@ fn decode_coeffs_b(c: &mut Rac, coef: &mut [i16], n_coeffs: usize, is32: bool, c
                     val = v;
                 } else {
                     let mut v = 67;
+                    if bpp == 12 {
+                        v += (c.prob(255) as i32) << 17;
+                        v += (c.prob(255) as i32) << 16;
+                    }
+                    if bpp > 8 {
+                        v += (c.prob(255) as i32) << 15;
+                        v += (c.prob(255) as i32) << 14;
+                    }
                     for (k, p) in [254u8, 254, 254, 252, 249, 243, 230, 196, 177, 153, 140, 133, 130, 129].iter().enumerate() {
                         v += (c.prob(*p) as i32) << (13 - k);
                     }
@@ -151,7 +159,9 @@ fn decode_coeffs_b(c: &mut Rac, coef: &mut [i16], n_coeffs: usize, is32: bool, c
         }
         let q = qmul[(i != 0) as usize] as i32;
         let sv = if c.bit() { -val } else { val };
-        coef[rc] = if is32 { (sv.wrapping_mul(q)) / 2 } else { sv.wrapping_mul(q) } as i16;
+        let v = if is32 { (sv.wrapping_mul(q)) / 2 } else { sv.wrapping_mul(q) };
+        // 8-bit video keeps 16-bit coefficients (as FFmpeg); 10/12-bit keeps 32.
+        coef[rc] = if bpp == 8 { v as i16 as i32 } else { v };
         nnz = (1 + cache[nb[i * 2] as usize] as usize + cache[nb[i * 2 + 1] as usize] as usize) >> 1;
         t = tp(band, nnz);
         i += 1;
@@ -1134,6 +1144,7 @@ impl Vp9Dec {
         let mut end_x = (2 * (self.cols - col)).min(w4);
         let mut end_y = (2 * (self.rows - row)).min(h4);
         let qmul = self.h.feat[b.seg_id].qmul;
+        let bpp = self.bpp;
         let lossless = self.h.lossless;
         let tx = if lossless { 4 } else { b.tx };
         let mut total = false;
@@ -1158,7 +1169,7 @@ impl Vp9Dec {
                     let mode = b.mode[if b.tx == 0 && b.bs > BS_8X8 { n } else { 0 }];
                     let txtp = INTRA_TXFM_TYPE[mode];
                     let (scan, nb) = scans(tx, txtp);
-                    let ret = decode_coeffs_b(c, &mut block[16 * n..], 16 * step * step, b.tx == 3, cnt, eobc, probs, (a[x] + l[y]) as usize, scan, nb, &BAND_COUNTS[b.tx], qmul[0]);
+                    let ret = decode_coeffs_b(c, &mut block[16 * n..], 16 * step * step, b.tx == 3, cnt, eobc, probs, (a[x] + l[y]) as usize, scan, nb, &BAND_COUNTS[b.tx], qmul[0], bpp);
                     a[x] = (ret != 0) as u8;
                     l[y] = (ret != 0) as u8;
                     total |= ret != 0;
@@ -1191,7 +1202,7 @@ impl Vp9Dec {
             while y < end_y {
                 let mut x = 0;
                 while x < end_x {
-                    let ret = decode_coeffs_b(c, &mut uvblock[pl][16 * n..], 16 * step * step, b.uvtx == 3, cnt, eobc, probs, (a[x] + l[y]) as usize, scan, nb, &BAND_COUNTS[b.uvtx], qmul[1]);
+                    let ret = decode_coeffs_b(c, &mut uvblock[pl][16 * n..], 16 * step * step, b.uvtx == 3, cnt, eobc, probs, (a[x] + l[y]) as usize, scan, nb, &BAND_COUNTS[b.uvtx], qmul[1], bpp);
                     a[x] = (ret != 0) as u8;
                     l[y] = (ret != 0) as u8;
                     total |= ret != 0;

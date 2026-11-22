@@ -23,7 +23,7 @@ enum Pl {
     V,
 }
 
-fn plane(p: &Pic, pl: Pl) -> (&[u8], usize) {
+fn plane(p: &Pic, pl: Pl) -> (&[u16], usize) {
     match pl {
         Pl::Y => (&p.y, p.stride),
         Pl::U => (&p.u, p.uv_stride),
@@ -34,16 +34,16 @@ fn plane(p: &Pic, pl: Pl) -> (&[u8], usize) {
 /// Predict a bw x bh block from `r` (picture size w x h in this plane) at integer position
 /// (x, y) plus sixteenth fraction (mx, my), into `dst` (put, or average when `avg`).
 #[allow(clippy::too_many_arguments)]
-fn mc(dst: &mut [u8], doff: usize, ds: usize, r: &[u8], rs: usize, w: i32, h: i32, x: i32, y: i32, mx: usize, my: usize, bw: usize, bh: usize, filter: usize, avg: bool) {
+fn mc(dst: &mut [u16], doff: usize, ds: usize, r: &[u16], rs: usize, w: i32, h: i32, x: i32, y: i32, mx: usize, my: usize, bw: usize, bh: usize, filter: usize, avg: bool, pmax: i32) {
     // Source window: 3 before, 4 after when filtering.
     let (ex0, ex1) = if mx != 0 { (3, 4) } else { (0, 0) };
     let (ey0, ey1) = if my != 0 { (3, 4) } else { (0, 0) };
     let sw = bw + ex0 + ex1;
     let sh = bh + ey0 + ey1;
     let (sx, sy) = (x - ex0 as i32, y - ey0 as i32);
-    let mut win = [0u8; 72 * 72];
+    let mut win = [0u16; 72 * 72];
     let inside = sx >= 0 && sy >= 0 && sx + sw as i32 <= w && sy + sh as i32 <= h;
-    let (src, sst, so): (&[u8], usize, usize) = if inside {
+    let (src, sst, so): (&[u16], usize, usize) = if inside {
         (r, rs, sy as usize * rs + sx as usize)
     } else {
         for j in 0..sh {
@@ -54,7 +54,7 @@ fn mc(dst: &mut [u8], doff: usize, ds: usize, r: &[u8], rs: usize, w: i32, h: i3
         }
         (&win, 72, 0)
     };
-    let put = |d: &mut u8, v: u8| *d = if avg { ((*d as u32 + v as u32 + 1) >> 1) as u8 } else { v };
+    let put = |d: &mut u16, v: u16| *d = if avg { ((*d as u32 + v as u32 + 1) >> 1) as u16 } else { v };
     let base = so + ey0 * sst + ex0;
     if mx == 0 && my == 0 {
         for j in 0..bh {
@@ -68,7 +68,7 @@ fn mc(dst: &mut [u8], doff: usize, ds: usize, r: &[u8], rs: usize, w: i32, h: i3
     }
     if filter == 3 {
         // Bilinear.
-        let bil = |a: u8, b: u8, f: usize| (a as i32 + ((f as i32 * (b as i32 - a as i32) + 8) >> 4)) as u8;
+        let bil = |a: u16, b: u16, f: usize| (a as i32 + ((f as i32 * (b as i32 - a as i32) + 8) >> 4)) as u16;
         if my == 0 {
             for j in 0..bh {
                 for i in 0..bw {
@@ -84,7 +84,7 @@ fn mc(dst: &mut [u8], doff: usize, ds: usize, r: &[u8], rs: usize, w: i32, h: i3
                 }
             }
         } else {
-            let mut tmp = [0u8; 64 * 65];
+            let mut tmp = [0u16; 64 * 65];
             for j in 0..bh + 1 {
                 for i in 0..bw {
                     let o = base + j * sst + i;
@@ -99,12 +99,12 @@ fn mc(dst: &mut [u8], doff: usize, ds: usize, r: &[u8], rs: usize, w: i32, h: i3
         }
         return;
     }
-    let tap = |s: &[u8], o: usize, st: usize, f: &[i16]| -> u8 {
+    let tap = |s: &[u16], o: usize, st: usize, f: &[i16]| -> u16 {
         let mut a = 64i32;
         for k in 0..8 {
             a += f[k] as i32 * s[o + k * st - 3 * st] as i32;
         }
-        (a >> 7).clamp(0, 255) as u8
+        (a >> 7).clamp(0, pmax) as u16
     };
     if my == 0 {
         let f = subpel(filter, mx);
@@ -123,7 +123,7 @@ fn mc(dst: &mut [u8], doff: usize, ds: usize, r: &[u8], rs: usize, w: i32, h: i3
     } else {
         let fx = subpel(filter, mx);
         let fy = subpel(filter, my);
-        let mut tmp = [0u8; 64 * 71];
+        let mut tmp = [0u16; 64 * 71];
         let b0 = base - 3 * sst;
         for j in 0..bh + 7 {
             for i in 0..bw {
@@ -135,6 +135,81 @@ fn mc(dst: &mut [u8], doff: usize, ds: usize, r: &[u8], rs: usize, w: i32, h: i3
                 put(&mut dst[doff + j * ds + i], tap(&tmp, (j + 3) * 64 + i, 64, fy));
             }
         }
+    }
+}
+
+/// Prediction from a reference of another size (FFmpeg's scaled 8-tap / bilinear MC): the
+/// source position advances `dx`/`dy` sixteenths per output pixel. (x, y) and (mx, my) are
+/// the integer and sixteenth parts of the first sample's position.
+#[allow(clippy::too_many_arguments)]
+fn mc_scaled(dst: &mut [u16], doff: usize, ds: usize, r: &[u16], rs: usize, w: i32, h: i32, x: i32, y: i32, mx: usize, my: usize, bw: usize, bh: usize, filter: usize, avg: bool, dx: usize, dy: usize, pmax: i32) {
+    let refbw = ((bw - 1) * dx + mx) >> 4;
+    let refbh = ((bh - 1) * dy + my) >> 4;
+    let sw = refbw + 8;
+    let sh = refbh + 8;
+    // Window from (x - 3, y - 3), the picture's edges repeated beyond it.
+    let mut win = alloc::vec![0u16; sw * sh];
+    for j in 0..sh {
+        let yy = (y - 3 + j as i32).clamp(0, h - 1) as usize * rs;
+        for i in 0..sw {
+            win[j * sw + i] = r[yy + (x - 3 + i as i32).clamp(0, w - 1) as usize];
+        }
+    }
+    let put = |d: &mut u16, v: u16| *d = if avg { ((*d as u32 + v as u32 + 1) >> 1) as u16 } else { v };
+    let mut tmp = alloc::vec![0u16; 64 * 136];
+    if filter == 3 {
+        let bil = |a: u16, b: u16, f: usize| (a as i32 + ((f as i32 * (b as i32 - a as i32) + 8) >> 4)) as u16;
+        let tmp_h = (((bh - 1) * dy + my) >> 4) + 2;
+        for j in 0..tmp_h {
+            let (mut imx, mut ioff) = (mx, 0);
+            for xx in 0..bw {
+                let o = (j + 3) * sw + 3 + ioff;
+                tmp[j * 64 + xx] = bil(win[o], win[o + 1], imx);
+                imx += dx;
+                ioff += imx >> 4;
+                imx &= 15;
+            }
+        }
+        let (mut tp, mut m) = (0, my);
+        for jj in 0..bh {
+            for xx in 0..bw {
+                put(&mut dst[doff + jj * ds + xx], bil(tmp[tp + xx], tmp[tp + 64 + xx], m));
+            }
+            m += dy;
+            tp += (m >> 4) * 64;
+            m &= 15;
+        }
+        return;
+    }
+    let tmp_h = (((bh - 1) * dy + my) >> 4) + 8;
+    for j in 0..tmp_h {
+        let (mut imx, mut ioff) = (mx, 0);
+        for xx in 0..bw {
+            let f = subpel(filter, imx);
+            let o = j * sw + 3 + ioff;
+            let mut a = 64i32;
+            for k in 0..8 {
+                a += f[k] as i32 * win[o + k - 3] as i32;
+            }
+            tmp[j * 64 + xx] = (a >> 7).clamp(0, pmax) as u16;
+            imx += dx;
+            ioff += imx >> 4;
+            imx &= 15;
+        }
+    }
+    let (mut tp, mut m) = (64 * 3, my);
+    for jj in 0..bh {
+        let f = subpel(filter, m);
+        for xx in 0..bw {
+            let mut a = 64i32;
+            for k in 0..8 {
+                a += f[k] as i32 * tmp[tp + xx + k * 64 - 3 * 64] as i32;
+            }
+            put(&mut dst[doff + jj * ds + xx], (a >> 7).clamp(0, pmax) as u16);
+        }
+        m += dy;
+        tp += (m >> 4) * 64;
+        m &= 15;
     }
 }
 
@@ -155,67 +230,114 @@ fn avg4(a: Mv, b: Mv, c: Mv, d: Mv) -> Mv {
 impl Vp9Dec {
     /// Luma block: position (x, y) in pixels, mv in eighths.
     #[allow(clippy::too_many_arguments)]
-    fn mc_luma(&mut self, rf: &Pic, x: usize, y: usize, mv: Mv, bw: usize, bh: usize, avg: bool) {
+    fn mc_luma(&mut self, rf: &Pic, ri: usize, x: usize, y: usize, mv: Mv, pw: usize, ph: usize, px: usize, py: usize, bw: usize, bh: usize, avg: bool) {
         let filter = self.b.filter;
+        let pmax = (1i32 << self.bpp) - 1;
         let (r, rs) = plane(rf, Pl::Y);
-        let xx = x as i32 + (mv.x as i32 >> 3);
-        let yy = y as i32 + (mv.y as i32 >> 3);
-        let mx = ((mv.x as i32 & 7) << 1) as usize;
-        let my = ((mv.y as i32 & 7) << 1) as usize;
+        let scale = self.mvscale[ri];
+        let step = self.mvstep[ri];
+        let cols = self.cols as i32;
         let cur = self.cur.as_mut().unwrap();
         let ds = cur.stride;
-        mc(&mut cur.y, y * ds + x, ds, r, rs, rf.w as i32, rf.h as i32, xx, yy, mx, my, bw, bh, filter, avg);
+        if scale == [0, 0] {
+            let xx = x as i32 + (mv.x as i32 >> 3);
+            let yy = y as i32 + (mv.y as i32 >> 3);
+            let mx = ((mv.x as i32 & 7) << 1) as usize;
+            let my = ((mv.y as i32 & 7) << 1) as usize;
+            mc(&mut cur.y, y * ds + x, ds, r, rs, rf.w as i32, rf.h as i32, xx, yy, mx, my, bw, bh, filter, avg, pmax);
+            return;
+        }
+        // A reference of another size: positions scaled (as libvpx, each part separately).
+        let (xi, yi, pxi, pyi, pwi, phi) = (x as i32, y as i32, px as i32, py as i32, pw as i32, ph as i32);
+        let rows = self.rows as i32;
+        let mvx = (mv.x as i32).clamp(-(xi + pwi - pxi + 4) * 8, (cols * 8 - xi + pxi + 3) * 8);
+        let mvy = (mv.y as i32).clamp(-(yi + phi - pyi + 4) * 8, (rows * 8 - yi + pyi + 3) * 8);
+        let sm = |n: i32, d: usize| ((n as i64 * scale[d] as i64) >> 14) as i32;
+        let mx = sm(mvx * 2, 0) + sm(xi * 16, 0);
+        let my = sm(mvy * 2, 1) + sm(yi * 16, 1);
+        mc_scaled(&mut cur.y, y * ds + x, ds, r, rs, rf.w as i32, rf.h as i32, mx >> 4, my >> 4, (mx & 15) as usize, (my & 15) as usize, bw, bh, filter, avg, step[0] as usize, step[1] as usize, pmax);
     }
 
     /// Chroma block (4:2:0): position in chroma pixels, mv in luma eighths.
     #[allow(clippy::too_many_arguments)]
-    fn mc_chroma(&mut self, rf: &Pic, x: usize, y: usize, mv: Mv, bw: usize, bh: usize, avg: bool) {
+    fn mc_chroma(&mut self, rf: &Pic, ri: usize, x: usize, y: usize, mv: Mv, pw: usize, ph: usize, px: usize, py: usize, bw: usize, bh: usize, avg: bool) {
         let filter = self.b.filter;
+        let pmax = (1i32 << self.bpp) - 1;
         let (w, h) = (rf.w.div_ceil(2) as i32, rf.h.div_ceil(2) as i32);
-        let xx = x as i32 + (mv.x as i32 >> 4);
-        let yy = y as i32 + (mv.y as i32 >> 4);
-        let mx = (mv.x as i32 & 15) as usize;
-        let my = (mv.y as i32 & 15) as usize;
+        let scale = self.mvscale[ri];
+        let step = self.mvstep[ri];
+        let (cols, rows) = (self.cols as i32, self.rows as i32);
         let cur = self.cur.as_mut().unwrap();
         let ds = cur.uv_stride;
         let (ru, rs) = plane(rf, Pl::U);
-        mc(&mut cur.u, y * ds + x, ds, ru, rs, w, h, xx, yy, mx, my, bw, bh, filter, avg);
-        let (rv, rs) = plane(rf, Pl::V);
-        mc(&mut cur.v, y * ds + x, ds, rv, rs, w, h, xx, yy, mx, my, bw, bh, filter, avg);
+        let (rv, _) = plane(rf, Pl::V);
+        if scale == [0, 0] {
+            let xx = x as i32 + (mv.x as i32 >> 4);
+            let yy = y as i32 + (mv.y as i32 >> 4);
+            let mx = (mv.x as i32 & 15) as usize;
+            let my = (mv.y as i32 & 15) as usize;
+            mc(&mut cur.u, y * ds + x, ds, ru, rs, w, h, xx, yy, mx, my, bw, bh, filter, avg, pmax);
+            mc(&mut cur.v, y * ds + x, ds, rv, rs, w, h, xx, yy, mx, my, bw, bh, filter, avg, pmax);
+            return;
+        }
+        let (xi, yi, pxi, pyi, pwi, phi) = (x as i32, y as i32, px as i32, py as i32, pw as i32, ph as i32);
+        let mvx = (mv.x as i32).clamp(-(xi + pwi - pxi + 4) * 16, (cols * 4 - xi + pxi + 3) * 16);
+        let mvy = (mv.y as i32).clamp(-(yi + phi - pyi + 4) * 16, (rows * 4 - yi + pyi + 3) * 16);
+        let sm = |n: i32, d: usize| ((n as i64 * scale[d] as i64) >> 14) as i32;
+        let mx = sm(mvx, 0) + (sm(xi * 16, 0) & !15) + (sm(xi * 32, 0) & 15);
+        let my = sm(mvy, 1) + (sm(yi * 16, 1) & !15) + (sm(yi * 32, 1) & 15);
+        let (ix, iy, fx, fy) = (mx >> 4, my >> 4, (mx & 15) as usize, (my & 15) as usize);
+        mc_scaled(&mut cur.u, y * ds + x, ds, ru, rs, w, h, ix, iy, fx, fy, bw, bh, filter, avg, step[0] as usize, step[1] as usize, pmax);
+        mc_scaled(&mut cur.v, y * ds + x, ds, rv, rs, w, h, ix, iy, fx, fy, bw, bh, filter, avg, step[0] as usize, step[1] as usize, pmax);
     }
 
     pub(super) fn inter_recon(&mut self) {
         let b = self.b;
+        let bpp = self.bpp;
         let (row, col) = (self.row, self.col);
+        let ri = [b.rf[0], b.rf[1]];
         let refs: [Option<alloc::rc::Rc<Pic>>; 2] = [self.refs[self.h.refidx[b.rf[0]]].clone(), if b.comp { self.refs[self.h.refidx[b.rf[1]]].clone() } else { None }];
+        let nref = if b.comp { 2 } else { 1 };
+        if (0..nref).any(|i| self.mvscale[ri[i]][0] < 0) {
+            return; // a reference of a size that can't be used
+        }
+        let scaled = (0..nref).any(|i| self.mvscale[ri[i]] != [0, 0]);
         for (i, r) in refs.iter().enumerate() {
             let Some(r) = r.as_ref() else { continue };
             let avg = i == 1;
+            let k = ri[i];
             let (y0, x0) = (row * 8, col * 8);
             let mvs: [Mv; 4] = [b.mv[0][i], b.mv[1][i], b.mv[2][i], b.mv[3][i]];
             if b.bs > BS_8X8 {
-                if b.bs == BS_8X4 {
-                    self.mc_luma(r, x0, y0, mvs[0], 8, 4, avg);
-                    self.mc_luma(r, x0, y0 + 4, mvs[2], 8, 4, avg);
-                    self.mc_chroma(r, col * 4, row * 4, avg2(mvs[0], mvs[2]), 4, 4, avg);
+                if scaled {
+                    // With scaled references every sub-8x8 block is done as four 4x4 blocks.
+                    self.mc_luma(r, k, x0, y0, mvs[0], 8, 8, 0, 0, 4, 4, avg);
+                    self.mc_luma(r, k, x0 + 4, y0, mvs[1], 8, 8, 4, 0, 4, 4, avg);
+                    self.mc_luma(r, k, x0, y0 + 4, mvs[2], 8, 8, 0, 4, 4, 4, avg);
+                    self.mc_luma(r, k, x0 + 4, y0 + 4, mvs[3], 8, 8, 4, 4, 4, 4, avg);
+                    self.mc_chroma(r, k, col * 4, row * 4, avg4(mvs[0], mvs[1], mvs[2], mvs[3]), 4, 4, 0, 0, 4, 4, avg);
+                } else if b.bs == BS_8X4 {
+                    self.mc_luma(r, k, x0, y0, mvs[0], 0, 0, 0, 0, 8, 4, avg);
+                    self.mc_luma(r, k, x0, y0 + 4, mvs[2], 0, 0, 0, 0, 8, 4, avg);
+                    self.mc_chroma(r, k, col * 4, row * 4, avg2(mvs[0], mvs[2]), 0, 0, 0, 0, 4, 4, avg);
                 } else if b.bs == BS_4X8 {
-                    self.mc_luma(r, x0, y0, mvs[0], 4, 8, avg);
-                    self.mc_luma(r, x0 + 4, y0, mvs[1], 4, 8, avg);
-                    self.mc_chroma(r, col * 4, row * 4, avg2(mvs[0], mvs[1]), 4, 4, avg);
+                    self.mc_luma(r, k, x0, y0, mvs[0], 0, 0, 0, 0, 4, 8, avg);
+                    self.mc_luma(r, k, x0 + 4, y0, mvs[1], 0, 0, 0, 0, 4, 8, avg);
+                    self.mc_chroma(r, k, col * 4, row * 4, avg2(mvs[0], mvs[1]), 0, 0, 0, 0, 4, 4, avg);
                 } else {
-                    self.mc_luma(r, x0, y0, mvs[0], 4, 4, avg);
-                    self.mc_luma(r, x0 + 4, y0, mvs[1], 4, 4, avg);
-                    self.mc_luma(r, x0, y0 + 4, mvs[2], 4, 4, avg);
-                    self.mc_luma(r, x0 + 4, y0 + 4, mvs[3], 4, 4, avg);
-                    self.mc_chroma(r, col * 4, row * 4, avg4(mvs[0], mvs[1], mvs[2], mvs[3]), 4, 4, avg);
+                    self.mc_luma(r, k, x0, y0, mvs[0], 0, 0, 0, 0, 4, 4, avg);
+                    self.mc_luma(r, k, x0 + 4, y0, mvs[1], 0, 0, 0, 0, 4, 4, avg);
+                    self.mc_luma(r, k, x0, y0 + 4, mvs[2], 0, 0, 0, 0, 4, 4, avg);
+                    self.mc_luma(r, k, x0 + 4, y0 + 4, mvs[3], 0, 0, 0, 0, 4, 4, avg);
+                    self.mc_chroma(r, k, col * 4, row * 4, avg4(mvs[0], mvs[1], mvs[2], mvs[3]), 0, 0, 0, 0, 4, 4, avg);
                 }
             } else {
                 let bw = bwh(0, b.bs, 0) * 4;
                 let bh = bwh(0, b.bs, 1) * 4;
                 let uvbw = bwh(1, b.bs, 0) * 4;
                 let uvbh = bwh(1, b.bs, 1) * 4;
-                self.mc_luma(r, x0, y0, mvs[0], bw, bh, avg);
-                self.mc_chroma(r, col * 4, row * 4, mvs[0], uvbw, uvbh, avg);
+                self.mc_luma(r, k, x0, y0, mvs[0], bw, bh, 0, 0, bw, bh, avg);
+                self.mc_chroma(r, k, col * 4, row * 4, mvs[0], uvbw, uvbh, 0, 0, uvbw, uvbh, avg);
             }
         }
         if b.skip {
@@ -239,7 +361,7 @@ impl Vp9Dec {
                 let eob = self.eob[n] as usize;
                 if eob != 0 {
                     let o = (row * 8 + y * 4) * ys + col * 8 + x * 4;
-                    itxfm_add(tx, 0, &mut cur.y, o, ys, &mut self.block[16 * n..], eob);
+                    itxfm_add(tx, 0, &mut cur.y, o, ys, &mut self.block[16 * n..], eob, bpp);
                 }
                 x += step1d;
                 n += step;
@@ -260,7 +382,7 @@ impl Vp9Dec {
                     if eob != 0 {
                         let o = (row * 4 + y * 4) * us + col * 4 + x * 4;
                         let d = if p == 0 { &mut cur.u } else { &mut cur.v };
-                        itxfm_add(uvtx, 0, d, o, us, &mut self.uvblock[p][16 * n..], eob);
+                        itxfm_add(uvtx, 0, d, o, us, &mut self.uvblock[p][16 * n..], eob, bpp);
                     }
                     x += uvstep1d;
                     n += step;
@@ -273,7 +395,7 @@ impl Vp9Dec {
     /// Edges for intra prediction of one transform block (FFmpeg's check_intra_mode); returns
     /// the mode actually used and fills `a` (a[0] top-left) and `l`.
     #[allow(clippy::too_many_arguments)]
-    fn intra_edges(&self, mode: usize, a: &mut [u8; 72], l: &mut [u8; 32], pl: usize, px: usize, py: usize, x: usize, w: usize, y: usize, tx: usize) -> usize {
+    fn intra_edges(&self, mode: usize, a: &mut [u16; 72], l: &mut [u16; 32], pl: usize, px: usize, py: usize, x: usize, w: usize, y: usize, tx: usize) -> usize {
         const CONV: [[[usize; 2]; 2]; 10] = [
             [[DC_127, VERT], [DC_127, VERT]],
             [[DC_129, DC_129], [HOR, HOR]],
@@ -311,8 +433,9 @@ impl Vp9Dec {
         let have_right = x < w - 1;
         let mode = CONV[mode][have_left as usize][have_top as usize];
         let (nl, nt, ntl, ntr, inv) = EDGES[mode];
+        let base = 1u16 << (self.bpp - 1);
         let cur = self.cur.as_ref().unwrap();
-        let (pic, stride): (&[u8], usize) = match pl {
+        let (pic, stride): (&[u16], usize) = match pl {
             0 => (&cur.y, cur.stride),
             1 => (&cur.u, cur.uv_stride),
             _ => (&cur.v, cur.uv_stride),
@@ -323,7 +446,7 @@ impl Vp9Dec {
             let n_tr = if tx == 0 && ntr && have_right { 4 } else { 0 };
             // Row above: the saved unfiltered line at the top of a superblock row.
             let from_saved = row & 7 == 0 && y == 0;
-            let top_at = |i: isize| -> u8 {
+            let top_at = |i: isize| -> u16 {
                 if from_saved {
                     self.intra_pred[pl][((col * (8 >> ss) + x * 4) as isize + i) as usize]
                 } else {
@@ -346,11 +469,11 @@ impl Vp9Dec {
                 }
             } else {
                 for i in 0..n {
-                    a[1 + i] = 127;
+                    a[1 + i] = base - 1;
                 }
             }
             if ntl {
-                a[0] = if have_left && have_top { top_at(-1) } else if have_top { 129 } else { 127 };
+                a[0] = if have_left && have_top { top_at(-1) } else if have_top { base + 1 } else { base - 1 };
             }
             if tx == 0 && ntr {
                 if have_top && have_right && n + n_tr <= n_have {
@@ -394,7 +517,7 @@ impl Vp9Dec {
                 }
             } else {
                 for i in 0..n {
-                    l[i] = 129;
+                    l[i] = base + 1;
                 }
             }
         }
@@ -402,6 +525,7 @@ impl Vp9Dec {
     }
 
     pub(super) fn intra_recon(&mut self) {
+        let bpp = self.bpp;
         let b = self.b;
         let (row, col) = (self.row, self.col);
         let mut w4 = bwh(1, b.bs, 0) << 1;
@@ -410,8 +534,8 @@ impl Vp9Dec {
         let mut end_y = (2 * (self.rows - row)).min(h4);
         let tx = if self.h.lossless { 4 } else { b.tx };
         let uvtx = if self.h.lossless { 4 } else { b.uvtx };
-        let mut a = [0u8; 72];
-        let mut l = [0u8; 32];
+        let mut a = [0u16; 72];
+        let mut l = [0u16; 32];
         let step1d = 1 << b.tx;
         let step = 1 << (b.tx * 2);
         let size = 4 << b.tx;
@@ -427,9 +551,9 @@ impl Vp9Dec {
                 let mode = self.intra_edges(mode0, &mut a, &mut l, 0, px, py, x, w4, y, b.tx);
                 let cur = self.cur.as_mut().unwrap();
                 let s = cur.stride;
-                intra_pred(mode, size, &mut cur.y, py * s + px, s, &l, &a);
+                intra_pred(mode, size, &mut cur.y, py * s + px, s, &l, &a, bpp);
                 if eob != 0 {
-                    itxfm_add(tx, txtp, &mut cur.y, py * s + px, s, &mut self.block[16 * n..], eob);
+                    itxfm_add(tx, txtp, &mut cur.y, py * s + px, s, &mut self.block[16 * n..], eob, bpp);
                 }
                 x += step1d;
                 n += step;
@@ -454,9 +578,9 @@ impl Vp9Dec {
                     let cur = self.cur.as_mut().unwrap();
                     let s = cur.uv_stride;
                     let d = if p == 0 { &mut cur.u } else { &mut cur.v };
-                    intra_pred(mode, size, d, py * s + px, s, &l, &a);
+                    intra_pred(mode, size, d, py * s + px, s, &l, &a, bpp);
                     if eob != 0 {
-                        itxfm_add(uvtx, 0, d, py * s + px, s, &mut self.uvblock[p][16 * n..], eob);
+                        itxfm_add(uvtx, 0, d, py * s + px, s, &mut self.uvblock[p][16 * n..], eob, bpp);
                     }
                     x += uvstep1d;
                     n += step;
