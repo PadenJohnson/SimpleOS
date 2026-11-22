@@ -30,6 +30,7 @@ pub mod idct;
 pub mod vlc;
 pub mod opus;
 pub mod vorbis;
+pub mod vp9;
 pub mod vorbistab;
 pub mod mpegps;
 pub mod mpegts;
