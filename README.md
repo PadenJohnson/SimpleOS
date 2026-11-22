@@ -46,12 +46,14 @@ nothing to download.
     you type), bold, text and fill colours, number formats (money, percent, dates), column
     widths, several sheets, undo, copy/paste, fill down, and printing. Charts, pictures and
     merged cells in Excel files aren't kept when saving.
-- Videos: every video in Solon storage with a picture of each; plays phone and camera
-  videos with sound (play/pause, drag along the bar to jump, arrow keys for 5 seconds).
-  Solon's own decoders: H.264 (Baseline, Main and High profile, as phones and cameras record
-  it) and AAC sound in MP4/MOV, and Motion-JPEG AVI. iPhone videos in HEVC ("High
-  Efficiency") can't be played yet; the app says how to switch the iPhone to "Most
-  Compatible".
+- Videos: every video in Solon storage with a picture of each; plays phone, camera, computer,
+  DVD/TV and web videos with sound (play/pause, drag along the bar to jump, arrow keys for 5
+  seconds). Files: MP4/MOV/3GP, MKV, WebM, AVI, MPEG-TS (.ts/.m2ts/.mts) and MPEG-PS
+  (.mpg/.vob). Pictures: H.264, HEVC/H.265 (iPhone "High Efficiency", 8 and 10-bit), MPEG-1/2,
+  MPEG-4 Part 2 (Xvid, DivX 4/5), H.263, VP8, VP9 (8-bit) and Motion JPEG. Sound: AAC, MP3,
+  MP2, AC-3 (Dolby Digital, surround mixed to stereo), Vorbis, Opus and PCM. All with
+  Solon's own decoders, checked against FFmpeg. Not yet: DivX 3, AMR phone sound, DTS and
+  E-AC-3, 10-bit VP9.
 - Video Editor: a simple Kdenlive-style editor. Photos, phone and camera videos (.mp4, .mov,
   .avi) and music (.wav) on the left, a preview with Play/Pause, and a timeline with Video, Titles
   and two Music tracks. Add, drag to reorder or move, drag the ends to shorten, split at the
@@ -127,7 +129,7 @@ nothing to download.
   back as "Name (restored)"). The desktop reminds you when the last backup is over 30 days
   old, and when a backup drive is plugged in.
 
-**Planned:** HEVC (iPhone "High Efficiency") videos; faster decoding of 1080p and 4K video.
+**Planned:** faster decoding of 1080p and 4K video.
 
 ## Making a USB stick
 
@@ -155,6 +157,7 @@ QEMU for Windows.
 | `.\tools\make-samples.ps1` | Regenerate the sample photos |
 | `tools\mkimg` | Host tool: builds FAT/exFAT/GPT test disks, checks partition tables, decodes print jobs, copies files out of disk images (`exfat-get`) |
 | `tools\videotest` | Host tool: checks the H.264 encoder and decoder, AAC, FLAC, MP4 and AVI code against Windows' own encoders and decoders |
+| `tools\mediatest` | Host tool: checks the video player's decoders frame by frame and sample by sample against FFmpeg |
 
 `test.ps1` options include `-Usb` (keyboard, mouse, read-only or writable USB drives, hot-plugging), `-Internal`
 (NVMe/SATA disk images), `-BootStick` / `-LegacyBios` (boot from a USB image like a real PC)
@@ -166,7 +169,7 @@ card whose output is saved to `test-outsound.wav`; with `-Cmdline "soundtest"` i
 
 - `src/`: the kernel. `main.rs` boots; `desktop.rs`, `photos.rs`, `editor.rs`, `import.rs`,
   `files.rs`, `diskmgr.rs`, `documents.rs`, `sheetui.rs`, `movieui.rs`, `settingsui.rs` and `printui.rs` are
-  the apps; `movie.rs` is the video editor's engine; `video/` holds the H.264 encoder and decoder (CAVLC and CABAC), AAC, FLAC, MP4 and AVI/WAV code (`tables.rs`: standard tables from FFmpeg); `videos.rs` is the player; `games/` holds the games; `writer/` is Writer (with .docx), `pdf/` reads, draws and writes PDFs (`pdfui.rs` is the PDF app), `textedit.rs` the Text Editor and `docshell.rs` what those three share; `font.rs` and `raster.rs` draw text (fonts/: Noto Sans and Noto Serif, SIL Open Font License, see fonts/OFL.txt);
+  the apps; `movie.rs` is the video editor's engine; `video/` holds the H.264 encoder and decoder (CAVLC and CABAC), AAC, FLAC, MP4 and AVI/WAV code (`tables.rs`: standard tables from FFmpeg); `videos.rs` is the player and `media/` its engine (containers and the MPEG-2, MPEG-4, HEVC, VP8, VP9, MP3, AC-3, Vorbis and Opus decoders); `games/` holds the games; `writer/` is Writer (with .docx), `pdf/` reads, draws and writes PDFs (`pdfui.rs` is the PDF app), `textedit.rs` the Text Editor and `docshell.rs` what those three share; `font.rs` and `raster.rs` draw text (fonts/: Noto Sans and Noto Serif, SIL Open Font License, see fonts/OFL.txt);
   `doc/` reads and writes spreadsheets (zip, XML, formulas, xlsx, csv); `xhci.rs`, `ehci.rs`, `usb.rs`, `msc.rs`, `usbprint.rs`, `nvme.rs`, `hda.rs` and
   `ahci.rs` are drivers; `fs/` holds partition tables, FAT and exFAT; `library.rs` is the
   photo library; `print.rs` lays out pages and speaks PCL / IPP.
