@@ -27,6 +27,19 @@ pub trait VideoDec {
     fn flush(&mut self);
     /// Forget everything (after a jump; the next packet is a key frame).
     fn reset(&mut self);
+    /// Decoders that find the pictures in the stream themselves (MPEG-1/2 and MPEG-4 streams,
+    /// where a packet may hold part of a picture or several) also time them: they keep each
+    /// packet's time with the picture that starts in it.
+    fn timed(&self) -> bool {
+        false
+    }
+    fn decode_at(&mut self, data: &[u8], _pts: Option<i64>) {
+        self.decode(data)
+    }
+    /// The next picture in display order with its time (microseconds).
+    fn pop_at(&mut self) -> Option<(i64, Pic)> {
+        None
+    }
 }
 
 pub trait AudioDec {
@@ -45,6 +58,7 @@ pub fn video(info: &VideoInfo) -> Result<Box<dyn VideoDec>, String> {
         }
         VCodec::H264AnnexB => Ok(Box::new(H264Dec { d: H264::new(), annexb: true })),
         VCodec::Mjpeg => Ok(Box::new(MjpegDec { pic: None })),
+        VCodec::Mpeg2 { config } => Ok(Box::new(super::mpeg2::Mpeg2Dec::new(config))),
         other => Err(unsupported_video(other)),
     }
 }

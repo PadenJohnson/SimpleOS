@@ -212,6 +212,15 @@ impl Engine {
             self.flushed = true;
         } else {
             match self.src.with(read, |d, r| d.next_video(r)) {
+                Some(p) if v.timed() => {
+                    if let Some(t) = p.pts {
+                        self.last_pts = t;
+                    }
+                    if p.key {
+                        self.fed_key = self.fed_key.max(self.last_pts);
+                    }
+                    v.decode_at(&p.data, p.pts);
+                }
                 Some(p) => {
                     let pts = p.pts.unwrap_or(self.last_pts + 33_333);
                     self.last_pts = pts;
@@ -225,6 +234,9 @@ impl Engine {
                 }
                 None => self.video_end = true,
             }
+        }
+        while let Some((pts, pic)) = if v.timed() { v.pop_at() } else { None } {
+            self.frames.push_back((pts, pic));
         }
         while let Some(pic) = v.pop() {
             let pts = self.pending.pop().map(|r| r.0).unwrap_or(self.last_pts);

@@ -203,8 +203,26 @@ fn video(path: &str, reference: &str, max: usize) {
         if psnr < worst {
             worst = psnr;
         }
-        if psnr < 30.0 && n < 400 {
+        let limit = if std::env::var("MT_WHERE").is_ok() { 98.0 } else { 30.0 };
+        if psnr < limit && n < 400 {
             println!("  frame {} PSNR {:.1}", k, psnr);
+            // MT_WHERE=1: which macroblocks differ (luma), as a map: '.' same, '+' close, '#' wrong.
+            if std::env::var("MT_WHERE").is_ok() && psnr < 70.0 {
+                for my in 0..h.div_ceil(16) {
+                    let mut line = String::new();
+                    for mx in 0..w.div_ceil(16) {
+                        let mut worst_px = 0f64;
+                        for y in my * 16..(my * 16 + 16).min(h) {
+                            for x in mx * 16..(mx * 16 + 16).min(w) {
+                                let a = f.y[(f.crop_y + y) * f.stride + f.crop_x + x] as f64;
+                                worst_px = worst_px.max((a - r[y * w + x] as f64).abs());
+                            }
+                        }
+                        line.push(if worst_px == 0.0 { '.' } else if worst_px < 8.0 { '+' } else { '#' });
+                    }
+                    println!("    {}", line);
+                }
+            }
         }
         sum += psnr;
         n += 1;

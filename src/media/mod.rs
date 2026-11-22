@@ -18,8 +18,13 @@ pub mod engine;
 pub mod es;
 pub mod mkv;
 pub mod mp4;
+pub mod mc;
 pub mod mpa;
 pub mod mpatab;
+pub mod mpeg12tab;
+pub mod mpeg2;
+pub mod idct;
+pub mod vlc;
 pub mod mpegps;
 pub mod mpegts;
 
