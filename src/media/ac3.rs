@@ -87,6 +87,38 @@ struct St {
     mask: [[i32; 50]; MAXCH],
     bap: [[u8; 256]; MAXCH],
     coef: [[f32; 256]; MAXCH],
+    // E-AC-3 (Dolby Digital Plus): per-frame syntax switches and strategies.
+    eac3: bool,
+    num_blocks: usize,
+    frame_type: u32,
+    block_switch_syntax: bool,
+    dither_syntax: bool,
+    bit_alloc_syntax: bool,
+    fast_gain_syntax: bool,
+    dba_syntax: bool,
+    skip_syntax: bool,
+    snr_offset_strategy: u32,
+    cpl_strategy_exists: [bool; 6],
+    cpl_in_use_blk: [bool; 6],
+    exp_strategy: [[u8; MAXCH]; 6],
+    uses_aht: [bool; MAXCH],
+    pre_mantissa: Vec<[[i32; 6]; 256]>,
+    first_cpl_coords: [bool; MAXCH],
+    first_cpl_leak: bool,
+    cpl_band_struct: [u8; 18],
+    // Spectral extension: high frequencies rebuilt from lower ones.
+    spx_in_use: bool,
+    uses_spx: [bool; MAXCH],
+    first_spx_coords: [bool; MAXCH],
+    spx_dst_start: usize,
+    spx_src_start: usize,
+    spx_dst_end: usize,
+    num_spx_bands: usize,
+    spx_band_sizes: [usize; 17],
+    spx_band_struct: [u8; 17],
+    spx_noise_blend: [[f32; 17]; MAXCH],
+    spx_signal_blend: [[f32; 17]; MAXCH],
+    spx_atten: [i32; MAXCH],
 }
 
 impl St {
@@ -134,6 +166,36 @@ impl St {
             mask: [[0; 50]; MAXCH],
             bap: [[0; 256]; MAXCH],
             coef: [[0.0; 256]; MAXCH],
+            eac3: false,
+            num_blocks: 6,
+            frame_type: 2,
+            block_switch_syntax: true,
+            dither_syntax: true,
+            bit_alloc_syntax: true,
+            fast_gain_syntax: false,
+            dba_syntax: true,
+            skip_syntax: true,
+            snr_offset_strategy: 0,
+            cpl_strategy_exists: [false; 6],
+            cpl_in_use_blk: [false; 6],
+            exp_strategy: [[0; MAXCH]; 6],
+            uses_aht: [false; MAXCH],
+            pre_mantissa: alloc::vec![[[0; 6]; 256]; MAXCH],
+            first_cpl_coords: [true; MAXCH],
+            first_cpl_leak: false,
+            cpl_band_struct: DEFAULT_CPL_BAND_STRUCT,
+            spx_in_use: false,
+            uses_spx: [false; MAXCH],
+            first_spx_coords: [true; MAXCH],
+            spx_dst_start: 0,
+            spx_src_start: 0,
+            spx_dst_end: 0,
+            num_spx_bands: 0,
+            spx_band_sizes: [0; 17],
+            spx_band_struct: DEFAULT_SPX_BAND_STRUCT,
+            spx_noise_blend: [[0.0; 17]; MAXCH],
+            spx_signal_blend: [[0.0; 17]; MAXCH],
+            spx_atten: [-1; MAXCH],
         })
     }
 }
@@ -244,54 +306,90 @@ impl Ac3Dec {
         }
     }
 
-    /// One whole frame (starting with the sync word): 1536 stereo samples.
-    fn frame(&mut self, f: &[u8], out: &mut Vec<i16>) -> Option<()> {
+    /// One whole frame (starting with the sync word): 256 stereo samples per block (6 blocks
+    /// in AC-3; 1, 2, 3 or 6 in E-AC-3). None for a frame that can't be decoded; Some(false)
+    /// for one that is skipped on purpose (an E-AC-3 extra substream).
+    fn frame(&mut self, f: &[u8], out: &mut Vec<i16>) -> Option<bool> {
         let mut b = Bits::new(f);
-        b.skip(32); // sync word, CRC
-        let fscod = b.read(2) as usize;
-        b.skip(6); // frame size
-        let bsid = b.read(5);
-        if bsid > 10 || fscod == 3 {
-            return None;
-        }
-        b.skip(3); // service type
-        let acmod = b.read(3) as usize;
-        let (mut cmix, mut smix) = (5usize, 6usize);
-        if acmod & 1 != 0 && acmod != 1 {
-            cmix = [4, 5, 6, 5][b.read(2) as usize];
-        }
-        if acmod & 4 != 0 {
-            smix = [4, 6, 7, 6][b.read(2) as usize];
-        }
-        if acmod == 2 {
-            b.skip(2); // Dolby Surround
-        }
-        let lfeon = b.flag();
-        for _ in 0..if acmod == 0 { 2 } else { 1 } {
-            b.skip(5); // dialogue level
+        let bsid = f[5] >> 3;
+        let (fscod, acmod, lfeon, cmix, smix, sr_shift, num_blocks, frame_type);
+        if bsid > 10 {
+            // E-AC-3.
+            b.skip(16);
+            frame_type = b.read(2);
+            let substream = b.read(3);
+            b.skip(11); // frame size
+            if frame_type == 3 {
+                return None;
+            }
+            if frame_type == 1 || substream != 0 {
+                // Dependent (extra channels for 7.1) or additional programmes: the main
+                // programme already has all the sound for a stereo mix.
+                return Some(false);
+            }
+            fscod = b.read(2) as usize;
+            if fscod == 3 {
+                return None; // reduced sample rates (FFmpeg doesn't decode them either)
+            }
+            num_blocks = [1, 2, 3, 6][b.read(2) as usize];
+            acmod = b.read(3) as usize;
+            lfeon = b.flag();
+            b.skip(5); // bsid
+            sr_shift = 0;
+            let (c, s) = self.eac3_bsi(&mut b, acmod, lfeon, num_blocks, frame_type);
+            cmix = c;
+            smix = s;
+        } else {
+            b.skip(32); // sync word, CRC
+            fscod = b.read(2) as usize;
+            b.skip(6); // frame size
+            b.skip(5); // bsid
+            if fscod == 3 {
+                return None;
+            }
+            b.skip(3); // service type
+            acmod = b.read(3) as usize;
+            let (mut c, mut s) = (5usize, 6usize);
+            if acmod & 1 != 0 && acmod != 1 {
+                c = [4, 5, 6, 5][b.read(2) as usize];
+            }
+            if acmod & 4 != 0 {
+                s = [4, 6, 7, 6][b.read(2) as usize];
+            }
+            cmix = c;
+            smix = s;
+            if acmod == 2 {
+                b.skip(2); // Dolby Surround
+            }
+            lfeon = b.flag();
+            for _ in 0..if acmod == 0 { 2 } else { 1 } {
+                b.skip(5); // dialogue level
+                if b.flag() {
+                    b.skip(8); // heavy compression
+                }
+                if b.flag() {
+                    b.skip(8); // language
+                }
+                if b.flag() {
+                    b.skip(7); // mixing level, room type
+                }
+            }
+            b.skip(2); // copyright, original
             if b.flag() {
-                b.skip(8); // heavy compression
+                b.skip(14);
             }
             if b.flag() {
-                b.skip(8); // language
+                b.skip(14);
             }
             if b.flag() {
-                b.skip(7); // mixing level, room type
+                let len = b.read(6) as usize;
+                b.skip((len + 1) * 8);
             }
-        }
-        b.skip(2); // copyright, original
-        if b.flag() {
-            b.skip(14);
-        }
-        if b.flag() {
-            b.skip(14);
-        }
-        if b.flag() {
-            let len = b.read(6) as usize;
-            b.skip((len + 1) * 8);
+            sr_shift = bsid.max(8) as u32 - 8;
+            num_blocks = 6;
+            frame_type = 2;
         }
 
-        let sr_shift = bsid.max(8) - 8;
         self.rate = [48000, 44100, 32000][fscod] >> sr_shift;
         let fbw = NFCHANS[acmod];
         {
@@ -302,12 +400,29 @@ impl Ac3Dec {
             s.acmod = acmod;
             s.sr_code = fscod;
             s.sr_shift = sr_shift;
+            s.eac3 = bsid > 10;
+            s.num_blocks = num_blocks;
+            s.frame_type = frame_type;
             if lfeon {
                 s.start[s.lfe] = 0;
                 s.end[s.lfe] = 7;
                 s.ngrps[s.lfe] = 2;
                 s.in_cpl[s.lfe] = false;
             }
+        }
+        if self.st.eac3 {
+            self.eac3_frame_header(&mut b, f.len())?;
+        } else {
+            let s = &mut self.st;
+            s.block_switch_syntax = true;
+            s.dither_syntax = true;
+            s.bit_alloc_syntax = true;
+            s.fast_gain_syntax = false;
+            s.dba_syntax = true;
+            s.skip_syntax = true;
+            s.snr_offset_strategy = 0;
+            s.uses_aht = [false; MAXCH];
+            s.first_cpl_leak = false;
         }
 
         // The stereo mix (FFmpeg's set_downmix_coeffs).
@@ -334,9 +449,9 @@ impl Ac3Dec {
 
         let mut noise = Noise::seed(&self.crc, f);
         let base = out.len();
-        out.resize(base + 6 * 256 * 2, 0);
+        out.resize(base + num_blocks * 256 * 2, 0);
         let mut pcm = [[0f32; 256]; 5];
-        for blk in 0..6 {
+        for blk in 0..num_blocks {
             self.block(&mut b, blk, &mut noise)?;
             for ch in 0..fbw {
                 self.transform(ch, &mut pcm[ch]);
@@ -352,6 +467,208 @@ impl Ac3Dec {
                 o[2 * i + 1] = to_i16(r);
             }
         }
+        Some(true)
+    }
+
+    /// The rest of an E-AC-3 frame's stream information; returns the centre and surround mix
+    /// levels for the stereo mix.
+    fn eac3_bsi(&mut self, b: &mut Bits, acmod: usize, lfeon: bool, num_blocks: usize, frame_type: u32) -> (usize, usize) {
+        let (mut cmix, mut smix) = (5usize, 6usize);
+        let progs = if acmod == 0 { 2 } else { 1 };
+        for _ in 0..progs {
+            b.skip(5); // dialogue level
+            if b.flag() {
+                b.skip(8); // heavy compression
+            }
+        }
+        if frame_type == 1 && b.flag() {
+            b.skip(16); // channel map
+        }
+        if b.flag() {
+            // Mixing metadata.
+            if acmod > 2 {
+                b.skip(2); // preferred mix
+                if acmod & 1 != 0 {
+                    b.skip(3); // Lt/Rt centre level
+                    cmix = b.read(3) as usize;
+                }
+                if acmod & 4 != 0 {
+                    b.skip(3); // Lt/Rt surround level
+                    smix = (b.read(3) as usize).clamp(3, 7);
+                }
+            }
+            if lfeon && b.flag() {
+                b.skip(5); // LFE mix level
+            }
+            if frame_type == 0 {
+                for _ in 0..progs {
+                    if b.flag() {
+                        b.skip(6);
+                    }
+                }
+                if b.flag() {
+                    b.skip(6);
+                }
+                match b.read(2) {
+                    1 => b.skip(5),
+                    2 => b.skip(12),
+                    3 => {
+                        let n = (b.read(5) as usize + 2) << 3;
+                        b.skip(n);
+                    }
+                    _ => {}
+                }
+                if acmod < 2 {
+                    for _ in 0..progs {
+                        if b.flag() {
+                            b.skip(14); // pan
+                        }
+                    }
+                }
+                if b.flag() {
+                    for _ in 0..num_blocks {
+                        if num_blocks == 1 || b.flag() {
+                            b.skip(5);
+                        }
+                    }
+                }
+            }
+        }
+        if b.flag() {
+            // Informational metadata.
+            b.skip(3 + 2);
+            if acmod == 2 {
+                b.skip(4);
+            }
+            if acmod >= 6 {
+                b.skip(2);
+            }
+            for _ in 0..progs {
+                if b.flag() {
+                    b.skip(8);
+                }
+            }
+            b.skip(1); // source sample rate
+        }
+        if frame_type == 0 && num_blocks != 6 {
+            b.skip(1); // converter sync
+        }
+        if frame_type == 2 && (num_blocks == 6 || b.flag()) {
+            b.skip(6);
+        }
+        if b.flag() {
+            let n = b.read(6) as usize + 1;
+            b.skip(n * 8);
+        }
+        (cmix, smix)
+    }
+
+    /// E-AC-3's audio frame header: syntax switches, coupling and exponent strategies for all
+    /// blocks, and which channels use the hybrid transform.
+    fn eac3_frame_header(&mut self, b: &mut Bits, frame_size: usize) -> Option<()> {
+        let s = &mut *self.st;
+        let (fbw, nb) = (s.fbw, s.num_blocks);
+        let (ac3_expstr, parse_aht) = if nb == 6 { (b.flag(), b.flag()) } else { (true, false) };
+        s.snr_offset_strategy = b.read(2);
+        let transient = b.flag();
+        s.block_switch_syntax = b.flag();
+        if !s.block_switch_syntax {
+            s.block_switch = [false; MAXCH];
+        }
+        s.dither_syntax = b.flag();
+        if !s.dither_syntax {
+            for ch in 1..=fbw {
+                s.dither[ch] = true;
+            }
+        }
+        s.dither[CPL] = false;
+        if s.lfe < MAXCH {
+            s.dither[s.lfe] = false;
+        }
+        s.bit_alloc_syntax = b.flag();
+        if !s.bit_alloc_syntax {
+            s.slow_decay = SLOW_DECAY[2] as i32;
+            s.fast_decay = FAST_DECAY[1] as i32;
+            s.slow_gain = SLOW_GAIN[1] as i32;
+            s.db_per_bit = DB_PER_BIT[2] as i32;
+            s.floor = FLOOR[7] as i32;
+        }
+        s.fast_gain_syntax = b.flag();
+        s.dba_syntax = b.flag();
+        s.skip_syntax = b.flag();
+        let spx_atten = b.flag();
+        let mut ncpl = 0;
+        if s.acmod > 1 {
+            for blk in 0..nb {
+                s.cpl_strategy_exists[blk] = blk == 0 || b.flag();
+                s.cpl_in_use_blk[blk] = if s.cpl_strategy_exists[blk] { b.flag() } else { s.cpl_in_use_blk[blk - 1] };
+                ncpl += s.cpl_in_use_blk[blk] as usize;
+            }
+        } else {
+            s.cpl_in_use_blk = [false; 6];
+            s.cpl_strategy_exists = [false; 6];
+        }
+        if ac3_expstr {
+            for blk in 0..nb {
+                for ch in (!s.cpl_in_use_blk[blk]) as usize..=fbw {
+                    s.exp_strategy[blk][ch] = b.read(2) as u8;
+                }
+            }
+        } else {
+            for ch in (!(s.acmod > 1 && ncpl > 0)) as usize..=fbw {
+                let code = b.read(5) as usize;
+                for blk in 0..6 {
+                    s.exp_strategy[blk][ch] = FRM_EXPSTR[code * 6 + blk];
+                }
+            }
+        }
+        if s.lfe < MAXCH {
+            for blk in 0..nb {
+                s.exp_strategy[blk][s.lfe] = b.read(1) as u8;
+            }
+        }
+        if s.frame_type == 0 && (nb == 6 || b.flag()) {
+            b.skip(5 * fbw); // converter exponent strategies
+        }
+        s.uses_aht = [false; MAXCH];
+        if parse_aht {
+            for ch in (ncpl != 6) as usize..=s.nch {
+                let mut ok = true;
+                for blk in 1..6 {
+                    if s.exp_strategy[blk][ch] != EXP_REUSE || (ch == CPL && s.cpl_strategy_exists[blk]) {
+                        ok = false;
+                        break;
+                    }
+                }
+                s.uses_aht[ch] = ok && b.flag();
+            }
+        }
+        if s.snr_offset_strategy == 0 {
+            let csnr = (b.read(6) as i32 - 15) << 4;
+            let snr = (csnr + b.read(4) as i32) << 2;
+            for ch in 0..=s.nch {
+                s.snr[ch] = snr;
+            }
+        }
+        if transient {
+            for _ in 1..=fbw {
+                if b.flag() {
+                    b.skip(10 + 8);
+                }
+            }
+        }
+        for ch in 1..=fbw {
+            s.spx_atten[ch] = if spx_atten && b.flag() { b.read(5) as i32 } else { -1 };
+        }
+        if nb > 1 && b.flag() {
+            let log2 = 31 - ((frame_size.max(3) - 2) as u32).leading_zeros();
+            b.skip((nb - 1) * (4 + log2 as usize));
+        }
+        for ch in 1..=fbw {
+            s.first_spx_coords[ch] = true;
+            s.first_cpl_coords[ch] = true;
+        }
+        s.first_cpl_leak = true;
         Some(())
     }
 
@@ -359,11 +676,16 @@ impl Ac3Dec {
     fn block(&mut self, b: &mut Bits, blk: usize, noise: &mut Noise) -> Option<()> {
         let s = &mut *self.st;
         let fbw = s.fbw;
-        for ch in 1..=fbw {
-            s.block_switch[ch] = b.flag();
+        let eac3 = s.eac3;
+        if s.block_switch_syntax {
+            for ch in 1..=fbw {
+                s.block_switch[ch] = b.flag();
+            }
         }
-        for ch in 1..=fbw {
-            s.dither[ch] = b.flag();
+        if s.dither_syntax {
+            for ch in 1..=fbw {
+                s.dither[ch] = b.flag();
+            }
         }
         // Dynamic range (quieter loud parts, louder quiet parts).
         let mut i = (s.acmod == 0) as usize;
@@ -382,63 +704,97 @@ impl Ac3Dec {
             i -= 1;
         }
 
+        // Spectral extension (E-AC-3).
+        if eac3 && (blk == 0 || b.flag()) {
+            s.spx_in_use = b.flag();
+            if s.spx_in_use {
+                s.spx_strategy(b, blk)?;
+            }
+        }
+        if !eac3 || !s.spx_in_use {
+            s.spx_in_use = false;
+            for ch in 1..=fbw {
+                s.uses_spx[ch] = false;
+                s.first_spx_coords[ch] = true;
+            }
+        }
+        if s.spx_in_use {
+            s.spx_coordinates(b);
+        }
+
         // Coupling strategy.
-        if b.flag() {
-            s.cpl_in_use = b.flag();
-            if s.cpl_in_use {
+        let new_cpl = if eac3 { s.cpl_strategy_exists[blk] } else { b.flag() };
+        if new_cpl {
+            if !eac3 {
+                s.cpl_in_use_blk[blk] = b.flag();
+            }
+            if s.cpl_in_use_blk[blk] {
                 if s.acmod < 2 {
                     return None;
                 }
-                for ch in 1..=fbw {
-                    s.in_cpl[ch] = b.flag();
+                if eac3 && b.flag() {
+                    return None; // enhanced coupling (FFmpeg doesn't decode it either)
+                }
+                if eac3 && s.acmod == 2 {
+                    s.in_cpl[1] = true;
+                    s.in_cpl[2] = true;
+                } else {
+                    for ch in 1..=fbw {
+                        s.in_cpl[ch] = b.flag();
+                    }
                 }
                 if s.acmod == 2 {
                     s.phase_in_use = b.flag();
                 }
                 let begin = b.read(4) as usize;
-                let end = b.read(4) as usize + 3;
+                let end = if s.spx_in_use { (s.spx_src_start - 37) / 12 } else { b.read(4) as usize + 3 };
                 if begin >= end {
                     return None;
                 }
                 s.start[CPL] = begin * 12 + 37;
                 s.end[CPL] = end * 12 + 37;
-                let n = end - begin;
-                let mut sizes = [12usize; 18];
-                let mut bands = 0;
-                for _ in 1..n {
-                    if b.flag() {
-                        sizes[bands] += 12;
-                    } else {
-                        bands += 1;
-                        sizes[bands] = 12;
-                    }
+                let (n, sizes) = band_structure(b, blk, eac3, begin, end, &DEFAULT_CPL_BAND_STRUCT, &mut s.cpl_band_struct);
+                s.ncplbands = n;
+                for (k, v) in sizes.iter().enumerate().take(18) {
+                    s.cpl_band_sizes[k] = *v as usize;
                 }
-                s.ncplbands = bands + 1;
-                s.cpl_band_sizes = sizes;
             } else {
                 for ch in 1..=fbw {
                     s.in_cpl[ch] = false;
+                    s.first_cpl_coords[ch] = true;
                 }
+                s.first_cpl_leak = eac3;
                 s.phase_in_use = false;
             }
-        } else if blk == 0 {
-            return None;
+        } else if !eac3 {
+            if blk == 0 {
+                return None;
+            }
+            s.cpl_in_use_blk[blk] = s.cpl_in_use_blk[blk - 1];
         }
-        let cpl = s.cpl_in_use;
+        let cpl = s.cpl_in_use_blk[blk];
+        s.cpl_in_use = cpl;
 
         // Coupling coordinates.
         if cpl {
             let mut any = false;
             for ch in 1..=fbw {
-                if s.in_cpl[ch] && b.flag() {
-                    any = true;
-                    let master = 3 * b.read(2) as i32;
-                    for bnd in 0..s.ncplbands {
-                        let e = b.read(4) as i32;
-                        let m = b.read(4) as i32;
-                        let v = if e == 15 { m << 22 } else { (m + 16) << 21 };
-                        s.cpl_coords[ch][bnd] = v >> (e + master);
+                if s.in_cpl[ch] {
+                    if (eac3 && s.first_cpl_coords[ch]) || b.flag() {
+                        s.first_cpl_coords[ch] = false;
+                        any = true;
+                        let master = 3 * b.read(2) as i32;
+                        for bnd in 0..s.ncplbands {
+                            let e = b.read(4) as i32;
+                            let m = b.read(4) as i32;
+                            let v = if e == 15 { m << 22 } else { (m + 16) << 21 };
+                            s.cpl_coords[ch][bnd] = v >> (e + master);
+                        }
+                    } else if blk == 0 {
+                        return None;
                     }
+                } else {
+                    s.first_cpl_coords[ch] = true;
                 }
             }
             if s.acmod == 2 && any {
@@ -450,10 +806,12 @@ impl Ac3Dec {
 
         // Stereo rematrixing.
         if s.acmod == 2 {
-            if b.flag() {
+            if (eac3 && blk == 0) || b.flag() {
                 s.nremat = 4;
                 if cpl && s.start[CPL] <= 61 {
                     s.nremat -= 1 + (s.start[CPL] == 37) as usize;
+                } else if s.spx_in_use && s.spx_src_start <= 61 {
+                    s.nremat -= 1;
                 }
                 for bnd in 0..s.nremat {
                     s.remat[bnd] = b.flag();
@@ -467,13 +825,15 @@ impl Ac3Dec {
         let first = !cpl as usize;
         let nch = s.nch;
         for ch in first..=nch {
-            s.expstr[ch] = b.read(if ch == s.lfe { 1 } else { 2 }) as u8;
+            s.expstr[ch] = if eac3 { s.exp_strategy[blk][ch] } else { b.read(if ch == s.lfe { 1 } else { 2 }) as u8 };
         }
         for ch in 1..=fbw {
             s.start[ch] = 0;
             if s.expstr[ch] != EXP_REUSE {
                 if s.in_cpl[ch] {
                     s.end[ch] = s.start[CPL];
+                } else if s.uses_spx[ch] {
+                    s.end[ch] = s.spx_src_start;
                 } else {
                     let code = b.read(6) as usize;
                     if code > 60 {
@@ -525,33 +885,56 @@ impl Ac3Dec {
         }
 
         // Bit allocation parameters.
-        if b.flag() {
-            s.slow_decay = (SLOW_DECAY[b.read(2) as usize] as i32) >> s.sr_shift;
-            s.fast_decay = (FAST_DECAY[b.read(2) as usize] as i32) >> s.sr_shift;
-            s.slow_gain = SLOW_GAIN[b.read(2) as usize] as i32;
-            s.db_per_bit = DB_PER_BIT[b.read(2) as usize] as i32;
-            s.floor = FLOOR[b.read(3) as usize] as i32;
-        } else if blk == 0 {
-            return None;
-        }
-        if b.flag() {
-            let csnr = (b.read(6) as i32 - 15) << 4;
-            for ch in first..=nch {
-                s.snr[ch] = (csnr + b.read(4) as i32) << 2;
-                s.fast_gain[ch] = FAST_GAIN[b.read(3) as usize] as i32;
-            }
-        } else if blk == 0 {
-            return None;
-        }
-        if cpl {
+        if s.bit_alloc_syntax {
             if b.flag() {
-                s.cpl_fast_leak = b.read(3) as i32;
-                s.cpl_slow_leak = b.read(3) as i32;
+                s.slow_decay = (SLOW_DECAY[b.read(2) as usize] as i32) >> s.sr_shift;
+                s.fast_decay = (FAST_DECAY[b.read(2) as usize] as i32) >> s.sr_shift;
+                s.slow_gain = SLOW_GAIN[b.read(2) as usize] as i32;
+                s.db_per_bit = DB_PER_BIT[b.read(2) as usize] as i32;
+                s.floor = FLOOR[b.read(3) as usize] as i32;
             } else if blk == 0 {
                 return None;
             }
         }
-        if b.flag() {
+        if !eac3 || blk == 0 {
+            if (!eac3 || s.snr_offset_strategy != 0) && b.flag() {
+                let csnr = (b.read(6) as i32 - 15) << 4;
+                let mut snr = 0;
+                for ch in first..=nch {
+                    if ch == first || s.snr_offset_strategy == 2 || !eac3 {
+                        snr = (csnr + b.read(4) as i32) << 2;
+                    }
+                    s.snr[ch] = snr;
+                    if !eac3 {
+                        s.fast_gain[ch] = FAST_GAIN[b.read(3) as usize] as i32;
+                    }
+                }
+            } else if !eac3 && blk == 0 {
+                return None;
+            }
+        }
+        if s.fast_gain_syntax && b.flag() {
+            for ch in first..=nch {
+                s.fast_gain[ch] = FAST_GAIN[b.read(3) as usize] as i32;
+            }
+        } else if eac3 && blk == 0 {
+            for ch in first..=nch {
+                s.fast_gain[ch] = FAST_GAIN[4] as i32;
+            }
+        }
+        if s.frame_type == 0 && b.flag() {
+            b.skip(10); // converter SNR offset
+        }
+        if cpl {
+            if s.first_cpl_leak || b.flag() {
+                s.cpl_fast_leak = b.read(3) as i32;
+                s.cpl_slow_leak = b.read(3) as i32;
+            } else if !eac3 && blk == 0 {
+                return None;
+            }
+            s.first_cpl_leak = false;
+        }
+        if s.dba_syntax && b.flag() {
             for ch in first..=fbw {
                 s.dba_mode[ch] = b.read(2) as u8;
                 if s.dba_mode[ch] == 3 {
@@ -576,7 +959,7 @@ impl Ac3Dec {
         for ch in first..=nch {
             s.allocate(ch)?;
         }
-        if b.flag() {
+        if s.skip_syntax && b.flag() {
             let len = b.read(9) as usize;
             b.skip(len * 8); // unused data
         }
@@ -585,12 +968,12 @@ impl Ac3Dec {
         let mut g = Groups::default();
         let mut got_cpl = false;
         for ch in 1..=nch {
-            self.mantissas(b, ch, &mut g, noise);
+            self.coefficients(b, ch, blk, &mut g, noise);
             let s = &mut *self.st;
             let mut end = s.end[ch];
             if s.in_cpl[ch] {
                 if !got_cpl {
-                    self.mantissas(b, CPL, &mut g, noise);
+                    self.coefficients(b, CPL, blk, &mut g, noise);
                     self.st.uncouple();
                     got_cpl = true;
                 }
@@ -630,7 +1013,26 @@ impl Ac3Dec {
                 *c *= gain;
             }
         }
+        if s.spx_in_use {
+            s.apply_spx(noise);
+        }
         Some(())
+    }
+
+    /// A channel's coefficients: normal mantissas, or (E-AC-3's hybrid transform) the values
+    /// for all six blocks, which come in the first block.
+    fn coefficients(&mut self, b: &mut Bits, ch: usize, blk: usize, g: &mut Groups, noise: &mut Noise) {
+        if !self.st.uses_aht[ch] {
+            self.mantissas(b, ch, g, noise);
+            return;
+        }
+        if blk == 0 {
+            self.st.aht_mantissas(b, ch, noise);
+        }
+        let s = &mut *self.st;
+        for f in s.start[ch]..s.end[ch].min(256) {
+            s.coef[ch][f] = s.pre_mantissa[ch][f][blk] as f32 * SCALE[s.dexps[ch][f] as usize];
+        }
     }
 
     fn mantissas(&mut self, b: &mut Bits, ch: usize, g: &mut Groups, noise: &mut Noise) {
@@ -884,6 +1286,7 @@ impl St {
         }
         let psd = &self.psd[ch];
         let floor = self.floor;
+        let tab: &[u8; 64] = if self.uses_aht[ch] { &HEBAP_TAB } else { &BAP_TAB };
         let mut bin = start;
         let mut band = BIN_TO_BAND[start] as usize;
         loop {
@@ -892,7 +1295,7 @@ impl St {
             let band_end = (BAND_START[band] as usize).min(end);
             while bin < band_end {
                 let adr = ((psd[bin] - m) >> 5).clamp(0, 63);
-                bap[bin] = BAP_TAB[adr as usize];
+                bap[bin] = tab[adr as usize];
                 bin += 1;
             }
             if end <= band_end {
@@ -925,6 +1328,303 @@ impl St {
     }
 }
 
+/// Band layout of a frequency range in 12-bin subbands (coupling, spectral extension): each
+/// subband either joins the band before it or starts a new one. Returns the band count and
+/// sizes. `state` keeps the layout from block to block (E-AC-3 may reuse it).
+fn band_structure(b: &mut Bits, blk: usize, eac3: bool, start: usize, end: usize, default: &[u8], state: &mut [u8]) -> (usize, [u8; 22]) {
+    let n_sub = end - start;
+    if blk == 0 {
+        state.copy_from_slice(default);
+    }
+    if !eac3 || b.flag() {
+        for sub in 0..n_sub - 1 {
+            state[start + 1 + sub] = b.flag() as u8;
+        }
+    }
+    let mut sizes = [0u8; 22];
+    let mut n = n_sub;
+    sizes[0] = 12;
+    let mut bnd = 0;
+    for sub in 1..n_sub {
+        if state[start + sub] != 0 {
+            n -= 1;
+            sizes[bnd] += 12;
+        } else {
+            bnd += 1;
+            sizes[bnd] = 12;
+        }
+    }
+    (n, sizes)
+}
+
+impl St {
+    /// E-AC-3 spectral extension: which channels, and the copy and extension ranges.
+    fn spx_strategy(&mut self, b: &mut Bits, blk: usize) -> Option<()> {
+        if self.acmod == 1 {
+            self.uses_spx[1] = true;
+        } else {
+            let mut v = b.read(self.fbw as u32);
+            for ch in (1..=self.fbw).rev() {
+                self.uses_spx[ch] = v & 1 != 0;
+                v >>= 1;
+            }
+        }
+        let dst = b.read(2) as usize;
+        let mut start = b.read(3) as usize + 2;
+        if start > 7 {
+            start += start - 7;
+        }
+        let mut end = b.read(3) as usize + 5;
+        if end > 7 {
+            end += end - 7;
+        }
+        let dst_start = dst * 12 + 25;
+        let src_start = start * 12 + 25;
+        if start >= end || dst_start >= src_start {
+            return None;
+        }
+        self.spx_dst_start = dst_start;
+        self.spx_src_start = src_start;
+        self.spx_dst_end = end * 12 + 25;
+        let (n, sizes) = band_structure(b, blk, true, start, end, &DEFAULT_SPX_BAND_STRUCT, &mut self.spx_band_struct);
+        self.num_spx_bands = n.min(17);
+        for k in 0..17 {
+            self.spx_band_sizes[k] = sizes[k] as usize;
+        }
+        Some(())
+    }
+
+    fn spx_coordinates(&mut self, b: &mut Bits) {
+        for ch in 1..=self.fbw {
+            if !self.uses_spx[ch] {
+                self.first_spx_coords[ch] = true;
+                continue;
+            }
+            if self.first_spx_coords[ch] || b.flag() {
+                self.first_spx_coords[ch] = false;
+                let blend = b.read(5) as f32 * (1.0 / 32.0);
+                let master = b.read(2) as i32 * 3;
+                let mut bin = self.spx_src_start;
+                for bnd in 0..self.num_spx_bands {
+                    let bs = self.spx_band_sizes[bnd];
+                    let nratio = ((bin + (bs >> 1)) as f32 / self.spx_dst_end as f32 - blend).clamp(0.0, 1.0);
+                    let nblend = libm::sqrtf(3.0 * nratio);
+                    let sblend = libm::sqrtf(1.0 - nratio);
+                    bin += bs;
+                    let e = b.read(4) as i32;
+                    let mut m = b.read(2) as i32;
+                    if e == 15 {
+                        m <<= 1;
+                    } else {
+                        m += 4;
+                    }
+                    m <<= 25 - e - master;
+                    let coord = m as f32 * (1.0 / 8_388_608.0);
+                    self.spx_noise_blend[ch][bnd] = nblend * coord;
+                    self.spx_signal_blend[ch][bnd] = sblend * coord;
+                }
+            }
+        }
+    }
+
+    /// Rebuild the high frequencies from copies of lower ones, scaled and mixed with noise.
+    fn apply_spx(&mut self, noise: &mut Noise) {
+        let (dst_start, src_start) = (self.spx_dst_start, self.spx_src_start);
+        let mut wrap = [false; 17];
+        wrap[0] = true;
+        let mut copy = [0usize; 40];
+        let mut ncopy = 0;
+        let mut bin = dst_start;
+        for bnd in 0..self.num_spx_bands {
+            let bs = self.spx_band_sizes[bnd];
+            if bin + bs > src_start {
+                copy[ncopy] = bin - dst_start;
+                ncopy += 1;
+                bin = dst_start;
+                wrap[bnd] = true;
+            }
+            let mut i = 0;
+            while i < bs {
+                if bin == src_start {
+                    copy[ncopy] = bin - dst_start;
+                    ncopy += 1;
+                    bin = dst_start;
+                }
+                let n = (bs - i).min(src_start - bin);
+                bin += n;
+                i += n;
+            }
+        }
+        copy[ncopy] = bin - dst_start;
+        ncopy += 1;
+        for ch in 1..=self.fbw {
+            if !self.uses_spx[ch] {
+                continue;
+            }
+            let c = &mut self.coef[ch];
+            let mut bin = src_start;
+            for &n in copy.iter().take(ncopy) {
+                for k in 0..n {
+                    if bin + k < 256 {
+                        c[bin + k] = c[dst_start + k];
+                    }
+                }
+                bin += n;
+            }
+            let mut rms = [0f32; 17];
+            let mut bin = src_start;
+            for bnd in 0..self.num_spx_bands {
+                let bs = self.spx_band_sizes[bnd];
+                let mut acc = 0.0f32;
+                for _ in 0..bs {
+                    let v = c[bin.min(255)];
+                    acc += v * v;
+                    bin += 1;
+                }
+                rms[bnd] = libm::sqrtf(acc / bs as f32);
+            }
+            if self.spx_atten[ch] >= 0 {
+                let a = &SPX_ATTEN[self.spx_atten[ch] as usize * 3..];
+                let mut bin = src_start - 2;
+                for bnd in 0..self.num_spx_bands {
+                    if wrap[bnd] && bin + 5 <= 256 {
+                        c[bin] *= a[0];
+                        c[bin + 1] *= a[1];
+                        c[bin + 2] *= a[2];
+                        c[bin + 3] *= a[1];
+                        c[bin + 4] *= a[0];
+                    }
+                    bin += self.spx_band_sizes[bnd];
+                }
+            }
+            let mut bin = src_start;
+            for bnd in 0..self.num_spx_bands {
+                let nscale = self.spx_noise_blend[ch][bnd] * rms[bnd] * (1.0 / -2_147_483_648.0f32);
+                let sscale = self.spx_signal_blend[ch][bnd];
+                for _ in 0..self.spx_band_sizes[bnd] {
+                    let n = nscale * (noise.next() as i32) as f32;
+                    if bin < 256 {
+                        c[bin] *= sscale;
+                        c[bin] += n;
+                    }
+                    bin += 1;
+                }
+            }
+        }
+    }
+
+    /// E-AC-3 hybrid transform: one channel's values for all six blocks, read in block 0.
+    fn aht_mantissas(&mut self, b: &mut Bits, ch: usize, noise: &mut Noise) {
+        let gaq_mode = b.read(2);
+        let end_bap = if gaq_mode < 2 { 12 } else { 17 };
+        let (start, end) = (self.start[ch], self.end[ch].min(256));
+        let mut gaq = [0i32; 256];
+        let mut gs = 0;
+        if gaq_mode == 1 || gaq_mode == 2 {
+            for bin in start..end {
+                let h = self.bap[ch][bin];
+                if h > 7 && h < end_bap {
+                    gaq[gs] = (b.read(1) as i32) << (gaq_mode - 1);
+                    gs += 1;
+                }
+            }
+        } else if gaq_mode == 3 {
+            let mut gc = 2;
+            for bin in start..end {
+                let h = self.bap[ch][bin];
+                if h > 7 && h < 17 {
+                    if gc == 2 {
+                        let code = (b.read(5) as i32).min(26);
+                        for v in [code / 9, (code % 9) / 3, code % 3] {
+                            if gs < 256 {
+                                gaq[gs] = v;
+                                gs += 1;
+                            }
+                        }
+                        gc = 0;
+                    } else {
+                        gc += 1;
+                    }
+                }
+            }
+        }
+        let vq: [&[i16]; 8] = [&[], &VQ_HEBAP1, &VQ_HEBAP2, &VQ_HEBAP3, &VQ_HEBAP4, &VQ_HEBAP5, &VQ_HEBAP6, &VQ_HEBAP7];
+        let sbits = |b: &mut Bits, n: u32| -> i32 {
+            if n == 0 {
+                return 0;
+            }
+            let v = b.read(n) as i32;
+            (v << (32 - n)) >> (32 - n)
+        };
+        gs = 0;
+        for bin in start..end {
+            let h = self.bap[ch][bin] as usize;
+            let bits = BITS_VS_HEBAP[h] as u32;
+            let pm = &mut self.pre_mantissa[ch][bin];
+            if h == 0 {
+                for v in pm.iter_mut() {
+                    *v = (noise.next() & 0x7F_FFFF) as i32 - 0x40_0000;
+                }
+            } else if h < 8 {
+                let v = b.read(bits) as usize;
+                for (k, p) in pm.iter_mut().enumerate() {
+                    *p = vq[h][v * 6 + k] as i32 * 256;
+                }
+            } else {
+                let log_gain = if gaq_mode != 0 && h < end_bap as usize {
+                    gs += 1;
+                    gaq[gs - 1]
+                } else {
+                    0
+                };
+                let gbits = bits - log_gain as u32;
+                for p in pm.iter_mut() {
+                    let mut mant = sbits(b, gbits);
+                    if log_gain != 0 && mant == -(1 << (gbits - 1)) {
+                        let mbits = bits - (2 - log_gain as u32);
+                        mant = sbits(b, mbits);
+                        mant = ((mant as u32) << (23 - (mbits - 1))) as i32;
+                        let bb = if mant >= 0 { 1 << (23 - log_gain) } else { GAQ_REMAP_2_4_B[(h - 8) * 2 + log_gain as usize - 1] as i32 * 256 };
+                        mant += ((GAQ_REMAP_2_4_A[(h - 8) * 2 + log_gain as usize - 1] as i64 * mant as i64) >> 15) as i32 + bb;
+                    } else {
+                        mant *= 1 << (24 - bits);
+                        if log_gain == 0 {
+                            mant += ((GAQ_REMAP_1[h - 8] as i64 * mant as i64) >> 15) as i32;
+                        }
+                    }
+                    *p = mant;
+                }
+            }
+            idct6(pm);
+        }
+    }
+}
+
+/// The hybrid transform's six-point inverse DCT (fixed point, as FFmpeg).
+fn idct6(m: &mut [i32; 6]) {
+    const C0: i64 = 10273905;
+    const C1: i64 = 11863283;
+    const C2: i64 = 3070444;
+    let odd1 = m[1] - m[3] - m[5];
+    let mut even2 = ((m[2] as i64 * C0) >> 23) as i32;
+    let tmp = ((m[4] as i64 * C1) >> 23) as i32;
+    let mut odd0 = (((m[1] + m[5]) as i64 * C2) >> 23) as i32;
+    let mut even0 = m[0] + (tmp >> 1);
+    let even1 = m[0] - tmp;
+    let t = even0;
+    even0 = t + even2;
+    even2 = t - even2;
+    let t = odd0;
+    odd0 = t + m[1] + m[3];
+    let odd2 = t + m[5] - m[3];
+    m[0] = even0 + odd0;
+    m[1] = even1 + odd1;
+    m[2] = even2 + odd2;
+    m[3] = even2 - odd2;
+    m[4] = even1 - odd1;
+    m[5] = even0 - odd0;
+}
+
 fn lowcomp1(a: i32, b0: i32, b1: i32, c: i32) -> i32 {
     if b0 + 256 == b1 {
         c
@@ -940,12 +1640,30 @@ fn frame_len(h: &[u8]) -> Option<usize> {
     if h.len() < 6 || h[0] != 0x0B || h[1] != 0x77 {
         return None;
     }
+    let bsid = h[5] >> 3;
+    if bsid > 16 {
+        return None;
+    }
+    if bsid > 10 {
+        // E-AC-3: the size in 16-bit words follows the stream type and substream.
+        let words = (((h[2] & 7) as usize) << 8 | h[3] as usize) + 1;
+        return if words * 2 >= 7 { Some(words * 2) } else { None };
+    }
     let fscod = (h[4] >> 6) as usize;
     let code = (h[4] & 63) as usize;
-    if fscod == 3 || code >= 38 || h[5] >> 3 > 10 {
+    if fscod == 3 || code >= 38 {
         return None;
     }
     Some(FRAME_SIZE[code * 3 + fscod] as usize * 2)
+}
+
+/// Blocks of 256 samples in a frame (E-AC-3 frames may be shorter than AC-3's six).
+fn frame_blocks(h: &[u8]) -> usize {
+    if h[5] >> 3 > 10 && h[4] >> 6 != 3 {
+        [1, 2, 3, 6][((h[4] >> 4) & 3) as usize]
+    } else {
+        6
+    }
 }
 
 impl AudioDec for Ac3Dec {
@@ -966,7 +1684,7 @@ impl AudioDec for Ac3Dec {
             if self.frame(&f, &mut out).is_none() {
                 // A damaged frame: silence rather than noise.
                 out.truncate(before);
-                out.resize(before + 6 * 256 * 2, 0);
+                out.resize(before + frame_blocks(&f) * 256 * 2, 0);
             }
             p += len;
         }
