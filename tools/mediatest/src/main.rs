@@ -206,8 +206,18 @@ fn video(path: &str, reference: &str, max: usize) {
         let limit = if std::env::var("MT_WHERE").is_ok() { 98.0 } else { 30.0 };
         if psnr < limit && n < 400 {
             println!("  frame {} PSNR {:.1}", k, psnr);
+            // MT_MB=x,y,frame: print that macroblock's luma differences (ours - FFmpeg's).
+            if let Ok(spec) = std::env::var("MT_MB") {
+                let v: Vec<usize> = spec.split(',').filter_map(|s| s.parse().ok()).collect();
+                if v.len() == 3 && v[2] == k {
+                    for y in v[1] * 16..v[1] * 16 + 16 {
+                        let row: Vec<String> = (v[0] * 16..v[0] * 16 + 16).map(|x| format!("{:3}", f.y[(f.crop_y + y) * f.stride + f.crop_x + x] as i32 - r[y * w + x] as i32)).collect();
+                        println!("    {}", row.join(""));
+                    }
+                }
+            }
             // MT_WHERE=1: which macroblocks differ (luma), as a map: '.' same, '+' close, '#' wrong.
-            if std::env::var("MT_WHERE").is_ok() && psnr < 70.0 {
+            if std::env::var("MT_WHERE").is_ok() && psnr < 90.0 {
                 for my in 0..h.div_ceil(16) {
                     let mut line = String::new();
                     for mx in 0..w.div_ceil(16) {
@@ -218,7 +228,18 @@ fn video(path: &str, reference: &str, max: usize) {
                                 worst_px = worst_px.max((a - r[y * w + x] as f64).abs());
                             }
                         }
-                        line.push(if worst_px == 0.0 { '.' } else if worst_px < 8.0 { '+' } else { '#' });
+                        // Chroma ('c' when only chroma differs).
+                        let mut chroma = false;
+                        for plane in 0..2 {
+                            let src = if plane == 0 { &f.u } else { &f.v };
+                            let base = w * h + plane * (w / 2) * (h / 2);
+                            for y in my * 8..(my * 8 + 8).min(h / 2) {
+                                for x in mx * 8..(mx * 8 + 8).min(w / 2) {
+                                    chroma |= src[(f.crop_y / 2 + y) * (f.stride / 2) + f.crop_x / 2 + x] != r[base + y * (w / 2) + x];
+                                }
+                            }
+                        }
+                        line.push(if worst_px == 0.0 { if chroma { 'c' } else { '.' } } else if worst_px < 8.0 { '+' } else { '#' });
                     }
                     println!("    {}", line);
                 }

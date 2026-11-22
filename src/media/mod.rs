@@ -23,6 +23,8 @@ pub mod mpa;
 pub mod mpatab;
 pub mod mpeg12tab;
 pub mod mpeg2;
+pub mod mpeg4;
+pub mod mpeg4tab;
 pub mod idct;
 pub mod vlc;
 pub mod mpegps;
