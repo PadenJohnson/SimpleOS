@@ -272,6 +272,11 @@ pub fn misspelled_at(text: &[char], i: usize) -> Option<(usize, usize)> {
 }
 
 // ---- suggestions -------------------------------------------------------------------
+//
+// Candidates come from three places: spellings one edit away (two when one finds little),
+// common sound-alike spellings ("ee" for "y", "ph" for "f"...), and dictionary words that
+// sound the same (a rough pronunciation key, like Metaphone). All are then ranked the same
+// way: a typo-weighted edit distance, how common the word is, and whether it sounds alike.
 
 /// Keys next to each other on a QWERTY keyboard (typos usually hit a neighbour).
 fn neighbours(a: u8, b: u8) -> bool {
@@ -283,23 +288,227 @@ fn neighbours(a: u8, b: u8) -> bool {
     }
 }
 
-/// Every spelling one edit away from `w` (delete, swap neighbours, replace, insert), with how
-/// likely that edit is as a typo (lower = likelier).
-fn edits(w: &[u8], f: &mut dyn FnMut(&[u8], i32)) {
-    let mut buf: Vec<u8> = Vec::with_capacity(w.len() + 1);
+fn vowel(c: u8) -> bool {
+    b"aeiouy".contains(&c)
+}
+
+/// Spellings that sound alike, swapped either way at the cost of one easy slip.
+const SOUND_ALIKE: [(&[u8], &[u8]); 54] = [
+    (b"ee", b"y"), (b"ie", b"y"), (b"ey", b"y"), (b"ea", b"ee"), (b"ei", b"ie"), (b"ai", b"ay"),
+    (b"ph", b"f"), (b"gh", b"f"), (b"ough", b"uff"), (b"ough", b"ow"), (b"igh", b"i"), (b"ight", b"ite"),
+    (b"c", b"k"), (b"ck", b"k"), (b"ch", b"k"), (b"ch", b"sh"), (b"qu", b"kw"), (b"x", b"ks"),
+    (b"x", b"cks"), (b"s", b"c"), (b"s", b"z"), (b"ss", b"c"), (b"tion", b"shun"), (b"sion", b"shun"),
+    (b"cian", b"shun"), (b"ti", b"sh"), (b"ci", b"sh"), (b"er", b"or"), (b"er", b"ar"), (b"or", b"ar"),
+    (b"ent", b"ant"), (b"ence", b"ance"), (b"ible", b"able"), (b"oo", b"u"), (b"ew", b"oo"), (b"ou", b"ow"),
+    (b"j", b"g"), (b"j", b"dg"), (b"wr", b"r"), (b"kn", b"n"), (b"mb", b"m"), (b"sc", b"s"),
+    (b"le", b"el"), (b"ture", b"cher"), (b"oul", b"u"), (b"oul", b"oo"), (b"augh", b"aw"), (b"au", b"aw"),
+    (b"ough", b"aw"), (b"ough", b"of"), (b"ai", b"e"), (b"dn", b"n"), (b"ate", b"ait"), (b"ane", b"ain"),
+];
+
+/// How alike two spellings are as typos (0 = the same; one easy slip is 2-4, a plain one
+/// 6-7): Damerau-Levenshtein with costs for doubled letters, vowels, keyboard neighbours,
+/// swapped letters and sound-alike spellings.
+fn distance(a: &[u8], b: &[u8]) -> i32 {
+    const FAR: i32 = i32::MAX / 2;
+    let (n, m) = (a.len(), b.len());
+    if n > 40 || m > 40 {
+        return FAR;
+    }
+    let w = m + 1;
+    let mut dp = [FAR; 41 * 41];
+    dp[0] = 0;
+    let doubled = |s: &[u8], i: usize| (i > 0 && s[i - 1] == s[i]) || (i + 1 < s.len() && s[i + 1] == s[i]);
+    let gap = |s: &[u8], i: usize| match s[i] {
+        _ if doubled(s, i) => 2,
+        b' ' | b'-' | b'\'' => 2,
+        c if vowel(c) => 4,
+        _ => 6,
+    };
+    for i in 0..=n {
+        // The sound-alike spellings that a[i..] starts with: (its length, what it may be instead).
+        let mut fits: [(usize, &[u8]); 8] = [(0, b""); 8];
+        let mut nf = 0;
+        for &(p, q) in SOUND_ALIKE.iter() {
+            for (x, y) in [(p, q), (q, p)] {
+                if nf < fits.len() && a[i..].starts_with(x) {
+                    fits[nf] = (x.len(), y);
+                    nf += 1;
+                }
+            }
+        }
+        for j in 0..=m {
+            let d = dp[i * w + j];
+            if d >= FAR {
+                continue;
+            }
+            let mut relax = |ii: usize, jj: usize, c: i32| {
+                let k = ii * w + jj;
+                if d + c < dp[k] {
+                    dp[k] = d + c;
+                }
+            };
+            if i < n && j < m {
+                let (x, y) = (a[i], b[j]);
+                relax(i + 1, j + 1, if x == y { 0 } else if neighbours(x, y) || (vowel(x) && vowel(y)) { 4 } else { 7 });
+            }
+            if i < n {
+                relax(i + 1, j, gap(a, i));
+            }
+            if j < m {
+                relax(i, j + 1, gap(b, j));
+            }
+            if i + 1 < n && j + 1 < m && a[i] == b[j + 1] && a[i + 1] == b[j] && a[i] != a[i + 1] {
+                relax(i + 2, j + 2, 3);
+            }
+            for &(xl, y) in &fits[..nf] {
+                if b[j..].starts_with(y) {
+                    relax(i + xl, j + y.len(), 3);
+                }
+            }
+        }
+    }
+    dp[n * w + m]
+}
+
+/// A rough pronunciation key (in the spirit of Metaphone): consonant sounds only, so
+/// "partee" and "party" are both "PRT", "fonetik" and "phonetic" both "FNTK".
+fn sounds(w: &[u8]) -> Vec<u8> {
+    let s: Vec<u8> = w.iter().map(|c| c.to_ascii_lowercase()).filter(|c| c.is_ascii_lowercase()).collect();
+    let n = s.len();
+    let at = |i: usize| if i < n { s[i] } else { 0 };
+    let soft = |c: u8| matches!(c, b'e' | b'i' | b'y');
+    let mut out: Vec<u8> = Vec::with_capacity(n);
+    let mut i = 0;
+    // Silent first letters: knee, gnome, pneumonia, write, psalm; "x" in xylophone.
+    if n >= 2 && matches!(&s[..2], b"kn" | b"gn" | b"pn" | b"wr" | b"ps") {
+        i = 1;
+    }
+    if at(i) == b'x' {
+        out.push(b'S');
+        i += 1;
+    }
+    if at(i) != 0 && vowel(at(i)) && at(i) != b'y' {
+        out.push(b'A');
+    }
+    while i < n {
+        let (c, nx) = (s[i], at(i + 1));
+        let mut skip = 0;
+        let code: &[u8] = match c {
+            b'a' | b'e' | b'i' | b'o' | b'u' => b"",
+            b'b' if i + 1 == n && i > 0 && s[i - 1] == b'm' => b"", // dumb
+            b'c' if nx == b'h' => {
+                skip = 1;
+                b"X"
+            }
+            b'c' if soft(nx) => b"S",
+            b'c' if nx == b'k' => b"",
+            b'd' if nx == b'g' && soft(at(i + 2)) => {
+                skip = 1;
+                b"J"
+            }
+            b'g' if nx == b'h' => {
+                skip = 1;
+                if i > 0 && s[i - 1] == b'u' && i + 2 == n {
+                    b"F" // enough, laugh
+                } else if vowel(at(i + 2)) && at(i + 2) != b'y' {
+                    b"K"
+                } else {
+                    b"" // night, high
+                }
+            }
+            b'g' if nx == b'n' && i + 2 == n => b"", // sign
+            b'g' if soft(nx) => b"J",
+            b'h' if !(vowel(nx) && nx != b'y') || (i > 0 && b"cgpst".contains(&s[i - 1])) => b"",
+            b'p' if nx == b'h' => {
+                skip = 1;
+                b"F"
+            }
+            b'q' => b"K",
+            b's' if nx == b'h' => {
+                skip = 1;
+                b"X"
+            }
+            b's' | b't' if nx == b'i' && matches!(at(i + 2), b'o' | b'a') => b"X", // nation, vision
+            b't' if nx == b'h' => {
+                skip = 1;
+                b"0"
+            }
+            b't' if nx == b'c' && at(i + 2) == b'h' => b"",
+            b'v' => b"F",
+            b'w' | b'y' if !(vowel(nx) && nx != b'y') => b"",
+            b'x' => b"KS",
+            b'z' => b"S",
+            b'b' => b"B",
+            b'c' | b'k' => b"K",
+            b'd' | b't' => b"T",
+            b'g' => b"K",
+            b'h' => b"H",
+            b'p' => b"P",
+            b's' => b"S",
+            b'w' => b"W",
+            b'y' => b"Y",
+            b'f' => b"F",
+            b'j' => b"J",
+            b'l' => b"L",
+            b'm' => b"M",
+            b'n' => b"N",
+            b'r' => b"R",
+            _ => b"",
+        };
+        for &u in code {
+            if out.last() != Some(&u) {
+                out.push(u);
+            }
+        }
+        i += 1 + skip;
+    }
+    out
+}
+
+/// Every dictionary word by its pronunciation key: (hash of the key, word number), sorted.
+/// Made the first time suggestions are wanted.
+static SOUNDS: Lazy<Vec<(u32, u32)>> = Lazy::new(|| {
+    let d = &*DICT;
+    let mut v: Vec<(u32, u32)> = (0..d.starts.len() - 1).map(|n| (hash(&sounds(d.entry(n).0)), n as u32)).collect();
+    v.sort_unstable();
+    v
+});
+
+/// Dictionary words that sound like `w` (lower case) and aren't far from it in length.
+fn sound_alikes(w: &[u8], f: &mut dyn FnMut(&[u8])) {
+    let key = sounds(w);
+    if key.len() < 2 {
+        return;
+    }
+    let h = hash(&key);
+    let v = &*SOUNDS;
+    let start = v.partition_point(|e| e.0 < h);
+    for &(eh, n) in v[start..].iter().take_while(|e| e.0 == h).take(400) {
+        let _ = eh;
+        let (e, _) = DICT.entry(n as usize);
+        if e.len().abs_diff(w.len()) <= 3 && sounds(e) == key {
+            let lower: Vec<u8> = e.iter().map(|c| c.to_ascii_lowercase()).collect();
+            f(&lower);
+        }
+    }
+}
+
+/// Every spelling one edit away from `w`: a letter left out, two swapped, one changed, one
+/// added, or a sound-alike spelling swapped in.
+fn edits(w: &[u8], f: &mut dyn FnMut(&[u8])) {
+    let mut buf: Vec<u8> = Vec::with_capacity(w.len() + 4);
     const LETTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyz'";
     for i in 0..w.len() {
         buf.clear();
         buf.extend_from_slice(&w[..i]);
         buf.extend_from_slice(&w[i + 1..]);
-        // Doubled letters ("occassion") are the likeliest slip.
-        f(&buf, if i > 0 && w[i - 1] == w[i] { 2 } else if b"aeiou".contains(&w[i]) { 4 } else { 6 });
+        f(&buf);
     }
     for i in 0..w.len().saturating_sub(1) {
         buf.clear();
         buf.extend_from_slice(w);
         buf.swap(i, i + 1);
-        f(&buf, 3);
+        f(&buf);
     }
     for i in 0..w.len() {
         for &c in LETTERS {
@@ -307,8 +516,7 @@ fn edits(w: &[u8], f: &mut dyn FnMut(&[u8], i32)) {
                 buf.clear();
                 buf.extend_from_slice(w);
                 buf[i] = c;
-                let vowels = |x: u8| b"aeiou".contains(&x);
-                f(&buf, if neighbours(c, w[i]) { 4 } else if vowels(c) && vowels(w[i]) { 4 } else { 7 });
+                f(&buf);
             }
         }
     }
@@ -318,10 +526,36 @@ fn edits(w: &[u8], f: &mut dyn FnMut(&[u8], i32)) {
             buf.extend_from_slice(&w[..i]);
             buf.push(c);
             buf.extend_from_slice(&w[i..]);
-            f(&buf, if (i > 0 && w[i - 1] == c) || (i < w.len() && w[i] == c) { 2 } else if b"aeiou".contains(&c) { 4 } else { 6 });
+            f(&buf);
+        }
+    }
+    sound_swaps(w, f);
+}
+
+/// `w` with one sound-alike spelling swapped in ("nite" -> "night", "fone" -> "phone").
+fn sound_swaps(w: &[u8], f: &mut dyn FnMut(&[u8])) {
+    let mut buf: Vec<u8> = Vec::with_capacity(w.len() + 4);
+    for i in 0..w.len() {
+        for &(p, q) in SOUND_ALIKE.iter() {
+            for (x, y) in [(p, q), (q, p)] {
+                if w[i..].starts_with(x) {
+                    buf.clear();
+                    buf.extend_from_slice(&w[..i]);
+                    buf.extend_from_slice(y);
+                    buf.extend_from_slice(&w[i + x.len()..]);
+                    f(&buf);
+                }
+            }
         }
     }
 }
+
+// Ranking weights (the typo distance counts 10 per point): rarer words (SCOWL level 0-6)
+// cost COMMON each, a different first letter FIRST_LETTER, and sounding the same takes
+// SOUNDS_ALIKE off. Tuned on lists of common typos and sound-alike spellings.
+const COMMON: i32 = 10;
+const FIRST_LETTER: i32 = 4;
+const SOUNDS_ALIKE: i32 = 18;
 
 /// Up to `max` corrections for a misspelled word, likeliest first, in the word's own
 /// capitals ("Teh" -> "The").
@@ -330,12 +564,15 @@ pub fn suggest(word: &str, max: usize) -> Vec<String> {
     let case = case_of(&w);
     let lower = w.to_lowercase();
     let lw = lower.as_bytes();
-    // (cost, word as spelled in the dictionary)
-    let mut found: Vec<(i32, String)> = Vec::new();
-    let consider = |cand: &[u8], cost: i32, found: &mut Vec<(i32, String)>| {
+    // Words found, as the dictionary spells them, with how common they are.
+    let mut found: Vec<(String, u8)> = Vec::new();
+    let consider = |cand: &[u8], found: &mut Vec<(String, u8)>| {
         // As typed in small letters, or a name ("paris" -> "Paris") or an abbreviation.
         let mut tmp = [0u8; 48];
         let n = cand.len();
+        if n == 0 {
+            return;
+        }
         let hit = if let Some(lv) = level(cand) {
             Some((lv, 0))
         } else if n <= tmp.len() && cand[0].is_ascii_lowercase() {
@@ -354,29 +591,33 @@ pub fn suggest(word: &str, max: usize) -> Vec<String> {
         };
         let Some((lv, form)) = hit else { return };
         let Ok(s) = core::str::from_utf8(if form == 0 { cand } else { &tmp[..n] }) else { return };
-        let c = cost * 10 + lv as i32 * 3 + if cand.first() != lw.first() { 12 } else { 0 };
-        match found.iter_mut().find(|f| f.1 == s) {
-            Some(f) => f.0 = f.0.min(c),
-            None => found.push((c, String::from(s))),
+        if !found.iter().any(|f| f.0 == s) {
+            found.push((String::from(s), lv));
         }
     };
     // Same letters, different capitals ("iphone" -> "iPhone"; "paris" -> "Paris").
-    consider(lw, 0, &mut found);
-    let mut first: Vec<(Vec<u8>, i32)> = Vec::new();
-    edits(lw, &mut |cand, cost| {
-        consider(cand, cost, &mut found);
-        first.push((cand.to_vec(), cost));
+    consider(lw, &mut found);
+    let mut first: Vec<Vec<u8>> = Vec::new();
+    edits(lw, &mut |cand| {
+        consider(cand, &mut found);
+        first.push(cand.to_vec());
     });
-    // Two edits away, when one wasn't enough.
+    sound_alikes(lw, &mut |cand| consider(cand, &mut found));
+    // Two sound-alike swaps ("nok" -> "knok" -> "knock"): few, so always.
+    let mut swapped: Vec<Vec<u8>> = Vec::new();
+    sound_swaps(lw, &mut |cand| swapped.push(cand.to_vec()));
+    for c1 in &swapped {
+        sound_swaps(c1, &mut |cand| consider(cand, &mut found));
+    }
+    // Two edits away, when that found little.
     if found.len() < 3 && lw.len() <= 14 {
-        for (c1, cost1) in &first {
-            edits(c1, &mut |cand, cost| consider(cand, 6 + cost1 + cost, &mut found));
+        for c1 in &first {
+            edits(c1, &mut |cand| consider(cand, &mut found));
         }
     }
-    // Two words run together ("alot" -> "a lot").
+    // Two words run together ("alot" -> "a lot"), of common words only, not "col our".
     for i in 1..lw.len() {
         let (a, b) = (&lw[..i], &lw[i..]);
-        // Only common words ("a lot", "can not"), not "col our" or "occur ed".
         let common = |p: &[u8]| match p.len() {
             0 => None,
             1 if p != b"a" => None,
@@ -385,12 +626,33 @@ pub fn suggest(word: &str, max: usize) -> Vec<String> {
         };
         if let (Some(la), Some(lb)) = (common(a), common(b)) {
             let s = alloc::format!("{} {}", core::str::from_utf8(a).unwrap_or(""), core::str::from_utf8(b).unwrap_or(""));
-            found.push((25 + (la + lb) as i32 * 3, s));
+            found.push((s, la.max(lb)));
         }
     }
-    found.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    // Rank: how likely a typo it is, how common the word is, and whether it sounds alike.
+    let key = sounds(lw);
+    let mut ranked: Vec<(i32, String)> = found
+        .into_iter()
+        .map(|(s, lv)| {
+            let l = s.to_lowercase();
+            let lb = l.as_bytes();
+            let d = distance(lw, lb);
+            if d == 0 {
+                return (i32::MIN, s); // only the capitals differ ("paris" -> "Paris")
+            }
+            let mut cost = d * 10 + lv as i32 * COMMON;
+            if lb.first() != lw.first() {
+                cost += FIRST_LETTER;
+            }
+            if key.len() >= 2 && sounds(lb) == key {
+                cost -= SOUNDS_ALIKE;
+            }
+            (cost, s)
+        })
+        .collect();
+    ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     let mut out: Vec<String> = Vec::new();
-    for (_, s) in found {
+    for (_, s) in ranked {
         let s = match case {
             Case::Title if s.chars().next().is_some_and(|c| c.is_lowercase()) => title(&s),
             Case::Upper => s.to_uppercase(),

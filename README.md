@@ -48,7 +48,8 @@ nothing to download.
   - Spelling, for every app where you type text: Writer, the Text Editor (on for .txt and
     .md files; the Spelling button turns it on or off), spreadsheet cells, calendar events
     and video titles. Mistakes get a red wavy line; right-click one (or press F7, Shift+F10
-    or the Menu key) for suggestions, Add to dictionary or Ignore. F7 also jumps to the next
+    or the Menu key) for suggestions (typos and sound-alike spellings: "recieve" -> receive,
+    "partee" -> party, "fone" -> phone), Add to dictionary or Ignore. F7 also jumps to the next
     mistake. English (US) or English (UK) in Settings, or off. Added words are kept in
     Solon storage (Dictionary.txt) and backed up. The dictionary is SCOWL's (about 92,000
     words, names and abbreviations).
