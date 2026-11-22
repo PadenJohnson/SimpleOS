@@ -172,6 +172,12 @@ pub struct Mpeg4Dec {
     config: Vec<u8>,
     vol: Option<Vol>,
     packed: bool,
+    /// Made by Xvid: use its IDCT.
+    xvid: bool,
+    /// H.263+: unlimited vectors (their own code), and whether unsupported annexes are on.
+    umv_plus: bool,
+    h263_annexes: bool,
+    h263_slices: bool,
     prev_ref: Option<Ref>,
     last_ref: Option<Ref>,
     last_emitted: bool,
@@ -201,6 +207,10 @@ impl Mpeg4Dec {
             config: config.to_vec(),
             vol: None,
             packed: false,
+            xvid: false,
+            umv_plus: false,
+            h263_annexes: false,
+            h263_slices: false,
             prev_ref: None,
             last_ref: None,
             last_emitted: true,
@@ -227,6 +237,12 @@ impl Mpeg4Dec {
 
     /// One packet: the units in it (headers, pictures).
     fn packet(&mut self, data: &[u8], count: bool) {
+        // H.263 (and MPEG-4's "short header"): a 22-bit picture start code, 0000 0000 0000 0000 1000 00.
+        let z = data.iter().take_while(|&&b| b == 0).count();
+        if z >= 2 && data.get(z).is_some_and(|&b| b & 0xFC == 0x80) {
+            self.h263_picture(&data[z - 2..]);
+            return;
+        }
         let mut starts = Vec::new();
         let mut i = 0;
         while i + 3 < data.len() {
@@ -256,6 +272,9 @@ impl Mpeg4Dec {
     }
 
     fn user_data(&mut self, d: &[u8]) {
+        if d.len() >= 4 && (&d[..4] == b"XviD" || &d[..4] == b"XVID") {
+            self.xvid = true;
+        }
         // DivX writes "DivX503b1393p": a trailing 'p' means packed B-frames.
         if d.len() > 5 && &d[..4] == b"DivX" {
             let s: Vec<u8> = d.iter().copied().take_while(|&c| c != 0).collect();
@@ -908,18 +927,20 @@ impl Mpeg4Dec {
             if n < 4 {
                 let (bx, by) = (mx * 16 + (n & 1) * 8, my * 16);
                 let (at, st) = if field_dct { ((by + (n >> 1)) * stride + bx, stride * 2) } else { ((by + (n >> 1) * 8) * stride + bx, stride) };
-                if intra {
-                    idct::put(blk, &mut cur.pic.y, at, st);
-                } else {
-                    idct::add(blk, &mut cur.pic.y, at, st);
+                match (intra, self.xvid) {
+                    (true, false) => idct::put(blk, &mut cur.pic.y, at, st),
+                    (false, false) => idct::add(blk, &mut cur.pic.y, at, st),
+                    (true, true) => idct::put_xvid(blk, &mut cur.pic.y, at, st),
+                    (false, true) => idct::add_xvid(blk, &mut cur.pic.y, at, st),
                 }
             } else {
                 let at = my * 8 * cs + mx * 8;
                 let plane = if n == 4 { &mut cur.pic.u } else { &mut cur.pic.v };
-                if intra {
-                    idct::put(blk, plane, at, cs);
-                } else {
-                    idct::add(blk, plane, at, cs);
+                match (intra, self.xvid) {
+                    (true, false) => idct::put(blk, plane, at, cs),
+                    (false, false) => idct::add(blk, plane, at, cs),
+                    (true, true) => idct::put_xvid(blk, plane, at, cs),
+                    (false, true) => idct::add_xvid(blk, plane, at, cs),
                 }
             }
         }
@@ -1530,6 +1551,425 @@ fn mc_field(cur: &mut Ref, r: &Pic, stride: usize, height: usize, mx: usize, my:
     }
 }
 
+// ---- H.263 (baseline: phones' 3GP videos, early video calls) ----
+
+impl Mpeg4Dec {
+    fn h263_picture(&mut self, d: &[u8]) {
+        let mut b = Bits::new(d);
+        if b.read(22) != 0x20 {
+            return;
+        }
+        b.skip(8); // temporal reference
+        if !b.flag() || b.flag() {
+            return; // marker, H.263 id
+        }
+        b.skip(3); // split screen, camera, freeze
+        let format = b.read(3);
+        let (mut w, mut h) = match format {
+            1 => (128, 96),
+            2 => (176, 144),
+            3 => (352, 288),
+            4 => (704, 576),
+            5 => (1408, 1152),
+            _ => (0, 0),
+        };
+        let (inter, long_vectors, rounding);
+        if (1..=5).contains(&format) {
+            inter = b.flag();
+            long_vectors = b.flag();
+            if b.flag() {
+                return; // arithmetic coding isn't supported
+            }
+            b.skip(2); // advanced prediction (decoded without overlapping), PB frames
+            rounding = false;
+            self.h263_slices = false;
+            self.umv_plus = false;
+        } else if format == 7 {
+            // H.263+ extended header (custom sizes; the optional annexes aren't supported).
+            let ufep = b.read(3);
+            let mut fmt = 0;
+            let (mut pcf, mut umv, mut ss) = (false, false, false);
+            if ufep == 1 {
+                fmt = b.read(3);
+                pcf = b.flag();
+                umv = b.flag();
+                b.skip(1); // arithmetic coding
+                let ap = b.flag();
+                let aic = b.flag();
+                let df = b.flag();
+                ss = b.flag();
+                b.skip(2);
+                let aiv = b.flag();
+                let mq = b.flag();
+                b.skip(4);
+                self.h263_annexes = ap || aic || df || aiv || mq;
+                self.h263_slices = ss;
+            }
+            let t = b.read(3);
+            if t > 1 {
+                return; // PB and B pictures aren't supported
+            }
+            inter = t == 1;
+            b.skip(2);
+            rounding = b.flag();
+            b.skip(4);
+            long_vectors = false;
+            self.umv_plus = umv && ufep == 1 || (ufep == 0 && self.umv_plus);
+            if ufep == 1 {
+                if fmt == 6 {
+                    let par = b.read(4);
+                    w = (b.read(9) as usize + 1) * 4;
+                    b.skip(1);
+                    h = b.read(9) as usize * 4;
+                    if par == 15 {
+                        b.skip(16);
+                    }
+                } else if (1..=5).contains(&fmt) {
+                    (w, h) = [(128, 96), (176, 144), (352, 288), (704, 576), (1408, 1152)][fmt as usize - 1];
+                }
+            } else if let Some(v) = self.vol.as_ref() {
+                (w, h) = (v.w, v.h);
+            }
+            if ufep == 1 && pcf {
+                b.skip(8); // custom clock
+            }
+            if pcf {
+                b.skip(2); // extended temporal reference
+            }
+            if ufep == 1 && umv && !b.flag() {
+                b.skip(1);
+            }
+            if ufep == 1 && ss {
+                b.skip(2);
+            }
+        } else {
+            return;
+        }
+        let q = b.read(5) as i32;
+        if (1..=5).contains(&format) && b.flag() {
+            b.skip(2); // continuous presence: sub-bitstream indicator
+        }
+        while b.flag() {
+            b.skip(8); // PEI / PSUPP
+        }
+        if w == 0 || h == 0 || q == 0 {
+            return;
+        }
+        if self.h263_slices {
+            b.skip(1);
+            mba(&mut b, w.div_ceil(16) * h.div_ceil(16));
+            b.skip(1);
+        }
+        if self.vol.as_ref().is_none_or(|v| v.w != w || v.h != h) {
+            self.vol = Some(Vol {
+                w,
+                h,
+                mbw: w.div_ceil(16),
+                mbh: h.div_ceil(16),
+                time_res: 30000,
+                time_bits: 15,
+                progressive: true,
+                sprite: 0,
+                warp_points: 0,
+                quant_bits: 5,
+                mpeg_quant: false,
+                intra_q: DEFAULT_INTRA,
+                inter_q: DEFAULT_INTER,
+                qpel: false,
+                resync: false,
+                partitioned: false,
+                low_delay: true,
+            });
+        }
+        let vol = self.vol.clone().unwrap();
+        if inter && self.last_ref.is_none() {
+            return;
+        }
+        let hdr = VopHdr { kind: if inter { P_VOP } else { I_VOP }, rounding, dc_thr: 0, tff: false, alt_scan: false, qscale: q, fcode: 1, bcode: 1 };
+        let r = self.h263_decode(&mut b, &vol, &hdr, long_vectors);
+        self.finish(r, true);
+    }
+
+    fn h263_decode(&mut self, b: &mut Bits, vol: &Vol, h: &VopHdr, long_vectors: bool) -> Ref {
+        let (mbw, mbh) = (vol.mbw, vol.mbh);
+        let size = mbw * 16 * mbh * 16;
+        let mut cur = Ref {
+            pic: Pic { y: vec![0; size], u: vec![128; size / 4], v: vec![128; size / 4] },
+            mv: vec![[0, 0]; mbw * 2 * mbh * 2],
+            kind: vec![0; mbw * mbh],
+            field_mv: vec![[[0; 2]; 2]; mbw * mbh],
+            field_sel: vec![[0; 2]; mbw * mbh],
+        };
+        self.qscale = h.qscale;
+        self.resync_x = 0;
+        self.resync_y = 0;
+        self.first_line = true;
+        let gob_rows = if vol.h <= 400 { 1 } else if vol.h <= 800 { 2 } else { 4 };
+        let mut idx = 0;
+        while idx < mbw * mbh {
+            let (mx, my) = (idx % mbw, idx / mbw);
+            // A group-of-blocks (or slice) header: 16 zeros, then a 1.
+            if idx > 0 && b.peek(16) == 0 {
+                b.skip(16);
+                let mut n = 0;
+                while n < 32 && !b.flag() {
+                    n += 1;
+                }
+                let start;
+                if self.h263_slices {
+                    b.skip(1);
+                    start = mba(b, mbw * mbh);
+                    if mbw * mbh > 1583 {
+                        b.skip(1);
+                    }
+                    let q = b.read(5) as i32;
+                    if q != 0 {
+                        self.qscale = q;
+                    }
+                    b.skip(1 + 2);
+                } else {
+                    let gn = b.read(5) as usize;
+                    b.skip(2);
+                    let q = b.read(5) as i32;
+                    if q != 0 {
+                        self.qscale = q;
+                    }
+                    start = gn * gob_rows * mbw;
+                }
+                if start >= mbw * mbh || start < idx {
+                    break;
+                }
+                idx = start;
+                self.resync_x = start % mbw;
+                self.resync_y = start / mbw;
+                self.first_line = true;
+                continue;
+            }
+            if self.resync_x == mx && self.resync_y + 1 == my {
+                self.first_line = false;
+            }
+            if self.h263_macroblock(b, vol, h, mx, my, &mut cur, long_vectors).is_none() {
+                if let Some(r) = self.last_ref.as_ref() {
+                    copy_rest(&mut cur.pic, &r.pic, mbw, mbh, idx);
+                }
+                break;
+            }
+            idx += 1;
+        }
+        cur
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn h263_macroblock(&mut self, b: &mut Bits, vol: &Vol, h: &VopHdr, mx: usize, my: usize, cur: &mut Ref, long_vectors: bool) -> Option<()> {
+        let mbw = vol.mbw;
+        let xy = my * mbw + mx;
+        let mut intra = h.kind == I_VOP;
+        let cbpc;
+        let mut motion = Motion::default();
+        if h.kind == P_VOP {
+            loop {
+                if b.flag() {
+                    cur.kind[xy] = MB_SKIP;
+                    motion.fwd = true;
+                    set_mv16(cur, mbw, mx, my, [0, 0]);
+                    self.predict(vol, h, mx, my, &motion, cur);
+                    return Some(());
+                }
+                let c = self.t.mcbpc_p.read(b)?;
+                if c != 20 {
+                    cbpc = c as u32;
+                    break;
+                }
+            }
+            intra = cbpc & 4 != 0;
+        } else {
+            loop {
+                let c = self.t.mcbpc_i.read(b)?;
+                if c != 8 {
+                    cbpc = c as u32;
+                    break;
+                }
+            }
+        }
+        let mut cbpy = self.t.cbpy.read(b)? as u32;
+        if !intra {
+            cbpy ^= 0x0F;
+        }
+        let cbp = (cbpc & 3) | (cbpy << 2);
+        let dquant = if h.kind == P_VOP { cbpc & 8 != 0 } else { cbpc & 4 != 0 };
+        if dquant {
+            self.dquant(b);
+        }
+        if intra {
+            cur.kind[xy] = MB_INTRA;
+            set_mv16(cur, mbw, mx, my, [0, 0]);
+        } else {
+            motion.fwd = true;
+            let umv = self.umv_plus;
+            let mvc = |s: &Self, b: &mut Bits, pred: i32| -> Option<i32> {
+                if umv {
+                    if b.flag() {
+                        return Some(pred);
+                    }
+                    let mut code = 2 + b.read(1) as i32;
+                    while b.flag() {
+                        code = (code << 1) + b.read(1) as i32;
+                        if code >= 32768 {
+                            return None;
+                        }
+                    }
+                    let (sign, mag) = (code & 1, code >> 1);
+                    return Some(if sign != 0 { pred - mag } else { pred + mag });
+                }
+                let code = s.t.mv.read(b)?;
+                if code == 0 {
+                    return Some(pred);
+                }
+                let v = if b.flag() { -code } else { code } + pred;
+                Some(if !long_vectors {
+                    (v << 26) >> 26
+                } else if pred < -31 && v < -63 {
+                    v + 64
+                } else if pred > 32 && v > 63 {
+                    v - 64
+                } else {
+                    v
+                })
+            };
+            if cbpc & 16 == 0 {
+                let (px, py) = self.h263_pred(cur, mbw, mx, my, 0);
+                let x = mvc(self, b, px)?;
+                let y = mvc(self, b, py)?;
+                if umv && x - px == 1 && y - py == 1 {
+                    b.skip(1);
+                }
+                motion.mv[0][0] = [x, y];
+                set_mv16(cur, mbw, mx, my, [x, y]);
+            } else {
+                motion.kind = 1;
+                cur.kind[xy] = MB_8X8;
+                for i in 0..4 {
+                    let (px, py) = self.h263_pred(cur, mbw, mx, my, i);
+                    let x = mvc(self, b, px)?;
+                    let y = mvc(self, b, py)?;
+                    if umv && x - px == 1 && y - py == 1 {
+                        b.skip(1);
+                    }
+                    motion.mv[0][i] = [x, y];
+                    cur.mv[blk_index(mbw, mx, my, i)] = [x, y];
+                }
+            }
+            self.predict(vol, h, mx, my, &motion, cur);
+        }
+        let q = self.qscale;
+        let (qmul, qadd) = (q * 2, (q - 1) | 1);
+        let stride = mbw * 16;
+        let cs = stride / 2;
+        for n in 0..6 {
+            let coded = cbp & (32 >> n) != 0;
+            if !intra && !coded {
+                continue;
+            }
+            let mut blk = [0i16; 64];
+            let mut i: isize = -1;
+            if intra {
+                let mut dc = b.read(8) as i32;
+                if dc == 255 {
+                    dc = 128;
+                }
+                blk[0] = (dc * 8) as i16;
+                i = 0;
+            }
+            if coded {
+                loop {
+                    let idx = self.t.inter.vlc.read(b)? as usize;
+                    let rl = &self.t.inter;
+                    let (run, level, last);
+                    if idx < rl.run.len() {
+                        last = idx >= rl.last;
+                        run = rl.run[idx] as usize;
+                        let l = rl.level[idx] as i32;
+                        level = if b.flag() { -l } else { l };
+                    } else {
+                        last = b.flag();
+                        run = b.read(6) as usize;
+                        let mut l = (b.read(8) as i8) as i32;
+                        if l == -128 {
+                            l = b.read(5) as i32;
+                            l |= ((b.read(6) as i32) << 26 >> 26) << 5;
+                        }
+                        level = l;
+                    }
+                    i += run as isize + 1;
+                    if i > 63 {
+                        return None;
+                    }
+                    let v = if level > 0 { level * qmul + qadd } else { level * qmul - qadd };
+                    blk[ZIGZAG[i as usize] as usize] = v as i16;
+                    if last {
+                        break;
+                    }
+                }
+            }
+            if n < 4 {
+                let at = (my * 16 + (n >> 1) * 8) * stride + mx * 16 + (n & 1) * 8;
+                if intra {
+                    idct::put(&mut blk, &mut cur.pic.y, at, stride);
+                } else {
+                    idct::add(&mut blk, &mut cur.pic.y, at, stride);
+                }
+            } else {
+                let at = my * 8 * cs + mx * 8;
+                let plane = if n == 4 { &mut cur.pic.u } else { &mut cur.pic.v };
+                if intra {
+                    idct::put(&mut blk, plane, at, cs);
+                } else {
+                    idct::add(&mut blk, plane, at, cs);
+                }
+            }
+        }
+        Some(())
+    }
+
+    /// H.263's motion vector prediction (as MPEG-4's, without its packet-edge special case).
+    fn h263_pred(&self, cur: &Ref, mbw: usize, mx: usize, my: usize, blk: usize) -> (i32, i32) {
+        let w = mbw * 2;
+        let (bx, by) = ((mx * 2 + (blk & 1)) as isize, (my * 2 + (blk >> 1)) as isize);
+        let get = |x: isize, y: isize| -> [i32; 2] {
+            if x < 0 || y < 0 || x >= w as isize || y as usize >= cur.mv.len() / w {
+                [0, 0]
+            } else {
+                cur.mv[y as usize * w + x as usize]
+            }
+        };
+        let off: [isize; 4] = [2, 1, 1, -1];
+        let mid = |a: i32, b: i32, c: i32| a.max(b).min(a.min(b).max(c));
+        let a = get(bx - 1, by);
+        if self.first_line && blk < 3 {
+            match blk {
+                0 => {
+                    if mx == self.resync_x {
+                        (0, 0)
+                    } else {
+                        (a[0], a[1])
+                    }
+                }
+                1 => (a[0], a[1]),
+                _ => {
+                    let bb = get(bx, by - 1);
+                    let c = get(bx + off[2], by - 1);
+                    let a = if mx == self.resync_x { [0, 0] } else { a };
+                    (mid(a[0], bb[0], c[0]), mid(a[1], bb[1], c[1]))
+                }
+            }
+        } else {
+            let bb = get(bx, by - 1);
+            let c = get(bx + off[blk], by - 1);
+            (mid(a[0], bb[0], c[0]), mid(a[1], bb[1], c[1]))
+        }
+    }
+}
+
 impl VideoDec for Mpeg4Dec {
     fn decode(&mut self, data: &[u8]) {
         self.packet(data, true);
@@ -1553,4 +1993,12 @@ impl VideoDec for Mpeg4Dec {
         self.out.clear();
         self.t_frame = 0;
     }
+}
+
+/// H.263 slice start: the macroblock number, its length set by the picture size.
+fn mba(b: &mut Bits, mb_num: usize) -> usize {
+    const MAX: [usize; 6] = [47, 98, 395, 1583, 6335, 9215];
+    const LEN: [u32; 6] = [6, 7, 9, 11, 13, 14];
+    let i = MAX.iter().position(|&m| mb_num - 1 <= m).unwrap_or(5);
+    b.read(LEN[i]) as usize
 }
