@@ -124,6 +124,8 @@ pub struct WriterEd {
     pics: RefCell<alloc::collections::BTreeMap<(u16, i32, i32), Option<alloc::rc::Rc<crate::image::Image>>>>,
     /// From a .txt file: the first save asks for a name (as a .docx).
     note: Option<String>,
+    /// Spelling suggestions open for the word (paragraph, start, end).
+    spell: Option<(crate::spell::Popup, (usize, usize, usize))>,
 }
 
 pub fn new_doc() -> WriterEd {
@@ -147,6 +149,7 @@ pub fn new_doc() -> WriterEd {
         view_h: core::cell::Cell::new(600),
         pics: RefCell::new(alloc::collections::BTreeMap::new()),
         note: None,
+        spell: None,
     }
 }
 
@@ -1019,6 +1022,8 @@ impl WriterEd {
             c.fill_rect(x0, y0, thin, y1 - y0, col);
             c.fill_rect(x1, y0, thin, y1 - y0, col);
         }
+        // Misspelled words of the paragraph being drawn (its lines come one after another).
+        let mut spelling: Option<(usize, Vec<(usize, usize)>)> = None;
         for l in lay.lines.iter().filter(|l| l.page == page) {
             let top = oy + px(m[1] * 64 + l.y);
             let lh = px(l.h).max(1);
@@ -1074,6 +1079,22 @@ impl WriterEd {
                 }
                 if st.strike {
                     c.fill_rect(x0, base - px(st.size as i32 * 32 * 30 / 100), x1 - x0, thick, st.color);
+                }
+            }
+            if screen && crate::spell::enabled() {
+                if spelling.as_ref().is_none_or(|(pi, _)| *pi != l.para) {
+                    // Not the word being typed (the one at the caret).
+                    let caret = (sel.is_none() && self.cur.0 == l.para).then_some(self.cur.1);
+                    spelling = Some((l.para, crate::spell::misspelled(&p.text, caret)));
+                }
+                for &(s, e) in &spelling.as_ref().unwrap().1 {
+                    let (s, e) = (s.max(l.start), e.min(l.end));
+                    if s < e {
+                        let x0 = ox + px(lx + l.xs[s - l.start]);
+                        let x1 = ox + px(lx + l.xs[e - l.start]);
+                        let thick = ((p.st[s].size as i32 * mpp) / 30000).max(1);
+                        crate::spell::squiggle(c, x0, base + thick + 2, x1 - x0);
+                    }
                 }
             }
             // A selected paragraph end shows as a small block.
@@ -1201,9 +1222,31 @@ impl DocEditor for WriterEd {
             status = format!("{}     {}", status, n);
         }
         c.text(r.x + 14, sy + 6, &status, Size::Small, false, DIM);
+        if let Some((pop, _)) = &self.spell {
+            pop.draw(c, r);
+        }
+    }
+
+    fn on_right_press(&mut self, x: i32, y: i32, r: Rect) -> EdAction {
+        self.spell = None;
+        self.menu = None;
+        if !Self::area(r).contains(x, y) {
+            return EdAction::Redraw;
+        }
+        let p = self.pos_at(r, x, y);
+        self.open_spelling(r, p);
+        EdAction::Redraw
     }
 
     fn on_press(&mut self, x: i32, y: i32, r: Rect, now: u64) -> EdAction {
+        if let Some((pop, word)) = self.spell.take() {
+            match pop.press(x, y, r) {
+                crate::spell::Pick::Chosen(ch) => self.apply_spelling(word, ch),
+                crate::spell::Pick::Open => self.spell = Some((pop, word)),
+                _ => {}
+            }
+            return EdAction::Redraw;
+        }
         if let Some(m) = self.menu {
             for i in 0..self.menu_items(m) {
                 if self.menu_item_rect(r, m, i).contains(x, y) {
@@ -1281,6 +1324,145 @@ impl DocEditor for WriterEd {
 
     fn on_key(&mut self, sc: u8, r: Rect) -> EdAction {
         let Some(key) = self.keys.feed(sc) else { return EdAction::None };
+        if let Some((mut pop, word)) = self.spell.take() {
+            match pop.key(&key) {
+                crate::spell::Pick::Open => self.spell = Some((pop, word)),
+                crate::spell::Pick::Close => {}
+                crate::spell::Pick::Chosen(ch) => self.apply_spelling(word, ch),
+                crate::spell::Pick::Pass => return self.on_key_inner(key, r),
+            }
+            return EdAction::Redraw;
+        }
+        if crate::spell::is_suggest_key(&key, self.keys.shift) {
+            self.menu = None;
+            self.open_spelling(r, self.cur);
+            // F7 goes on to the next misspelled word.
+            if self.spell.is_none() && key == Key::F(7) {
+                let paras = &self.doc.paras;
+                match crate::spell::next_misspelled(paras.len(), |i| &paras[i].text, self.cur) {
+                    Some((pi, s, _)) => {
+                        self.cur = (pi, s);
+                        self.anchor = None;
+                        self.scroll_to_cursor(r);
+                        self.open_spelling(r, self.cur);
+                    }
+                    None => return EdAction::Toast(String::from(if crate::spell::enabled() { "No spelling mistakes found" } else { "Spelling is turned off in Settings" })),
+                }
+            }
+            return EdAction::Redraw;
+        }
+        self.on_key_inner(key, r)
+    }
+    fn dirty(&self) -> bool {
+        self.dirty
+    }
+
+    fn mark_saved(&mut self) {
+        self.dirty = false;
+        self.note = None;
+    }
+
+    fn encode(&mut self, ext: &str) -> Result<Vec<u8>, String> {
+        match ext {
+            "pdf" => self.to_pdf(),
+            "txt" => Ok(self.doc.plain_text().replace('\n', "\r\n").into_bytes()),
+            _ => Ok(docx::write(&self.doc)),
+        }
+    }
+
+    fn picked(&mut self, _purpose: u8, name: &str, bytes: Vec<u8>) -> EdAction {
+        let Ok(img) = crate::image::decode(&bytes) else { return EdAction::Message(format!("\"{}\" isn't a picture Solon can read.", name)) };
+        // About 96 pixels to the inch, but never wider than the text or taller than 7 inches.
+        let cw = self.doc.page_w - self.doc.margin[0] - self.doc.margin[2];
+        let mut w = (img.w as i32 * 3 / 4).max(16);
+        let mut h = (img.h as i32 * 3 / 4).max(16);
+        if w > cw {
+            h = h * cw / w;
+            w = cw;
+        }
+        if h > 504 {
+            w = w * 504 / h;
+            h = 504;
+        }
+        // Word files hold JPEG or PNG: anything else (or a turned JPEG) goes in as PNG.
+        let (bytes, ext) = match crate::image::sniff(&bytes) {
+            Some(crate::image::Format::Jpeg) if crate::imgfmt::jpeg_orientation(&bytes) == 1 => (bytes, "jpeg"),
+            Some(crate::image::Format::Png) => (bytes, "png"),
+            _ => (crate::image::encode_png(&img), "png"),
+        };
+        self.snapshot(EditKind::None);
+        self.doc.images.push(doc::DocImage { data: bytes, ext: String::from(ext), w: w.max(4), h: h.max(4) });
+        let mut st = self.cur_style();
+        st.img = self.doc.images.len() as u16;
+        st.underline = false;
+        st.strike = false;
+        st.highlight = None;
+        self.pending = Some(st);
+        self.insert_char(doc::PICTURE);
+        // Typing after the picture goes back to plain text style.
+        let mut back = st;
+        back.img = 0;
+        self.pending = Some(back);
+        EdAction::Redraw
+    }
+
+    fn print_pages(&mut self, _paper: Paper) -> Vec<Canvas> {
+        let lay = doc::layout(&self.doc);
+        let mpp = 100_000 / 72;
+        let (w, h) = ((self.doc.page_w * mpp / 1000) as usize, (self.doc.page_h * mpp / 1000) as usize);
+        (0..lay.pages)
+            .map(|page| {
+                let mut c = Canvas::new(w, h);
+                c.px.fill(0xFF_FFFF);
+                let clip = Rect::new(0, 0, w as i32, h as i32);
+                self.draw_page(&mut c, &lay, page, 0, 0, mpp, None, clip, false);
+                c
+            })
+            .collect()
+    }
+}
+
+
+impl WriterEd {
+    /// Open spelling suggestions if the word at `p` is misspelled.
+    fn open_spelling(&mut self, r: Rect, p: Pos) {
+        let text = &self.doc.paras[p.0].text;
+        if let Some((s, e)) = crate::spell::misspelled_at(text, p.1) {
+            let word: String = text[s..e].iter().collect();
+            let (x, y, h) = self.caret_xy(r, (p.0, s));
+            self.spell = Some((crate::spell::Popup::new(&word, x, y + h), (p.0, s, e)));
+        }
+    }
+
+    fn apply_spelling(&mut self, (pi, s, e): (usize, usize, usize), ch: crate::spell::Choice) {
+        let crate::spell::Choice::Replace(new) = &ch else {
+            let mut t = self.doc.paras[pi].text.clone();
+            crate::spell::apply(&mut t, (s, e), &ch);
+            return;
+        };
+        if self.doc.paras.get(pi).is_none_or(|p| e > p.text.len()) {
+            return;
+        }
+        self.snapshot(EditKind::None);
+        let new: Vec<char> = new.chars().collect();
+        let n = new.len();
+        let p = &mut self.doc.paras[pi];
+        let st = p.st[s];
+        p.text.splice(s..e, new);
+        p.st.splice(s..e, core::iter::repeat_n(st, n));
+        // Keep the caret where it was in the text.
+        if self.cur.0 == pi && self.cur.1 >= e {
+            self.cur.1 = self.cur.1 + n - (e - s);
+        } else if self.cur.0 == pi && self.cur.1 > s {
+            self.cur.1 = s + n;
+        }
+        self.anchor = None;
+        self.changed();
+    }
+}
+
+impl WriterEd {
+    fn on_key_inner(&mut self, key: Key, r: Rect) -> EdAction {
         if self.menu.is_some() {
             if key == Key::Esc {
                 self.menu = None;
@@ -1490,74 +1672,6 @@ impl DocEditor for WriterEd {
         }
         self.scroll_to_cursor(r);
         EdAction::Redraw
-    }
-
-    fn dirty(&self) -> bool {
-        self.dirty
-    }
-
-    fn mark_saved(&mut self) {
-        self.dirty = false;
-        self.note = None;
-    }
-
-    fn encode(&mut self, ext: &str) -> Result<Vec<u8>, String> {
-        match ext {
-            "pdf" => self.to_pdf(),
-            "txt" => Ok(self.doc.plain_text().replace('\n', "\r\n").into_bytes()),
-            _ => Ok(docx::write(&self.doc)),
-        }
-    }
-
-    fn picked(&mut self, _purpose: u8, name: &str, bytes: Vec<u8>) -> EdAction {
-        let Ok(img) = crate::image::decode(&bytes) else { return EdAction::Message(format!("\"{}\" isn't a picture Solon can read.", name)) };
-        // About 96 pixels to the inch, but never wider than the text or taller than 7 inches.
-        let cw = self.doc.page_w - self.doc.margin[0] - self.doc.margin[2];
-        let mut w = (img.w as i32 * 3 / 4).max(16);
-        let mut h = (img.h as i32 * 3 / 4).max(16);
-        if w > cw {
-            h = h * cw / w;
-            w = cw;
-        }
-        if h > 504 {
-            w = w * 504 / h;
-            h = 504;
-        }
-        // Word files hold JPEG or PNG: anything else (or a turned JPEG) goes in as PNG.
-        let (bytes, ext) = match crate::image::sniff(&bytes) {
-            Some(crate::image::Format::Jpeg) if crate::imgfmt::jpeg_orientation(&bytes) == 1 => (bytes, "jpeg"),
-            Some(crate::image::Format::Png) => (bytes, "png"),
-            _ => (crate::image::encode_png(&img), "png"),
-        };
-        self.snapshot(EditKind::None);
-        self.doc.images.push(doc::DocImage { data: bytes, ext: String::from(ext), w: w.max(4), h: h.max(4) });
-        let mut st = self.cur_style();
-        st.img = self.doc.images.len() as u16;
-        st.underline = false;
-        st.strike = false;
-        st.highlight = None;
-        self.pending = Some(st);
-        self.insert_char(doc::PICTURE);
-        // Typing after the picture goes back to plain text style.
-        let mut back = st;
-        back.img = 0;
-        self.pending = Some(back);
-        EdAction::Redraw
-    }
-
-    fn print_pages(&mut self, _paper: Paper) -> Vec<Canvas> {
-        let lay = doc::layout(&self.doc);
-        let mpp = 100_000 / 72;
-        let (w, h) = ((self.doc.page_w * mpp / 1000) as usize, (self.doc.page_h * mpp / 1000) as usize);
-        (0..lay.pages)
-            .map(|page| {
-                let mut c = Canvas::new(w, h);
-                c.px.fill(0xFF_FFFF);
-                let clip = Rect::new(0, 0, w as i32, h as i32);
-                self.draw_page(&mut c, &lay, page, 0, 0, mpp, None, clip, false);
-                c
-            })
-            .collect()
     }
 }
 

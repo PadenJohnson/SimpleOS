@@ -327,6 +327,10 @@ impl SheetEditor {
         self.draw_tabs(c, r);
         self.draw_menu(c, r);
         self.draw_rename(c, r);
+        if let Some(f) = &self.edit {
+            let b = self.bar(r);
+            f.draw_menu(c, Rect::new(b.x + 126, b.y + 4, b.w - 134, b.h - 8));
+        }
     }
 
     fn draw_grid(&self, c: &mut Canvas, r: Rect) {
@@ -1030,6 +1034,10 @@ impl SheetEditor {
                 }
                 _ => SheetAction::None,
             };
+        }
+        if self.edit.as_ref().is_some_and(|f| f.menu_open()) {
+            self.edit.as_mut().unwrap().on_key(sc);
+            return SheetAction::Redraw;
         }
         if self.edit.is_some() {
             match sc {

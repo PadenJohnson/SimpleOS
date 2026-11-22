@@ -30,7 +30,7 @@ const BTN: u32 = rgb(230, 233, 238);
 const SIDE_BG: u32 = rgb(240, 242, 246);
 
 /// Items at the top of Solon storage that Files doesn't show.
-const HIDDEN: [&str; 5] = [BIN, "Originals", "Settings.txt", "RecycleBin.txt", "PhoneImports.txt"];
+const HIDDEN: [&str; 6] = [BIN, "Originals", "Settings.txt", "RecycleBin.txt", "PhoneImports.txt", "Dictionary.txt"];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Place {

@@ -6,7 +6,7 @@ param(
     [string[]]$Expect = @("solon: kernel entered", "solon: desktop ready"),
     [string]$Qemu = "C:\Program Files\qemu\qemu-system-x86_64.exe",
     # Input to send after boot, in order: "key:esc", "move:-560,-300" (relative mouse move),
-    # "click", "dblclick", "wait:500" (ms), "shot:name" (extra screenshot test-out\name.png)
+    # "click", "rclick" (right button), "dblclick", "wait:500" (ms), "shot:name" (extra screenshot test-out\name.png)
     [string[]]$Events = @(),
     [string[]]$Photos = @(),  # photo folders to put on the boot drive (default: .\samples)
     # USB devices: "kbd", "mouse", "disk:<image file>" (plugged in at boot),
@@ -141,7 +141,7 @@ function Send-Qmp([string]$cmd) {
     do { $line = $script:qmp.r.ReadLine() } while ($line -like '*"event"*')
 }
 function Send-Input([string]$events) { Send-Qmp "{`"execute`":`"input-send-event`",`"arguments`":{`"events`":[$events]}}"; Start-Sleep -Milliseconds 60 }
-function Send-Button([bool]$down) { Send-Input "{`"type`":`"btn`",`"data`":{`"down`":$($down.ToString().ToLower()),`"button`":`"left`"}}" }
+function Send-Button([bool]$down, [string]$button = "left") { Send-Input "{`"type`":`"btn`",`"data`":{`"down`":$($down.ToString().ToLower()),`"button`":`"$button`"}}" }
 function Save-Shot([string]$name) {
     $abs = (Resolve-Path test-out).Path + "\$name.ppm"
     Send-Qmp "{`"execute`":`"screendump`",`"arguments`":{`"filename`":`"$($abs -replace '\\','\\\\')`"}}"
@@ -184,6 +184,7 @@ try {
                 Start-Sleep -Milliseconds 200
             }
             "click"    { Send-Button $true; Send-Button $false; Start-Sleep -Milliseconds 200 }
+            "rclick"   { Send-Button $true "right"; Send-Button $false "right"; Start-Sleep -Milliseconds 300 }
             "dblclick" { Send-Button $true; Send-Button $false; Send-Button $true; Send-Button $false; Start-Sleep -Milliseconds 300 }
             "wheel"    {
                 # wheel:down or wheel:up (one notch)

@@ -501,6 +501,7 @@ impl Desktop {
         let old = self.settings;
         self.settings = n;
         crate::ps2::set_speed(settings::MOUSE[n.mouse].1);
+        crate::spell::set_mode(n.spelling);
         if n.size != old.size {
             self.request = Some(PowerRequest::Rescale);
         }
@@ -874,6 +875,12 @@ impl Desktop {
             let t = self.storage.read_root_file(&mut self.usb, "Calendar.txt");
             self.calendar.load(t.as_deref().and_then(|b| core::str::from_utf8(b).ok()));
             redraw = true;
+        }
+        // Words added to the spelling dictionary are kept in Dictionary.txt.
+        if self.storage.library.is_some() && crate::spell::take_dirty() {
+            if let Err(e) = self.storage.write_root_file(&mut self.usb, "Dictionary.txt", crate::spell::user_text().as_bytes()) {
+                kprintln!("spell: couldn't save the dictionary: {:?}", e);
+            }
         }
         // The user's own desktop picture, for its preview in Settings.
         if !self.custom_checked && self.storage.library.is_some() {
@@ -1342,6 +1349,10 @@ impl Desktop {
                 if storage_changed {
                     self.library_changed();
                     self.files.refresh(&mut self.storage, &mut self.usb);
+                    // A restore merges the backed-up spelling words in.
+                    if let Some(t) = self.storage.read_root_file(&mut self.usb, "Dictionary.txt") {
+                        crate::spell::load_user(core::str::from_utf8(&t).unwrap_or(""));
+                    }
                 }
                 if calendar_changed {
                     let t = self.storage.read_root_file(&mut self.usb, "Calendar.txt");
@@ -2417,7 +2428,7 @@ impl Desktop {
         }
 
 
-        // Right button: games use it (flags in Mines).
+        // Right button: games use it (flags in Mines), editors show spelling suggestions.
         let rpressed = buttons & 2 != 0 && prev & 2 == 0;
         if rpressed && self.apps_menu.is_none() {
             if let Some(i) = self.windows.iter().rposition(|w| !w.minimized && w.rect().contains(x, y)) {
@@ -2426,6 +2437,13 @@ impl Desktop {
                     if body.contains(x, y) {
                         self.raise(app);
                         return true | self.games.press(g, x, y, body, now, true);
+                    }
+                }
+                if let Some(k) = self.doc_index(app) {
+                    if body.contains(x, y) {
+                        self.raise(app);
+                        let a = self.doc_apps[k].1.on_right_press(x, y, body, &mut self.storage, &mut self.usb);
+                        return true | self.doc_app_action(k, a, now);
                     }
                 }
             }

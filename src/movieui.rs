@@ -710,6 +710,8 @@ impl MovieApp {
         self.draw_timeline(c, r);
         if self.export.is_some() || self.dialog != Dialog::None {
             self.draw_dialog(c, r);
+        } else if let Some(t) = &self.text {
+            t.draw_menu(c, Self::prop_row(r, 1)); // spelling suggestions for a title
         }
     }
 

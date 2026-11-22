@@ -14,7 +14,8 @@
 #   --expect TEXT...    log lines that must appear (default: "solon: kernel entered" "solon: desktop ready")
 #   --qemu PATH         QEMU binary (default: qemu-system-x86_64 on PATH)
 #   --events E...       input to send after boot, in order: "key:esc", "key:ctrl+s", "type:Hello",
-#                       "move:-560,-300" (relative mouse move), "click", "dblclick", "down", "up",
+#                       "move:-560,-300" (relative mouse move), "click", "rclick" (right button),
+#                       "dblclick", "down", "up",
 #                       "wheel:down", "hold:w,1500", "wait:500" (ms), "shot:name" (test-out/name.png),
 #                       "plug:<id>", "unplug:<id>"
 #   --photos DIR...     photo folders to put on the boot drive (default: ./samples)
@@ -248,8 +249,15 @@ def Q(name, **a):
     if qmp is None: qmp = Qmp()
     return qmp.cmd(name, **a)
 def keys(names, **extra): return Q("send-key", keys=[{"type": "qcode", "data": k} for k in names], **extra)
-def send_input(*evs): Q("input-send-event", events=list(evs)); ms(60)
-def button(down, b="left"): send_input({"type": "btn", "data": {"down": down, "button": b}})
+# The mouse goes through monitor commands: Linux builds of QEMU (10.0, -display none) accept
+# QMP's input-send-event but don't pass it on to the guest.
+def hmp(line): Q("human-monitor-command", **{"command-line": line}); ms(60)
+held = 0
+def button(down, b="left"):
+    global held
+    bit = {"left": 1, "right": 2, "middle": 4}[b]
+    held = held | bit if down else held & ~bit
+    hmp(f"mouse_button {held}")
 def shot(name): Q("screendump", filename=os.path.join(out, name + ".ppm")); ms(300)
 
 SHIFTED = {'!': '1', '@': '2', '#': '3', '$': '4', '%': '5', '(': '9', ')': '0', '?': 'slash',
@@ -290,13 +298,13 @@ try:
             for i in range(1, steps + 1):
                 nx = round(dx * i / steps) - sx; ny = round(dy * i / steps) - sy
                 sx += nx; sy += ny
-                send_input({"type": "rel", "data": {"axis": "x", "value": nx}},
-                           {"type": "rel", "data": {"axis": "y", "value": ny}})
+                hmp(f"mouse_move {nx} {ny}")
             ms(200)
         elif kind == "click": button(True); button(False); ms(200)
+        elif kind == "rclick": button(True, "right"); button(False, "right"); ms(300)
         elif kind == "dblclick": button(True); button(False); button(True); button(False); ms(300)
         elif kind == "wheel":                       # wheel:down or wheel:up (one notch)
-            button(True, "wheel-" + arg); button(False, "wheel-" + arg); ms(100)
+            hmp(f"mouse_move 0 0 {1 if arg == 'up' else -1}"); ms(100)
         elif kind == "plug": Q("device_add", driver="usb-storage", bus="xhci.0", drive=arg, id="dev-" + arg)
         elif kind == "unplug": Q("device_del", id="dev-" + arg)
         elif kind == "down": button(True)

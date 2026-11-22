@@ -34,7 +34,7 @@ const FAT_MAX: u64 = 128 * 1024 * 1024;
 /// Remind after this many days without a backup.
 pub const REMIND_DAYS: i64 = 30;
 /// Root files that restoring merges line by line instead of keeping both.
-const MERGED: [&str; 2] = ["Calendar.txt", "PhoneImports.txt"];
+const MERGED: [&str; 3] = ["Calendar.txt", "PhoneImports.txt", "Dictionary.txt"];
 /// Root files that aren't backed up (they'd be wrong after a restore) or restored over.
 const NOT_BACKED_UP: [&str; 2] = [RECORD, "RecycleBin.txt"];
 const KEEP_CURRENT: [&str; 2] = ["Settings.txt", "Games.txt"];

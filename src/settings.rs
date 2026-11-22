@@ -46,12 +46,14 @@ pub struct Settings {
     pub slide_time: usize,
     /// Photos in a mixed-up order (else in folder order).
     pub shuffle: bool,
+    /// Spelling: index into spell::CHOICES (English (US), English (UK), off).
+    pub spelling: usize,
 }
 
 impl Settings {
     /// First-boot defaults: bigger text on very high-resolution screens.
     pub fn defaults(screen_w: usize, screen_h: usize) -> Settings {
-        let mut s = Settings { background: crate::wallpaper::DEFAULT, size: 0, clock24: false, show_date: true, mouse: 1, install_notice: false, saver: 0, saver_wait: 1, slide_time: 1, shuffle: true };
+        let mut s = Settings { background: crate::wallpaper::DEFAULT, size: 0, clock24: false, show_date: true, mouse: 1, install_notice: false, saver: 0, saver_wait: 1, slide_time: 1, shuffle: true, spelling: 0 };
         for i in (0..SIZES.len()).rev() {
             if screen_w >= 2400 && s.size_fits(i, screen_w, screen_h) {
                 s.size = i;
@@ -73,8 +75,8 @@ impl Settings {
 
     pub fn to_text(&self) -> String {
         format!(
-            "background={}\nsize={}\nclock24={}\nshow_date={}\nmouse={}\ninstall_notice={}\nsaver={}\nsaver_wait={}\nslide_time={}\nshuffle={}\n",
-            self.background, self.size, self.clock24 as u8, self.show_date as u8, self.mouse, self.install_notice as u8, self.saver, self.saver_wait, self.slide_time, self.shuffle as u8
+            "background={}\nsize={}\nclock24={}\nshow_date={}\nmouse={}\ninstall_notice={}\nsaver={}\nsaver_wait={}\nslide_time={}\nshuffle={}\nspelling={}\n",
+            self.background, self.size, self.clock24 as u8, self.show_date as u8, self.mouse, self.install_notice as u8, self.saver, self.saver_wait, self.slide_time, self.shuffle as u8, self.spelling
         )
     }
 
@@ -94,6 +96,7 @@ impl Settings {
                 "saver_wait" if n < SAVER_WAIT.len() => s.saver_wait = n,
                 "slide_time" if n < SLIDE_TIME.len() => s.slide_time = n,
                 "shuffle" if n <= 1 => s.shuffle = n == 1,
+                "spelling" if n < crate::spell::CHOICES.len() => s.spelling = n,
                 _ => {}
             }
         }

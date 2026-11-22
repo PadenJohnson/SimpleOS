@@ -45,6 +45,13 @@ nothing to download.
     JPEG 2000 and JBIG2 pictures in PDFs show as grey boxes for now.
   - Text Editor: plain text and code files, keeping their encoding and line endings; wrap,
     find and replace, bigger text, printing.
+  - Spelling, for every app where you type text: Writer, the Text Editor (on for .txt and
+    .md files; the Spelling button turns it on or off), spreadsheet cells, calendar events
+    and video titles. Mistakes get a red wavy line; right-click one (or press F7, Shift+F10
+    or the Menu key) for suggestions, Add to dictionary or Ignore. F7 also jumps to the next
+    mistake. English (US) or English (UK) in Settings, or off. Added words are kept in
+    Solon storage (Dictionary.txt) and backed up. The dictionary is SCOWL's (about 92,000
+    words, names and abbreviations).
   - Spreadsheets: opens and saves Excel (.xlsx) and CSV files from Solon
     storage or USB drives. Formulas (SUM, AVERAGE, IF, ROUND, SUMIF and more, recalculated as
     you type), bold, text and fill colours, number formats (money, percent, dates), column
@@ -187,7 +194,7 @@ image, boot-tests it with UEFI and old BIOS, and publishes it as the release `la
 
 - `src/`: the kernel. `main.rs` boots; `desktop.rs`, `photos.rs`, `editor.rs`, `import.rs`,
   `files.rs`, `diskmgr.rs`, `documents.rs`, `sheetui.rs`, `movieui.rs`, `settingsui.rs` and `printui.rs` are
-  the apps; `movie.rs` is the video editor's engine; `video/` holds the H.264 encoder and decoder (CAVLC and CABAC), AAC, FLAC, MP4 and AVI/WAV code (`tables.rs`: standard tables from FFmpeg); `videos.rs` is the player and `media/` its engine (containers and the MPEG-2, MPEG-4, DivX 3, HEVC, VP8, VP9, MP3, AC-3/E-AC-3, DTS, AMR, Vorbis and Opus decoders); `games/` holds the games; `writer/` is Writer (with .docx), `pdf/` reads, draws and writes PDFs (`pdfui.rs` is the PDF app), `textedit.rs` the Text Editor and `docshell.rs` what those three share; `font.rs` and `raster.rs` draw text (fonts/: Noto Sans and Noto Serif, SIL Open Font License, see fonts/OFL.txt);
+  the apps; `movie.rs` is the video editor's engine; `video/` holds the H.264 encoder and decoder (CAVLC and CABAC), AAC, FLAC, MP4 and AVI/WAV code (`tables.rs`: standard tables from FFmpeg); `videos.rs` is the player and `media/` its engine (containers and the MPEG-2, MPEG-4, DivX 3, HEVC, VP8, VP9, MP3, AC-3/E-AC-3, DTS, AMR, Vorbis and Opus decoders); `games/` holds the games; `writer/` is Writer (with .docx), `pdf/` reads, draws and writes PDFs (`pdfui.rs` is the PDF app), `textedit.rs` the Text Editor and `docshell.rs` what those three share; `spell.rs` is spelling for every app (assets/spell/: SCOWL's word lists, made with tools/spell/mkdict.py, see assets/spell/SCOWL-Copyright.txt); `font.rs` and `raster.rs` draw text (fonts/: Noto Sans and Noto Serif, SIL Open Font License, see fonts/OFL.txt);
   `doc/` reads and writes spreadsheets (zip, XML, formulas, xlsx, csv); `xhci.rs`, `ehci.rs`, `usb.rs`, `msc.rs`, `usbprint.rs`, `nvme.rs`, `hda.rs` and
   `ahci.rs` are drivers; `fs/` holds partition tables, FAT and exFAT; `library.rs` is the
   photo library; `image.rs` and `imgfmt/` read photo files (HEIC, WebP, GIF, TIFF, RAW previews, PSD...); `print.rs` lays out pages and speaks PCL / IPP.

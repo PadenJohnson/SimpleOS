@@ -480,6 +480,7 @@ impl CalendarApp {
                 Self::button(c, p[17], "Delete", false, ACCENT);
             }
             Self::button(c, p[18], "Cancel", false, ACCENT);
+            dl.title.draw_menu(c, p[0]);
         }
     }
 

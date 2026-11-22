@@ -44,6 +44,10 @@ pub enum EdAction {
 pub trait DocEditor {
     fn draw(&self, c: &mut Canvas, r: Rect);
     fn on_press(&mut self, x: i32, y: i32, r: Rect, now: u64) -> EdAction;
+    /// The right mouse button (spelling suggestions for the word under it).
+    fn on_right_press(&mut self, _x: i32, _y: i32, _r: Rect) -> EdAction {
+        EdAction::None
+    }
     fn on_drag(&mut self, _x: i32, _y: i32, _r: Rect) -> bool {
         false
     }
@@ -233,6 +237,7 @@ pub trait DocApp {
     fn open_src(&mut self, src: DocSrc, storage: &mut Storage, usb: &mut Usb) -> DocsAction;
     fn start_print(&mut self, printers: Vec<PrinterInfo>);
     fn on_press(&mut self, x: i32, y: i32, r: Rect, now: u64, storage: &mut Storage, usb: &mut Usb) -> DocsAction;
+    fn on_right_press(&mut self, x: i32, y: i32, r: Rect, storage: &mut Storage, usb: &mut Usb) -> DocsAction;
     fn on_drag(&mut self, x: i32, y: i32, r: Rect) -> bool;
     fn on_release(&mut self) -> bool;
     fn on_wheel(&mut self, delta: i8, r: Rect) -> bool;
@@ -820,6 +825,16 @@ impl<E: DocEditor> DocApp for DocShell<E> {
             }
         }
         DocsAction::None
+    }
+
+    fn on_right_press(&mut self, x: i32, y: i32, r: Rect, storage: &mut Storage, usb: &mut Usb) -> DocsAction {
+        match &mut self.doc {
+            Some(o) if matches!(self.dialog, Dialog::None) => {
+                let a = o.ed.on_right_press(x, y, r);
+                self.ed_action(a, storage, usb)
+            }
+            _ => DocsAction::None,
+        }
     }
 
     fn on_drag(&mut self, x: i32, y: i32, r: Rect) -> bool {

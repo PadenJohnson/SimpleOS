@@ -63,6 +63,7 @@ mod screen;
 mod scrollbar;
 mod settings;
 mod settingsui;
+mod spell;
 mod sheetui;
 mod textedit;
 mod textfield;
@@ -269,6 +270,10 @@ extern "C" fn kmain() -> ! {
     };
     kprintln!("settings: {:?}", settings);
     ps2::set_speed(settings::MOUSE[settings.mouse].1);
+    spell::set_mode(settings.spelling);
+    if let Some(t) = storage.read_root_file(&mut usb, "Dictionary.txt") {
+        spell::load_user(core::str::from_utf8(&t).unwrap_or(""));
+    }
     let mut scale = settings.scale();
     let logical = |s: u32| (w * 2 / s as usize, h * 2 / s as usize);
     let (mut lw, mut lh) = logical(scale);

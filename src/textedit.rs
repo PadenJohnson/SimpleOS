@@ -69,11 +69,12 @@ enum Btn {
     Redo,
     Find,
     Wrap,
+    Spell,
     Smaller,
     Bigger,
 }
 
-const BUTTONS: [(Btn, &str); 10] = [
+const BUTTONS: [(Btn, &str); 11] = [
     (Btn::Back, "< Files"),
     (Btn::Save, "Save"),
     (Btn::SaveAs, "Save as"),
@@ -82,6 +83,7 @@ const BUTTONS: [(Btn, &str); 10] = [
     (Btn::Redo, "Redo"),
     (Btn::Find, "Find"),
     (Btn::Wrap, "Wrap"),
+    (Btn::Spell, "Spelling"),
     (Btn::Smaller, "A-"),
     (Btn::Bigger, "A+"),
 ];
@@ -116,7 +118,14 @@ pub struct TextEd {
     want_col: Option<usize>,
     /// Size of the text area last drawn (rows, columns), for paging and wrapping.
     view: core::cell::Cell<(usize, usize)>,
+    /// Check spelling (on for prose: .txt, .md...; off for code and settings files).
+    spell_on: bool,
+    /// Spelling suggestions open for the word (line, start, end).
+    spell: Option<(crate::spell::Popup, (usize, usize, usize))>,
 }
+
+/// Files that are mostly prose, where spelling starts on.
+const PROSE: [&str; 6] = ["txt", "text", "md", "srt", "nfo", ""];
 
 pub fn new_doc() -> TextEd {
     TextEd {
@@ -139,6 +148,8 @@ pub fn new_doc() -> TextEd {
         last_click: None,
         want_col: None,
         view: core::cell::Cell::new((30, 80)),
+        spell_on: true,
+        spell: None,
     }
 }
 
@@ -162,12 +173,13 @@ pub fn decode_text(b: &[u8]) -> (String, &'static str) {
     }
 }
 
-pub fn load(_name: &str, b: &[u8]) -> Result<TextEd, String> {
+pub fn load(name: &str, b: &[u8]) -> Result<TextEd, String> {
     if b.len() > 20 * 1024 * 1024 {
         return Err(String::from("it's too big for the Text Editor (over 20 MB)"));
     }
     let (text, enc) = decode_text(b);
     let mut ed = new_doc();
+    ed.spell_on = PROSE.contains(&crate::docshell::ext_of(name).as_str());
     ed.enc = match enc {
         "utf8bom" => Enc::Utf8Bom,
         "utf16le" => Enc::Utf16Le,
@@ -212,7 +224,7 @@ impl TextEd {
             .map(|&(b, label)| {
                 let w = text_width(label, Size::Small, true) + 26;
                 let rect = Rect::new(x, r.y + 9, w, 34);
-                x += w + if matches!(b, Btn::Print | Btn::Redo | Btn::Wrap) { 18 } else { 6 };
+                x += w + if matches!(b, Btn::Print | Btn::Redo | Btn::Spell) { 18 } else { 6 };
                 (b, rect)
             })
             .collect()
@@ -541,6 +553,13 @@ impl TextEd {
                 self.scroll_to_cursor(r);
                 EdAction::Redraw
             }
+            Btn::Spell => {
+                if !crate::spell::enabled() {
+                    return EdAction::Toast(String::from("Spelling is turned off in Settings"));
+                }
+                self.spell_on = !self.spell_on;
+                EdAction::Redraw
+            }
             Btn::Smaller => {
                 self.px = match self.px {
                     32 => 20,
@@ -628,7 +647,7 @@ impl DocEditor for TextEd {
         c.fill_rect(bar.x, bar.y + bar.h - 1, bar.w, 1, rgb(222, 226, 232));
         for (b, rect) in Self::button_rects(r) {
             let label = BUTTONS.iter().find(|x| x.0 == b).unwrap().1;
-            let on = (b == Btn::Wrap && self.wrap) || (b == Btn::Find && self.find.is_some());
+            let on = (b == Btn::Wrap && self.wrap) || (b == Btn::Find && self.find.is_some()) || (b == Btn::Spell && self.spell_on && crate::spell::enabled());
             let primary = b == Btn::Save && self.dirty;
             if on {
                 c.round_rect(rect.x, rect.y, rect.w, rect.h, 8, rgb(214, 224, 240));
@@ -672,6 +691,8 @@ impl DocEditor for TextEd {
         c.fill_rect(a.x, a.y, g - 8, a.h, rgb(246, 247, 250));
         c.set_clip(a);
         let sel = self.selection();
+        let check = self.spell_on && crate::spell::enabled();
+        let mut spelling: Option<(usize, Vec<(usize, usize)>)> = None;
         for (k, &(l, s, e)) in rows.iter().enumerate().skip(self.top).take(visible) {
             let y = a.y + 6 + (k - self.top) as i32 * lh;
             if s == 0 {
@@ -699,6 +720,20 @@ impl DocEditor for TextEd {
                     c.mono_char(x, y + 2, ch, self.px, INK);
                 }
                 v += w;
+            }
+            if check {
+                if spelling.as_ref().is_none_or(|(sl, _)| *sl != l) {
+                    let caret = (sel.is_none() && self.cur.0 == l).then_some(self.cur.1);
+                    spelling = Some((l, crate::spell::misspelled(line, caret)));
+                }
+                for &(ws, we) in &spelling.as_ref().unwrap().1 {
+                    let (ws, we) = (ws.max(s), we.min(e));
+                    if ws < we {
+                        let x0 = a.x + g + (Self::vcol(line, ws) as i32 - base as i32 - self.left as i32) * cw;
+                        let x1 = a.x + g + (Self::vcol(line, we) as i32 - base as i32 - self.left as i32) * cw;
+                        crate::spell::squiggle(c, x0.max(a.x + g), y + 2 + self.px as i32, x1 - x0.max(a.x + g));
+                    }
+                }
             }
             // Selected line ends show as a little block.
             if sel.is_some_and(|(p, q)| (l, e) >= p && (l, e) < q) && e == line.len() {
@@ -729,9 +764,29 @@ impl DocEditor for TextEd {
         };
         let status = format!("Line {}, column {}     {} lines     {}     {}", self.cur.0 + 1, self.cur.1 + 1, self.lines.len(), enc, if self.crlf { "Windows line endings" } else { "Unix line endings" });
         c.text(r.x + 14, sy + 7, &status, Size::Small, false, DIM);
+        if let Some((pop, _)) = &self.spell {
+            pop.draw(c, r);
+        }
+    }
+
+    fn on_right_press(&mut self, x: i32, y: i32, r: Rect) -> EdAction {
+        self.spell = None;
+        if self.area(r).contains(x, y) {
+            let p = self.pos_at(x, y, r);
+            self.open_spelling(r, p);
+        }
+        EdAction::Redraw
     }
 
     fn on_press(&mut self, x: i32, y: i32, r: Rect, now: u64) -> EdAction {
+        if let Some((pop, word)) = self.spell.take() {
+            match pop.press(x, y, r) {
+                crate::spell::Pick::Chosen(ch) => self.apply_spelling(word, ch),
+                crate::spell::Pick::Open => self.spell = Some((pop, word)),
+                _ => {}
+            }
+            return EdAction::Redraw;
+        }
         if let Some((b, _)) = Self::button_rects(r).into_iter().find(|(_, rect)| rect.contains(x, y)) {
             return self.press_button(b, r);
         }
@@ -819,6 +874,162 @@ impl DocEditor for TextEd {
 
     fn on_key(&mut self, sc: u8, r: Rect) -> EdAction {
         let Some(key) = self.keys.feed(sc) else { return EdAction::None };
+        if let Some((mut pop, word)) = self.spell.take() {
+            match pop.key(&key) {
+                crate::spell::Pick::Open => self.spell = Some((pop, word)),
+                crate::spell::Pick::Close => {}
+                crate::spell::Pick::Chosen(ch) => self.apply_spelling(word, ch),
+                crate::spell::Pick::Pass => return self.on_key_inner(key, r),
+            }
+            return EdAction::Redraw;
+        }
+        if self.find.is_none() && crate::spell::is_suggest_key(&key, self.keys.shift) {
+            self.open_spelling(r, self.cur);
+            // F7 goes on to the next misspelled word.
+            if self.spell.is_none() && key == Key::F(7) {
+                if !self.spell_on || !crate::spell::enabled() {
+                    return EdAction::Toast(String::from("Spelling is off (the Spelling button, or Settings)"));
+                }
+                let lines = &self.lines;
+                match crate::spell::next_misspelled(lines.len(), |i| &lines[i], self.cur) {
+                    Some((l, s, _)) => {
+                        self.cur = (l, s);
+                        self.anchor = None;
+                        self.scroll_to_cursor(r);
+                        self.open_spelling(r, self.cur);
+                    }
+                    None => return EdAction::Toast(String::from("No spelling mistakes found")),
+                }
+            }
+            return EdAction::Redraw;
+        }
+        self.on_key_inner(key, r)
+    }
+
+    fn dirty(&self) -> bool {
+        self.dirty
+    }
+
+    fn mark_saved(&mut self) {
+        self.dirty = false;
+    }
+
+    fn encode(&mut self, _ext: &str) -> Result<Vec<u8>, String> {
+        let s = self.text();
+        Ok(match self.enc {
+            Enc::Utf8 => s.into_bytes(),
+            Enc::Utf8Bom => {
+                let mut v = Vec::from([0xEF, 0xBB, 0xBF]);
+                v.extend_from_slice(s.as_bytes());
+                v
+            }
+            Enc::Utf16Le | Enc::Utf16Be => {
+                let le = self.enc == Enc::Utf16Le;
+                let mut v = if le { Vec::from([0xFF, 0xFE]) } else { Vec::from([0xFE, 0xFF]) };
+                for u in s.encode_utf16() {
+                    v.extend_from_slice(&if le { u.to_le_bytes() } else { u.to_be_bytes() });
+                }
+                v
+            }
+            Enc::Latin1 => s
+                .chars()
+                .map(|c| {
+                    let u = c as u32;
+                    if u < 0x80 || (0xA0..0x100).contains(&u) {
+                        u as u8
+                    } else {
+                        CP1252.iter().position(|&x| x as u32 == u).map(|i| 0x80 + i as u8).unwrap_or(b'?')
+                    }
+                })
+                .collect(),
+        })
+    }
+
+    fn print_pages(&mut self, paper: Paper) -> Vec<Canvas> {
+        let (pw, ph) = crate::print::page_pixels(paper, 100);
+        let (pw, ph) = (pw as i32, ph as i32);
+        let margin = 70;
+        let px = 16u8;
+        let cw = mono_width(px);
+        let lh = 18;
+        let cols = ((pw - 2 * margin) / cw).max(10) as usize;
+        let per_page = ((ph - 2 * margin) / lh).max(5) as usize;
+        let wrap = self.wrap;
+        self.wrap = true;
+        let rows = self.rows(cols);
+        self.wrap = wrap;
+        let mut pages = Vec::new();
+        for chunk in rows.chunks(per_page) {
+            let mut c = Canvas::new(pw as usize, ph as usize);
+            c.px.fill(0xFF_FFFF);
+            for (k, &(l, s, e)) in chunk.iter().enumerate() {
+                let line = &self.lines[l];
+                let mut v = 0;
+                for &ch in &line[s..e] {
+                    if ch != '\t' && ch != ' ' {
+                        c.mono_char(margin + v * cw, margin + k as i32 * lh, ch, px, 0);
+                    }
+                    v += if ch == '\t' { 4 } else { 1 };
+                }
+            }
+            pages.push(c);
+        }
+        if pages.len() > 1 {
+            let n = pages.len();
+            for (i, p) in pages.iter_mut().enumerate() {
+                let t = format!("{} / {}", i + 1, n);
+                p.text_centered(pw / 2, ph - margin / 2 - 8, &t, Size::Small, false, rgb(90, 90, 90));
+            }
+        }
+        pages
+    }
+}
+
+impl TextEd {
+    /// Open spelling suggestions if the word at `p` is misspelled.
+    fn open_spelling(&mut self, r: Rect, p: (usize, usize)) {
+        if !self.spell_on {
+            return;
+        }
+        let line = &self.lines[p.0];
+        let Some((s, e)) = crate::spell::misspelled_at(line, p.1) else { return };
+        let word: String = line[s..e].iter().collect();
+        // Where the word starts on screen.
+        let a = self.area(r);
+        let rows = self.rows(self.cols(r));
+        let row = self.row_of(&rows, (p.0, s));
+        if row < self.top {
+            return;
+        }
+        let (_, rs, _) = rows[row];
+        let cw = mono_width(self.px);
+        let x = a.x + self.gutter() + (Self::vcol(line, s) as i32 - Self::vcol(line, rs) as i32 - self.left as i32) * cw;
+        let y = a.y + 6 + (row - self.top) as i32 * self.line_h();
+        self.spell = Some((crate::spell::Popup::new(&word, x, y + self.line_h()), (p.0, s, e)));
+    }
+
+    fn apply_spelling(&mut self, (l, s, e): (usize, usize, usize), ch: crate::spell::Choice) {
+        if self.lines.get(l).is_none_or(|line| e > line.len()) {
+            return;
+        }
+        if matches!(ch, crate::spell::Choice::Replace(_)) {
+            self.snapshot(EditKind::None);
+            self.dirty = true;
+        }
+        let mut line = core::mem::take(&mut self.lines[l]);
+        let old = line.len();
+        let end = crate::spell::apply(&mut line, (s, e), &ch);
+        let grew = line.len() as isize - old as isize;
+        self.lines[l] = line;
+        if self.cur.0 == l && self.cur.1 >= e {
+            self.cur.1 = (self.cur.1 as isize + grew) as usize;
+        } else if self.cur.0 == l && self.cur.1 > s {
+            self.cur.1 = end;
+        }
+        self.anchor = None;
+    }
+
+    fn on_key_inner(&mut self, key: Key, r: Rect) -> EdAction {
         // Typing into the find bar.
         if let Some(f) = &mut self.find {
             let field = if f.in_with { &mut f.with } else { &mut f.what };
@@ -989,83 +1200,5 @@ impl DocEditor for TextEd {
         }
         self.scroll_to_cursor(r);
         EdAction::Redraw
-    }
-
-    fn dirty(&self) -> bool {
-        self.dirty
-    }
-
-    fn mark_saved(&mut self) {
-        self.dirty = false;
-    }
-
-    fn encode(&mut self, _ext: &str) -> Result<Vec<u8>, String> {
-        let s = self.text();
-        Ok(match self.enc {
-            Enc::Utf8 => s.into_bytes(),
-            Enc::Utf8Bom => {
-                let mut v = Vec::from([0xEF, 0xBB, 0xBF]);
-                v.extend_from_slice(s.as_bytes());
-                v
-            }
-            Enc::Utf16Le | Enc::Utf16Be => {
-                let le = self.enc == Enc::Utf16Le;
-                let mut v = if le { Vec::from([0xFF, 0xFE]) } else { Vec::from([0xFE, 0xFF]) };
-                for u in s.encode_utf16() {
-                    v.extend_from_slice(&if le { u.to_le_bytes() } else { u.to_be_bytes() });
-                }
-                v
-            }
-            Enc::Latin1 => s
-                .chars()
-                .map(|c| {
-                    let u = c as u32;
-                    if u < 0x80 || (0xA0..0x100).contains(&u) {
-                        u as u8
-                    } else {
-                        CP1252.iter().position(|&x| x as u32 == u).map(|i| 0x80 + i as u8).unwrap_or(b'?')
-                    }
-                })
-                .collect(),
-        })
-    }
-
-    fn print_pages(&mut self, paper: Paper) -> Vec<Canvas> {
-        let (pw, ph) = crate::print::page_pixels(paper, 100);
-        let (pw, ph) = (pw as i32, ph as i32);
-        let margin = 70;
-        let px = 16u8;
-        let cw = mono_width(px);
-        let lh = 18;
-        let cols = ((pw - 2 * margin) / cw).max(10) as usize;
-        let per_page = ((ph - 2 * margin) / lh).max(5) as usize;
-        let wrap = self.wrap;
-        self.wrap = true;
-        let rows = self.rows(cols);
-        self.wrap = wrap;
-        let mut pages = Vec::new();
-        for chunk in rows.chunks(per_page) {
-            let mut c = Canvas::new(pw as usize, ph as usize);
-            c.px.fill(0xFF_FFFF);
-            for (k, &(l, s, e)) in chunk.iter().enumerate() {
-                let line = &self.lines[l];
-                let mut v = 0;
-                for &ch in &line[s..e] {
-                    if ch != '\t' && ch != ' ' {
-                        c.mono_char(margin + v * cw, margin + k as i32 * lh, ch, px, 0);
-                    }
-                    v += if ch == '\t' { 4 } else { 1 };
-                }
-            }
-            pages.push(c);
-        }
-        if pages.len() > 1 {
-            let n = pages.len();
-            for (i, p) in pages.iter_mut().enumerate() {
-                let t = format!("{} / {}", i + 1, n);
-                p.text_centered(pw / 2, ph - margin / 2 - 8, &t, Size::Small, false, rgb(90, 90, 90));
-            }
-        }
-        pages
     }
 }

@@ -23,6 +23,8 @@ pub enum Key {
     /// Ctrl + a letter or digit (lower case), e.g. Ctrl('s').
     Ctrl(char),
     F(u8),
+    /// The Menu (context menu) key.
+    Menu,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -74,6 +76,7 @@ impl Keys {
             0x3B..=0x44 => Key::F(sc - 0x3A),
             0x57 => Key::F(11),
             0x58 => Key::F(12),
+            0x5D => Key::Menu, // after the E0 prefix
             0x39 if !self.ctrl => Key::Char(' '),
             0x37 => Key::Char('*'),
             0x4A => Key::Char('-'),

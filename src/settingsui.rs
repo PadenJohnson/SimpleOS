@@ -102,6 +102,10 @@ impl SettingsApp {
     fn mouse_btn(r: Rect, i: usize) -> Rect {
         Rect::new(Self::x0(r) + i as i32 * 128, Self::row_y(r, 4) + 22, 118, 36)
     }
+    /// Spelling shares the mouse row: a button that steps through the choices.
+    fn spell_btn(r: Rect) -> Rect {
+        Rect::new(Self::x0(r) + 3 * 128 + 110, Self::row_y(r, 4) + 22, 170, 36)
+    }
 
     // ---- drawing ----------------------------------------------------------------
 
@@ -151,6 +155,10 @@ impl SettingsApp {
         for (i, (name, _)) in MOUSE.iter().enumerate() {
             button(c, Self::mouse_btn(r, i), name, s.mouse == i, true);
         }
+        let sb = Self::spell_btn(r);
+        c.text(sb.x - 92, sb.y + 9, "Spelling", Size::Small, true, DIM);
+        let choice = crate::spell::CHOICES[s.spelling.min(crate::spell::CHOICES.len() - 1)];
+        button(c, sb, choice, s.spelling < 2, true);
 
         label(c, 5, "Screen");
         self.draw_screen_row(c, r);
@@ -237,6 +245,9 @@ impl SettingsApp {
             if Self::mouse_btn(r, i).contains(x, y) {
                 n.mouse = i;
             }
+        }
+        if Self::spell_btn(r).contains(x, y) {
+            n.spelling = (n.spelling + 1) % crate::spell::CHOICES.len();
         }
         if n != *s {
             return SettingsAction::Change(n);
