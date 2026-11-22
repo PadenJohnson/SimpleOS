@@ -243,6 +243,17 @@ impl Window {
     }
 }
 
+/// A phone's newest document, offered to continue on this computer.
+struct Handoff {
+    phone: u32,
+    phone_name: String,
+    vol: usize,
+    entry: DirEntry,
+}
+
+/// Kinds of files offered to continue working on (the documents Solon's apps edit).
+const HANDOFF_KINDS: [&str; 6] = ["docx", "xlsx", "csv", "pdf", "txt", "md"];
+
 pub struct Desktop {
     w: i32,
     h: i32,
@@ -259,6 +270,10 @@ pub struct Desktop {
     apps_menu: Option<usize>,
     /// The right-click menu on the desktop: where it opened, and the item under the pointer.
     desk_menu: Option<(i32, i32, Option<usize>)>,
+    /// "Continue working on your last document?" for a phone's newest document, and the
+    /// phones already looked at (until they're unplugged).
+    handoff: Option<Handoff>,
+    handoff_seen: Vec<u32>,
     /// The Applications menu is showing a folder.
     folder: Option<Folder>,
     /// Icons drawn small, for the dock (42 px) and title bars (22 px).
@@ -421,6 +436,8 @@ impl Desktop {
             last_title: None,
             apps_menu: None,
             desk_menu: None,
+            handoff: None,
+            handoff_seen: Vec::new(),
             folder: None,
             dock_icons: Vec::new(),
             title_icons: Vec::new(),
@@ -883,6 +900,23 @@ impl Desktop {
             let t = self.storage.read_root_file(&mut self.usb, "Calendar.txt");
             self.calendar.load(t.as_deref().and_then(|b| core::str::from_utf8(b).ok()));
             redraw = true;
+        }
+        // A phone that's ready: offer to continue its newest document here.
+        let phone_ids: Vec<u32> = self.usb.phones.iter().map(|p| p.id).collect();
+        self.handoff_seen.retain(|id| phone_ids.contains(id));
+        if self.handoff.as_ref().is_some_and(|h| !phone_ids.contains(&h.phone)) {
+            self.handoff = None;
+            redraw = true;
+        }
+        let ready = self.usb.phones.iter().find(|p| p.problem.is_none() && !p.storages.is_empty() && !self.handoff_seen.contains(&p.id)).map(|p| (p.id, p.name.clone()));
+        if let Some((id, name)) = ready {
+            self.handoff_seen.push(id);
+            let wanted = |n: &str| crate::docshell::has_ext(n, &HANDOFF_KINDS);
+            if let Some((vol, entry)) = self.usb.phone_latest_document(id, &wanted) {
+                kprintln!("handoff: \"{}\" on {} is the newest document", entry.name, name);
+                self.handoff = Some(Handoff { phone: id, phone_name: name, vol, entry });
+                redraw = true;
+            }
         }
         // Words added to the spelling dictionary are kept in Dictionary.txt.
         if self.storage.library.is_some() && crate::spell::take_dirty() {
@@ -1749,6 +1783,66 @@ impl Desktop {
         }
     }
 
+    // ---- "Continue working on your last document?" (a phone's newest document) ----------
+
+    fn handoff_box(&self) -> Rect {
+        let (w, h) = (440, 172);
+        let work = self.work();
+        Rect::new(work.w - w - 20, work.h - h - 16, w, h)
+    }
+    /// The "Not now" and "Open" buttons.
+    fn handoff_buttons(&self) -> (Rect, Rect) {
+        let b = self.handoff_box();
+        (Rect::new(b.x + b.w - 300, b.y + b.h - 54, 120, 38), Rect::new(b.x + b.w - 170, b.y + b.h - 54, 150, 38))
+    }
+
+    fn draw_handoff(&self, c: &mut Canvas) {
+        let Some(h) = &self.handoff else { return };
+        let b = self.handoff_box();
+        c.shadow(b.x, b.y + 4, b.w, b.h, 14, 20, 90);
+        c.round_rect(b.x, b.y, b.w, b.h, 14, rgb(252, 252, 253));
+        // A page with a phone corner.
+        let (ix, iy) = (b.x + 20, b.y + 20);
+        c.round_rect(ix, iy, 34, 42, 5, rgb(46, 134, 222));
+        for k in 0..3 {
+            c.fill_rect(ix + 7, iy + 12 + k * 8, if k == 2 { 12 } else { 20 }, 3, rgb(255, 255, 255));
+        }
+        c.text(b.x + 70, b.y + 16, "Continue working on your last document?", Size::Small, true, rgb(32, 36, 44));
+        let name = crate::photos::ellipsize(&h.entry.name, b.w - 90, Size::Small, false);
+        c.text(b.x + 70, b.y + 40, &name, Size::Small, false, rgb(32, 36, 44));
+        let m = h.entry.mtime;
+        let (y, mo, d, hh, mi) = (((m >> 25) + 1980) as u16, ((m >> 21) & 15) as u8, ((m >> 16) & 31) as u8, ((m >> 11) & 31) as u8, ((m >> 5) & 63) as u8);
+        let from = crate::photos::ellipsize(&format!("From {}", h.phone_name), b.w - 90, Size::Small, false);
+        c.text(b.x + 70, b.y + 62, &from, Size::Small, false, rgb(106, 112, 124));
+        let when = format!("Changed {} at {}", settings::short_date_text(y, mo, d), self.settings.clock_text(hh, mi));
+        c.text(b.x + 70, b.y + 84, &when, Size::Small, false, rgb(106, 112, 124));
+        let (later, open) = self.handoff_buttons();
+        c.round_rect(later.x, later.y, later.w, later.h, 8, rgb(232, 235, 240));
+        c.text_centered(later.x + later.w / 2, later.y + 10, "Not now", Size::Small, true, rgb(32, 36, 44));
+        c.round_rect(open.x, open.y, open.w, open.h, 8, rgb(46, 134, 222));
+        c.text_centered(open.x + open.w / 2, open.y + 10, "Open", Size::Small, true, rgb(255, 255, 255));
+    }
+
+    /// A click on the card: Some(redraw) if it was on it.
+    fn handoff_click(&mut self, x: i32, y: i32, now: u64) -> Option<bool> {
+        self.handoff.as_ref()?;
+        if !self.handoff_box().contains(x, y) {
+            return None;
+        }
+        let (later, open) = self.handoff_buttons();
+        if later.contains(x, y) {
+            self.handoff = None;
+            return Some(true);
+        }
+        if open.contains(x, y) {
+            let h = self.handoff.take()?;
+            kprintln!("handoff: opening \"{}\" from {}", h.entry.name, h.phone_name);
+            let src = DocSrc::Usb { drive: h.phone, vol: h.vol, entry: h.entry };
+            return Some(self.open_document(src, now) | true);
+        }
+        Some(false)
+    }
+
     /// Open Settings at a page (from the desktop's menu).
     fn open_settings(&mut self, page: Page, bg_picker: bool) {
         self.open(App::Settings);
@@ -2220,6 +2314,7 @@ impl Desktop {
             c.round_rect(w / 2 - tw / 2, y, tw, 34, 17, rgb(36, 40, 50));
             c.text_centered(w / 2, y + 9, msg, Size::Small, true, rgb(255, 255, 255));
         }
+        self.draw_handoff(c);
         self.draw_apps_menu(c);
         self.draw_desk_menu(c);
         if self.install_notice {
@@ -2651,6 +2746,9 @@ impl Desktop {
                 return true;
             }
             redraw = true;
+        }
+        if let Some(r) = self.handoff_click(x, y, now) {
+            return r;
         }
         if let Some(r) = self.power_click(x, y) {
             self.apps_menu = None;

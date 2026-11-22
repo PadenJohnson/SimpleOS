@@ -88,7 +88,10 @@ nothing to download.
 - Phones over USB: Android phones (MTP, "File transfer") and iPhones and cameras (PTP) show up
   in Files and Import. Browse and copy anything off them; Import's "Import new photos &
   videos" copies everything not imported before (big videos are copied a piece at a time).
-  Phones are only read. Tested with a built-in pretend phone (boot option `testphone`);
+  Phones are only read. When a phone is connected, Solon offers to continue working on its
+  newest document (Word, Excel, CSV, PDF, text or Markdown, in its Documents or Download
+  folders): Open shows it in the app for that kind of file, and saving keeps a copy in Solon's
+  Documents. Tested with a built-in pretend phone (boot option `testphone`);
   not yet tried with a real phone.
 - Disks: every disk inside the PC and plugged in, with its partitions, sizes and free space;
   set up Solon storage; a storage health check with a safe repair; erase and format a USB

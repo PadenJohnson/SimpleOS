@@ -32,6 +32,7 @@ const GET_OBJECT_PROP_LIST: u16 = 0x9805; // MTP: one property of every file in 
 const PROP_STORAGE_ID: u32 = 0xDC01;
 const PROP_OBJECT_FORMAT: u32 = 0xDC02;
 const PROP_FILE_NAME: u32 = 0xDC07;
+const PROP_DATE_MODIFIED: u32 = 0xDC09;
 
 // Responses
 const OK: u16 = 0x2001;
@@ -181,6 +182,21 @@ struct ObjectInfo {
     size: u32,
     parent: u32,
     name: String,
+    /// Last changed, packed like FAT timestamps (0 = not known).
+    mtime: u32,
+}
+
+/// An MTP date ("20261121T183000", maybe with ".5" and a time zone) packed like a FAT
+/// timestamp, as DirEntry::mtime is. 0 if it can't be read.
+pub fn mtp_date(s: &str) -> u32 {
+    let b = s.as_bytes();
+    let num = |a: usize, n: usize| -> Option<u32> { core::str::from_utf8(b.get(a..a + n)?).ok()?.parse().ok() };
+    let (Some(y), Some(mo), Some(d)) = (num(0, 4), num(4, 2), num(6, 2)) else { return 0 };
+    let (h, mi, sec) = if b.get(8) == Some(&b'T') { (num(9, 2).unwrap_or(0), num(11, 2).unwrap_or(0), num(13, 2).unwrap_or(0)) } else { (0, 0, 0) };
+    if !(1980..2108).contains(&y) || !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 {
+        return 0;
+    }
+    (y - 1980) << 25 | mo << 21 | d << 16 | h << 11 | mi << 5 | (sec.min(59) / 2)
 }
 
 fn parse_object_info(d: &[u8]) -> ObjectInfo {
@@ -199,7 +215,9 @@ fn parse_object_info(d: &[u8]) -> ObjectInfo {
     let _assoc_desc = r.u32();
     let _seq = r.u32();
     let name = r.string();
-    ObjectInfo { storage, format, size, parent, name }
+    let _captured = r.string();
+    let mtime = mtp_date(&r.string());
+    ObjectInfo { storage, format, size, parent, name, mtime }
 }
 
 // ---- the protocol ----------------------------------------------------------------------------
@@ -478,7 +496,7 @@ impl Phone {
             }
             let is_dir = info.format == FORMAT_FOLDER;
             self.sizes.insert(h, size);
-            out.push(DirEntry { name: info.name, is_dir, size: if is_dir { 0 } else { size }, first_cluster: h, contiguous: false, loc: Vec::new(), mtime: 0 });
+            out.push(DirEntry { name: info.name, is_dir, size: if is_dir { 0 } else { size }, first_cluster: h, contiguous: false, loc: Vec::new(), mtime: info.mtime });
         }
         out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| crate::fs::natural_cmp(&a.name, &b.name)));
         kprintln!("phone: listed \"{}\": {} items in {} ms (one by one)", dir.name, out.len(), ms());
@@ -520,6 +538,25 @@ impl Phone {
                 }
             }
         }
+        // Dates, if the phone gives them that way (not needed for the listing).
+        let mut dates: BTreeMap<u32, u32> = BTreeMap::new();
+        if let Ok(d) = self.op(hcs, GET_OBJECT_PROP_LIST, &[dir.first_cluster, 0, PROP_DATE_MODIFIED, 0, 1]) {
+            let mut r = Rd { b: &d, p: 0 };
+            let n = r.u32();
+            for _ in 0..n.min(1_000_000) {
+                if r.p >= d.len() {
+                    break;
+                }
+                let h = r.u32();
+                let code = r.u16() as u32;
+                let ty = r.u16();
+                if code == PROP_DATE_MODIFIED && ty == 0xFFFF {
+                    dates.insert(h, mtp_date(&r.string()));
+                } else if skip_value(&mut r, ty).is_none() {
+                    break;
+                }
+            }
+        }
         let mut out = Vec::new();
         for (h, (name, format, size, st)) in objs {
             if h == dir.first_cluster {
@@ -532,9 +569,46 @@ impl Phone {
             let is_dir = format == FORMAT_FOLDER;
             let size = if is_dir { 0 } else { size.unwrap_or(0) };
             self.sizes.insert(h, size);
-            out.push(DirEntry { name, is_dir, size, first_cluster: h, contiguous: false, loc: Vec::new(), mtime: 0 });
+            let mtime = dates.get(&h).copied().unwrap_or(0);
+            out.push(DirEntry { name, is_dir, size, first_cluster: h, contiguous: false, loc: Vec::new(), mtime });
         }
         Some(out)
+    }
+
+    /// The most recently changed file that `wanted` accepts, in the places documents are kept
+    /// (Documents and Download folders and the folders in them, and the top of each storage
+    /// area): (storage area, file). None if there's none, or the phone doesn't tell dates.
+    pub fn latest_document(&mut self, hcs: &mut [Hc], wanted: &dyn Fn(&str) -> bool) -> Option<(usize, DirEntry)> {
+        const PLACES: [&str; 6] = ["documents", "download", "downloads", "docs", "my documents", "notes"];
+        let mut best: Option<(usize, DirEntry)> = None;
+        let consider = |vol: usize, e: &DirEntry, best: &mut Option<(usize, DirEntry)>| {
+            if !e.is_dir && e.mtime != 0 && wanted(&e.name) && best.as_ref().is_none_or(|b| e.mtime > b.1.mtime) {
+                *best = Some((vol, e.clone()));
+            }
+        };
+        for vol in 0..self.storages.len() {
+            let Some(root) = self.root(vol) else { continue };
+            let Ok(top) = self.list(hcs, vol, &root) else { continue };
+            for e in &top {
+                consider(vol, e, &mut best);
+            }
+            for dir in top.iter().filter(|e| e.is_dir && PLACES.contains(&e.name.to_lowercase().as_str())) {
+                let Ok(items) = self.list(hcs, vol, dir) else { continue };
+                for e in &items {
+                    consider(vol, e, &mut best);
+                }
+                // One level further in (Documents/Work), unless there are lots of folders.
+                let subs: Vec<DirEntry> = items.iter().filter(|e| e.is_dir).take(20).cloned().collect();
+                for sub in &subs {
+                    if let Ok(inner) = self.list(hcs, vol, sub) {
+                        for e in &inner {
+                            consider(vol, e, &mut best);
+                        }
+                    }
+                }
+            }
+        }
+        best
     }
 
     /// A whole file.
@@ -592,6 +666,7 @@ struct TestObject {
     name: String,
     folder: bool,
     data: Vec<u8>,
+    modified: &'static str,
 }
 
 /// Answers PTP/MTP requests like an Android phone with a few photos, a video and a document.
@@ -606,8 +681,14 @@ const TEST_STORAGE: u32 = 0x0001_0001;
 impl TestPhone {
     fn new() -> TestPhone {
         let mut objects = BTreeMap::new();
+        let mut dated = |h: u32, parent: u32, name: &str, folder: bool, data: Vec<u8>, modified: &'static str| {
+            objects.insert(h, TestObject { parent, name: String::from(name), folder, data, modified });
+        };
+        // Documents: the trip plan in Download was changed last.
+        dated(11, 7, "Old notes.txt", false, Vec::from(&b"Things to remember\r\n"[..]), "20261001T120000");
+        dated(12, 9, "Trip plan.txt", false, Vec::from(&b"Trip to the coast\r\n\r\nFriday: leave at 9\r\nSaturday: boat tour, lunch at the harbour\r\nSunday: drive home\r\n"[..]), "20261121T183000");
         let mut add = |h: u32, parent: u32, name: &str, folder: bool, data: Vec<u8>| {
-            objects.insert(h, TestObject { parent, name: String::from(name), folder, data });
+            objects.insert(h, TestObject { parent, name: String::from(name), folder, data, modified: "20261120T101500" });
         };
         add(1, ROOT, "DCIM", true, Vec::new());
         add(2, 1, "Camera", true, Vec::new());
@@ -624,6 +705,9 @@ impl TestPhone {
         let shot = include_bytes!("../samples/tiny.png").to_vec();
         for k in 0..1500u32 {
             add(100 + k, 10, &alloc::format!("Screenshot_2026{:04}.png", k), false, shot.clone());
+        }
+        if let Some(o) = objects.get_mut(&8) {
+            o.modified = "20261118T090000"; // shopping.csv
         }
         TestPhone { objects, replies: Default::default(), session: false }
     }
@@ -716,8 +800,8 @@ impl TestPhone {
                     d.extend_from_slice(&[0u8; 8]);
                     let name = o.name.clone();
                     put_string(&mut d, &name);
-                    put_string(&mut d, "20261120T101500");
-                    put_string(&mut d, "20261120T101500");
+                    put_string(&mut d, o.modified);
+                    put_string(&mut d, o.modified);
                     put_string(&mut d, "");
                     self.data(code, tid, d);
                     self.resp(OK, tid, &[]);
@@ -767,6 +851,10 @@ impl TestPhone {
                         PROP_OBJECT_SIZE => {
                             d.extend_from_slice(&8u16.to_le_bytes());
                             d.extend_from_slice(&(o.data.len() as u64).to_le_bytes());
+                        }
+                        PROP_DATE_MODIFIED => {
+                            d.extend_from_slice(&0xFFFFu16.to_le_bytes());
+                            put_string(&mut d, o.modified);
                         }
                         _ => {
                             d.extend_from_slice(&6u16.to_le_bytes());

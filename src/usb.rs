@@ -731,6 +731,12 @@ impl Usb {
         Ok(data)
     }
 
+    /// The newest document on a phone (see Phone::latest_document).
+    pub fn phone_latest_document(&mut self, id: u32, wanted: &dyn Fn(&str) -> bool) -> Option<(usize, crate::fs::DirEntry)> {
+        let Usb { hcs, phones, .. } = self;
+        phones.iter_mut().find(|p| p.id == id)?.latest_document(hcs, wanted)
+    }
+
     /// Send a raw print job (PCL) to a printer.
     pub fn printer_send(&mut self, id: u32, data: &[u8]) -> Result<(), &'static str> {
         let Usb { hcs, printers, .. } = self;
