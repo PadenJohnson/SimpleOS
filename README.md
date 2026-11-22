@@ -116,6 +116,10 @@ nothing to download.
   Spelling (language, and the words you added, with Remove) and About. Saved in the library.
   Right-click the desktop for quick ways to the background, display, screensaver, date and
   time, text size and spelling settings.
+- Graphics: works on every Intel, AMD and NVIDIA card through the firmware's screen; Solon
+  names the card (Settings > About), uses write-combining and sends only the changed parts of
+  the screen to the card. Native drivers come a step at a time: see
+  [docs/graphics.md](docs/graphics.md).
 - Power button (top right): turn off screen, restart, shut down (ACPI, with confirmation)
 - Boots from a USB stick on UEFI and older BIOS PCs; on-screen diagnostics (F12) and a crash
   screen for reporting problems
@@ -205,7 +209,7 @@ image, boot-tests it with UEFI and old BIOS, and publishes it as the release `la
 
 - `src/`: the kernel. `main.rs` boots; `desktop.rs`, `photos.rs`, `editor.rs`, `import.rs`,
   `files.rs`, `diskmgr.rs`, `documents.rs`, `sheetui.rs`, `movieui.rs`, `settingsui.rs` and `printui.rs` are
-  the apps; `movie.rs` is the video editor's engine; `video/` holds the H.264 encoder and decoder (CAVLC and CABAC), AAC, FLAC, MP4 and AVI/WAV code (`tables.rs`: standard tables from FFmpeg); `videos.rs` is the player and `media/` its engine (containers and the MPEG-2, MPEG-4, DivX 3, HEVC, VP8, VP9, MP3, AC-3/E-AC-3, DTS, AMR, Vorbis and Opus decoders); `games/` holds the games; `writer/` is Writer (with .docx), `pdf/` reads, draws and writes PDFs (`pdfui.rs` is the PDF app), `textedit.rs` the Text Editor and `docshell.rs` what those three share; `spell.rs` is spelling for every app (assets/spell/: SCOWL's word lists, made with tools/spell/mkdict.py, see assets/spell/SCOWL-Copyright.txt); `font.rs` and `raster.rs` draw text (fonts/: Noto Sans and Noto Serif, SIL Open Font License, see fonts/OFL.txt);
+  the apps; `movie.rs` is the video editor's engine; `video/` holds the H.264 encoder and decoder (CAVLC and CABAC), AAC, FLAC, MP4 and AVI/WAV code (`tables.rs`: standard tables from FFmpeg); `videos.rs` is the player and `media/` its engine (containers and the MPEG-2, MPEG-4, DivX 3, HEVC, VP8, VP9, MP3, AC-3/E-AC-3, DTS, AMR, Vorbis and Opus decoders); `games/` holds the games; `writer/` is Writer (with .docx), `pdf/` reads, draws and writes PDFs (`pdfui.rs` is the PDF app), `gpu.rs` recognises graphics cards, `screen.rs` puts the desktop on the screen (only what changed), `display.rs` handles resolutions; `textedit.rs` the Text Editor and `docshell.rs` what those three share; `spell.rs` is spelling for every app (assets/spell/: SCOWL's word lists, made with tools/spell/mkdict.py, see assets/spell/SCOWL-Copyright.txt); `font.rs` and `raster.rs` draw text (fonts/: Noto Sans and Noto Serif, SIL Open Font License, see fonts/OFL.txt);
   `doc/` reads and writes spreadsheets (zip, XML, formulas, xlsx, csv); `xhci.rs`, `ehci.rs`, `usb.rs`, `msc.rs`, `usbprint.rs`, `nvme.rs`, `hda.rs` and
   `ahci.rs` are drivers; `fs/` holds partition tables, FAT and exFAT; `library.rs` is the
   photo library; `image.rs` and `imgfmt/` read photo files (HEIC, WebP, GIF, TIFF, RAW previews, PSD...); `print.rs` lays out pages and speaks PCL / IPP.

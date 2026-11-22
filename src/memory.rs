@@ -102,6 +102,39 @@ unsafe impl FrameAllocator<Size4KiB> for HeapFrames {
     }
 }
 
+/// How memory at a virtual address is cached, by its page-table entry and the processor's
+/// PAT: "WB", "WC", "UC"... (None if it isn't mapped).
+pub fn caching_of(virt: u64) -> Option<&'static str> {
+    let hhdm = HHDM.load(Relaxed);
+    let (l4_frame, _) = Cr3::read();
+    let mut table = l4_frame.start_address().as_u64();
+    for level in (1..=4).rev() {
+        let idx = (virt >> (12 + 9 * (level - 1))) & 511;
+        let e = unsafe { *((table + hhdm + idx * 8) as *const u64) };
+        if e & 1 == 0 {
+            return None;
+        }
+        let huge = level > 1 && e & (1 << 7) != 0;
+        if level == 1 || huge {
+            // PAT index from PWT (bit 3), PCD (bit 4) and PAT (bit 7 in 4 KiB entries, 12 in big ones).
+            let pat_bit = if huge { e >> 12 & 1 } else { e >> 7 & 1 };
+            let i = (pat_bit << 2 | (e >> 4 & 1) << 1 | (e >> 3 & 1)) as u32;
+            let pat = unsafe { x86_64::registers::model_specific::Msr::new(0x277).read() };
+            return Some(match (pat >> (i * 8)) & 7 {
+                0 => "UC",
+                1 => "WC",
+                4 => "WT",
+                5 => "WP",
+                6 => "WB",
+                7 => "UC-",
+                _ => "?",
+            });
+        }
+        table = e & 0x000F_FFFF_FFFF_F000;
+    }
+    None
+}
+
 /// Map a graphics card's video memory (cached, for fast drawing; used for virtual machines'
 /// cards, which don't need write-combining). Returns the virtual address.
 pub fn map_framebuffer(phys: u64, size: u64) -> u64 {

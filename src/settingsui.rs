@@ -310,6 +310,11 @@ impl SettingsApp {
                 let info = crate::display::INFO.lock().clone().unwrap_or_default();
                 let sc = format!("{} x {}", info.current.0.max(screen.0 as u32), info.current.1.max(screen.1 as u32));
                 ui.text(row.x + row.w - text_width(&sc, Size::Small, false), row.y + 20, &sc, Size::Small, false, INK);
+                let row = ui.row("Graphics", "", ROW);
+                let g: Vec<String> = crate::gpu::GPUS.lock().iter().map(|g| g.name.clone()).collect();
+                let g = if g.is_empty() { String::from("None found") } else { g.join(", ") };
+                let g = crate::photos::ellipsize(&g, row.w - 120, Size::Small, false);
+                ui.text(row.x + row.w - text_width(&g, Size::Small, false), row.y + 20, &g, Size::Small, false, INK);
                 let row = ui.row("Settings", "", ROW);
                 let note = if saved { "Saved in Solon storage, kept after a restart" } else { "Kept until the computer is turned off (no Solon storage yet)" };
                 ui.text(row.x + row.w - text_width(note, Size::Small, false), row.y + 20, note, Size::Small, false, INK);
@@ -409,6 +414,10 @@ impl SettingsApp {
             label += " (best)";
         }
         ui.drop_right(row, 210, &label, if modes.len() > 1 { Act::Open(Drop::Resolution) } else { Act::None });
+        let graphics = crate::gpu::main_name().unwrap_or_else(|| String::from("Unknown"));
+        let row = ui.row("Graphics", crate::gpu::support(), ROW + 8);
+        let g = crate::photos::ellipsize(&graphics, row.w / 2, Size::Small, false);
+        ui.text(row.x + row.w - text_width(&g, Size::Small, false), row.y + 22, &g, Size::Small, false, INK);
         let row = ui.row("Monitor", "", ROW);
         let mut m = info.monitor.clone().unwrap_or_else(|| String::from("Unknown"));
         if let Some(hz) = info.refresh {

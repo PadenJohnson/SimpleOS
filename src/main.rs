@@ -30,6 +30,7 @@ mod media;
 mod fs;
 mod games;
 mod gfx;
+mod gpu;
 mod hda;
 mod hc;
 mod icons;
@@ -179,11 +180,13 @@ extern "C" fn kmain() -> ! {
     let (w, h) = (screen.width, screen.height);
     screen.register_for_crashes();
     kprintln!("solon: framebuffer {}x{}", w, h);
+    kprintln!("display: framebuffer memory is cached {:?}, PAT {:#018x}", memory::caching_of(screen.base_addr()), unsafe { x86_64::registers::model_specific::Msr::new(0x277).read() });
     // The screen modes the firmware offers, and what the monitor says about itself.
     if let Some(fb) = FRAMEBUFFER_REQUEST.get_response().and_then(|resp| resp.framebuffers().next()) {
         let modes: alloc::vec::Vec<(u32, u32, u16)> = fb.modes().unwrap_or(&[]).iter().map(|m| (m.width as u32, m.height as u32, m.bpp)).collect();
         display::init(&modes, (w as u32, h as u32), fb.edid());
     }
+    gpu::init(screen.base_addr().wrapping_sub(hhdm));
     // Boot option "novbe": leave QEMU's graphics alone, as on a real PC (for testing scaling).
     if !EXECUTABLE_CMDLINE_REQUEST.get_response().and_then(|r| r.cmdline().to_str().ok()).is_some_and(|c| c.split_whitespace().any(|w| w == "novbe")) {
         display::init_driver();
@@ -344,6 +347,7 @@ extern "C" fn kmain() -> ! {
 
     let mut buttons = 0u8;
     let mut next_clock_check = 0u64;
+    let mut next_traffic_log = TICKS.load(Relaxed) + 60 * HZ;
     loop {
         // Sleep until an interrupt (keyboard, mouse or the 100 Hz timer),
         // without losing a wakeup that arrives in between.
@@ -377,6 +381,13 @@ extern "C" fn kmain() -> ! {
             panic!("crash test requested on the boot command line");
         }
 
+        if now >= next_traffic_log {
+            next_traffic_log = now + 60 * HZ;
+            let (sent, full) = screen.traffic();
+            if full > 0 {
+                kprintln!("display: sent {} of {} pixels to the screen ({}%)", sent, full, sent * 100 / full);
+            }
+        }
         if now >= next_clock_check {
             next_clock_check = now + HZ;
             let (hh, mm, _) = rtc::time();
