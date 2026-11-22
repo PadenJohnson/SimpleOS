@@ -76,6 +76,7 @@ pub fn audio(info: &AudioInfo) -> Result<Box<dyn AudioDec>, String> {
         ACodec::AacAdts => Ok(Box::new(AacDec { d: None, asc: Vec::new(), rate: 0, adts: true })),
         ACodec::MpegAudio => Ok(Box::new(super::mpa::MpaDec::new())),
         ACodec::Ac3 => Ok(Box::new(super::ac3::Ac3Dec::new())),
+        ACodec::Vorbis { headers } => Ok(Box::new(super::vorbis::VorbisDec::new(headers))),
         &ACodec::Pcm { bits, big_endian, float } => Ok(Box::new(PcmDec { bits, big_endian, float, channels: info.channels.max(1), rate: info.rate.max(1) })),
         other => Err(format!("The sound is {}, which Solon can't play yet", other.name())),
     }

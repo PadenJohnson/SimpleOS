@@ -28,6 +28,8 @@ pub mod mpeg4;
 pub mod mpeg4tab;
 pub mod idct;
 pub mod vlc;
+pub mod vorbis;
+pub mod vorbistab;
 pub mod mpegps;
 pub mod mpegts;
 
