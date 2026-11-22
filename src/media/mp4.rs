@@ -203,7 +203,8 @@ fn audio_codec(t: &Track) -> ACodec {
         b"raw " => ACodec::Pcm { bits: 8, big_endian: false, float: false },
         b"lpcm" => ACodec::Pcm { bits: 16, big_endian: false, float: false },
         b"Opus" => ACodec::Opus { head: find(k, b"dOps").map(|d| d.to_vec()).unwrap_or_default() },
-        b"samr" => ACodec::Other(String::from("AMR (old phone sound)")),
+        b"samr" => ACodec::Amr { wide: false },
+        b"sawb" => ACodec::Amr { wide: true },
         b"alac" => ACodec::Other(String::from("Apple Lossless")),
         f => ACodec::Other(String::from_utf8_lossy(f).into_owned()),
     }

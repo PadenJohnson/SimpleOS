@@ -87,6 +87,7 @@ fn main() {
         Some("info") => info(&args[2]),
         Some("video") => video(&args[2], &args[3], args.get(4).and_then(|s| s.parse().ok()).unwrap_or(usize::MAX)),
         Some("audio") => audio(&args[2], &args[3]),
+        Some("native") => audio_native(&args[2], &args[3]),
         Some("speed") => speed(&args[2]),
         Some("seek") => seek(&args[2]),
         Some("mkheic") => mkheic(&args[2..]),
@@ -404,3 +405,48 @@ fn image_test(path: &str, reference: Option<&str>) {
 }
 include!("mkheic.rs");
 include!("mkpsd.rs");
+
+/// Decode the sound at its own rate (no resampling) and compare with
+/// ffmpeg -i f -f s16le -ac 2 ref.raw (sample for sample, small offsets allowed).
+fn audio_native(path: &str, reference: &str) {
+    let (mut read, size) = reader(path);
+    let mut d = media::open_demux(&mut read, size).expect("open");
+    let ai = d.info().audio.as_ref().expect("no sound");
+    let mut dec = match media::dec::audio(ai) {
+        Ok(x) => x,
+        Err(e) => return println!("sound: {}", e),
+    };
+    let mut ours: Vec<i16> = Vec::new();
+    let t0 = Instant::now();
+    while let Some(p) = d.next_audio(&mut read) {
+        ours.extend(dec.decode(&p.data));
+    }
+    let refdata: Vec<i16> = std::fs::read(reference).unwrap_or_default().chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+    println!("decoded {} frames at {} Hz in {:.2} s (FFmpeg: {})", ours.len() / 2, dec.rate(), t0.elapsed().as_secs_f64(), refdata.len() / 2);
+    let total = (refdata.len() / 2).min(ours.len() / 2);
+    let mut best = (f64::MIN, 0i64);
+    for shift in -2000i64..=2000 {
+        let (mut sig, mut noise) = (0f64, 0f64);
+        for i in 0..total {
+            let j = i as i64 + shift;
+            if j < 0 || j as usize >= ours.len() / 2 {
+                continue;
+            }
+            for ch in 0..2 {
+                let a = refdata[i * 2 + ch] as f64;
+                let b = ours[j as usize * 2 + ch] as f64;
+                sig += a * a;
+                noise += (a - b) * (a - b);
+            }
+        }
+        let snr = if noise == 0.0 { 99.0 } else { 10.0 * (sig / noise).log10() };
+        if snr > best.0 {
+            best = (snr, shift);
+        }
+    }
+    let maxdiff = (0..total * 2).map(|i| {
+        let j = i as i64 + best.1 * 2;
+        if j < 0 || j as usize >= ours.len() { 0 } else { (refdata[i] as i32 - ours[j as usize] as i32).abs() }
+    }).max().unwrap_or(0);
+    println!("sound SNR {:.1} dB at offset {} (largest difference {})", best.0, best.1, maxdiff);
+}

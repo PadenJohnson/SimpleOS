@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 
 pub mod ac3;
 pub mod ac3tab;
+pub mod amr;
 pub mod avi;
 pub mod dec;
 pub mod engine;
@@ -78,6 +79,8 @@ pub enum ACodec {
     Pcm { bits: u16, big_endian: bool, float: bool },
     Vorbis { headers: Vec<u8> },
     Opus { head: Vec<u8> },
+    /// AMR speech (old phones); `wide` = AMR-WB (16 kHz).
+    Amr { wide: bool },
     Other(String),
 }
 
@@ -108,6 +111,8 @@ impl ACodec {
             ACodec::Pcm { .. } => "PCM",
             ACodec::Vorbis { .. } => "Vorbis",
             ACodec::Opus { .. } => "Opus",
+            ACodec::Amr { wide: false } => "AMR",
+            ACodec::Amr { wide: true } => "AMR-WB",
             ACodec::Other(s) => return s.clone(),
         })
     }
