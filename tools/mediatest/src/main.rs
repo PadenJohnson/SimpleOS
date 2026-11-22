@@ -179,11 +179,15 @@ fn video(path: &str, reference: &str, max: usize) {
     let mut worst = f64::MAX;
     let mut sum = 0.0;
     let mut n = 0;
+    let mut off = 0;
     for (k, (pic, _)) in out.iter().enumerate() {
         let media::dec::Pic::Yuv(f) = pic else { continue };
         let (w, h) = (f.width, f.height);
-        let fs = w * h * 3 / 2;
-        let Some(r) = refdata.get(k * fs..(k + 1) * fs) else { break };
+        let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+        // Pictures may change size (FFmpeg writes each at its own size with -noautoscale).
+        let fs = w * h + 2 * cw * ch;
+        let Some(r) = refdata.get(off..off + fs) else { break };
+        off += fs;
         // Compare Y, U and V.
         let mut se = 0f64;
         for y in 0..h {
@@ -196,11 +200,11 @@ fn video(path: &str, reference: &str, max: usize) {
         let cs = f.stride / 2;
         for plane in 0..2 {
             let src = if plane == 0 { &f.u } else { &f.v };
-            let base = w * h + plane * (w / 2) * (h / 2);
-            for y in 0..h / 2 {
-                for x in 0..w / 2 {
+            let base = w * h + plane * cw * ch;
+            for y in 0..ch {
+                for x in 0..cw {
                     let a = src[(f.crop_y / 2 + y) * cs + f.crop_x / 2 + x] as f64;
-                    let b = r[base + y * (w / 2) + x] as f64;
+                    let b = r[base + y * cw + x] as f64;
                     se += (a - b) * (a - b);
                 }
             }
