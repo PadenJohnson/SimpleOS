@@ -54,10 +54,11 @@ nothing to download.
   DVD/TV and web videos with sound (play/pause, drag along the bar to jump, arrow keys for 5
   seconds). Files: MP4/MOV/3GP, MKV, WebM, AVI, MPEG-TS (.ts/.m2ts/.mts) and MPEG-PS
   (.mpg/.vob). Pictures: H.264, HEVC/H.265 (iPhone "High Efficiency", 8 and 10-bit), MPEG-1/2,
-  MPEG-4 Part 2 (Xvid, DivX 4/5), H.263, VP8, VP9 (8-bit) and Motion JPEG. Sound: AAC, MP3,
-  MP2, AC-3 (Dolby Digital, surround mixed to stereo), Vorbis, Opus and PCM. All with
-  Solon's own decoders, checked against FFmpeg. Not yet: DivX 3, AMR phone sound, DTS and
-  E-AC-3, 10-bit VP9.
+  MPEG-4 Part 2 (Xvid, DivX 4/5), DivX 3 (Microsoft MPEG-4 v3), H.263, VP8, VP9 (8, 10 and
+  12-bit) and Motion JPEG. Sound: AAC, MP3, MP2, AC-3 and E-AC-3 (Dolby Digital and Dolby
+  Digital Plus), DTS, AMR and AMR-WB (old phones' 3GP videos), Vorbis, Opus and PCM; surround
+  is mixed to stereo. All with Solon's own decoders, checked against FFmpeg. DTS-HD and 7.1
+  E-AC-3 play their main 5.1 part. Not yet: WMV/VC-1, AV1, RealVideo, Theora.
 - Video Editor: a simple Kdenlive-style editor. Photos, phone and camera videos (.mp4, .mov,
   .avi) and music (.wav) on the left, a preview with Play/Pause, and a timeline with Video, Titles
   and two Music tracks. Add, drag to reorder or move, drag the ends to shorten, split at the
@@ -173,7 +174,7 @@ card whose output is saved to `test-outsound.wav`; with `-Cmdline "soundtest"` i
 
 - `src/`: the kernel. `main.rs` boots; `desktop.rs`, `photos.rs`, `editor.rs`, `import.rs`,
   `files.rs`, `diskmgr.rs`, `documents.rs`, `sheetui.rs`, `movieui.rs`, `settingsui.rs` and `printui.rs` are
-  the apps; `movie.rs` is the video editor's engine; `video/` holds the H.264 encoder and decoder (CAVLC and CABAC), AAC, FLAC, MP4 and AVI/WAV code (`tables.rs`: standard tables from FFmpeg); `videos.rs` is the player and `media/` its engine (containers and the MPEG-2, MPEG-4, HEVC, VP8, VP9, MP3, AC-3, Vorbis and Opus decoders); `games/` holds the games; `writer/` is Writer (with .docx), `pdf/` reads, draws and writes PDFs (`pdfui.rs` is the PDF app), `textedit.rs` the Text Editor and `docshell.rs` what those three share; `font.rs` and `raster.rs` draw text (fonts/: Noto Sans and Noto Serif, SIL Open Font License, see fonts/OFL.txt);
+  the apps; `movie.rs` is the video editor's engine; `video/` holds the H.264 encoder and decoder (CAVLC and CABAC), AAC, FLAC, MP4 and AVI/WAV code (`tables.rs`: standard tables from FFmpeg); `videos.rs` is the player and `media/` its engine (containers and the MPEG-2, MPEG-4, DivX 3, HEVC, VP8, VP9, MP3, AC-3/E-AC-3, DTS, AMR, Vorbis and Opus decoders); `games/` holds the games; `writer/` is Writer (with .docx), `pdf/` reads, draws and writes PDFs (`pdfui.rs` is the PDF app), `textedit.rs` the Text Editor and `docshell.rs` what those three share; `font.rs` and `raster.rs` draw text (fonts/: Noto Sans and Noto Serif, SIL Open Font License, see fonts/OFL.txt);
   `doc/` reads and writes spreadsheets (zip, XML, formulas, xlsx, csv); `xhci.rs`, `ehci.rs`, `usb.rs`, `msc.rs`, `usbprint.rs`, `nvme.rs`, `hda.rs` and
   `ahci.rs` are drivers; `fs/` holds partition tables, FAT and exFAT; `library.rs` is the
   photo library; `image.rs` and `imgfmt/` read photo files (HEIC, WebP, GIF, TIFF, RAW previews, PSD...); `print.rs` lays out pages and speaks PCL / IPP.
