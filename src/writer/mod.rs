@@ -805,7 +805,7 @@ impl WriterEd {
                 self.table_button();
                 self.scroll_to_cursor(r);
             }
-            Tool::Picture => return EdAction::Pick { purpose: 1, exts: &["jpg", "jpeg", "png"], title: "Choose a picture to put in", many: false },
+            Tool::Picture => return EdAction::Pick { purpose: 1, exts: &crate::image::PHOTO_EXTS, title: "Choose a picture to put in", many: false },
             Tool::PageBreak => {
                 self.snapshot(EditKind::None);
                 self.insert_page_break();
@@ -1523,9 +1523,11 @@ impl DocEditor for WriterEd {
             w = w * 504 / h;
             h = 504;
         }
-        let ext = match crate::image::sniff(&bytes) {
-            Some(crate::image::Format::Jpeg) => "jpeg",
-            _ => "png",
+        // Word files hold JPEG or PNG: anything else (or a turned JPEG) goes in as PNG.
+        let (bytes, ext) = match crate::image::sniff(&bytes) {
+            Some(crate::image::Format::Jpeg) if crate::imgfmt::jpeg_orientation(&bytes) == 1 => (bytes, "jpeg"),
+            Some(crate::image::Format::Png) => (bytes, "png"),
+            _ => (crate::image::encode_png(&img), "png"),
         };
         self.snapshot(EditKind::None);
         self.doc.images.push(doc::DocImage { data: bytes, ext: String::from(ext), w: w.max(4), h: h.max(4) });

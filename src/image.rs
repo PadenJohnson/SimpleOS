@@ -1,4 +1,4 @@
-//! Decoded images (JPEG / PNG) and high-quality downscaling.
+//! Decoded images (every photo format Solon reads; see imgfmt/) and high-quality downscaling.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -27,26 +27,122 @@ pub struct Image {
 pub enum Format {
     Jpeg,
     Png,
+    Gif,
+    Bmp,
+    Tiff,
+    Raw,
+    Webp,
+    Heif,
+    Psd,
+    Ico,
+    Pnm,
+    Tga,
+}
+
+/// Every photo / picture file Solon can open (lower-case extensions).
+pub const PHOTO_EXTS: [&str; 41] = [
+    "jpg", "jpeg", "jpe", "jfif", "png", "apng", "gif", "bmp", "dib", "tif", "tiff", "webp", "heic", "heif", "hif", "psd", "psb", "ico", "cur", "tga", "pbm", "pgm", "ppm", "pnm", "pam", "dng", "cr2", "cr3", "crw", "nef", "nrw",
+    "arw", "srf", "sr2", "raf", "orf", "rw2", "pef", "srw", "3fr", "erf",
+];
+
+/// True for a file name Solon treats as a photo.
+pub fn is_photo_name(name: &str) -> bool {
+    let Some(i) = name.rfind('.') else { return false };
+    let ext = name[i + 1..].to_ascii_lowercase();
+    PHOTO_EXTS.contains(&ext.as_str()) || crate::imgfmt::raw::RAW_EXTS.contains(&ext.as_str())
 }
 
 pub fn sniff(bytes: &[u8]) -> Option<Format> {
-    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+    let b = bytes;
+    if b.starts_with(&[0xFF, 0xD8, 0xFF]) {
         Some(Format::Jpeg)
-    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+    } else if b.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some(Format::Png)
+    } else if b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") {
+        Some(Format::Gif)
+    } else if b.starts_with(b"BM") && b.len() > 26 {
+        Some(Format::Bmp)
+    } else if b.len() > 16 && &b[0..4] == b"RIFF" && &b[8..12] == b"WEBP" {
+        Some(Format::Webp)
+    } else if b.starts_with(b"FUJIFILMCCD-RAW") || (b.len() > 12 && &b[4..12] == b"ftypcrx ") {
+        Some(Format::Raw)
+    } else if crate::imgfmt::heif::is_heif(b) {
+        Some(Format::Heif)
+    } else if b.starts_with(b"II") || b.starts_with(b"MM") {
+        let (le, first) = crate::imgfmt::tiff::header(b)?;
+        let ifd = crate::imgfmt::tiff::Ifd::read(b, le, first)?;
+        // Camera files: maker, sub-pictures, DNG version, or Olympus / Panasonic magic.
+        let magic = crate::imgfmt::Rd { d: b, le }.u16(2)?;
+        let photo = ifd.val(262).unwrap_or(2);
+        let camera = magic != 42
+            || b.get(8..10) == Some(b"CR")
+            || ifd.entry(50706).is_some()
+            || ifd.entry(330).is_some()
+            || (ifd.entry(271).is_some() && (ifd.val(254) == Some(1) || !matches!(photo, 0..=3 | 5 | 6)));
+        Some(if camera { Format::Raw } else { Format::Tiff })
+    } else if b.starts_with(b"8BPS") {
+        Some(Format::Psd)
+    } else if b.len() > 6 && b[0] == 0 && b[1] == 0 && (b[2] == 1 || b[2] == 2) && b[3] == 0 && b[4] | b[5] != 0 {
+        Some(Format::Ico)
+    } else if b.len() > 3 && b[0] == b'P' && (b'1'..=b'7').contains(&b[1]) && b[2].is_ascii_whitespace() {
+        Some(Format::Pnm)
+    } else if crate::imgfmt::misc::looks_like_tga(b) {
+        Some(Format::Tga)
     } else {
         None
     }
 }
 
+/// Decode any supported photo, turned upright (EXIF / HEIF orientation applied).
 pub fn decode(bytes: &[u8]) -> Result<Image, &'static str> {
+    use crate::imgfmt as f;
+    match sniff(bytes) {
+        Some(Format::Jpeg) => {
+            let img = decode_jpeg_raw(bytes, false)?;
+            Ok(f::orient(img, f::jpeg_orientation(bytes)))
+        }
+        Some(Format::Png) | None => decode_basic(bytes),
+        Some(Format::Gif) => f::gif::decode(bytes),
+        Some(Format::Bmp) => f::bmp::decode(bytes),
+        Some(Format::Tiff) => f::tiff::decode(bytes),
+        Some(Format::Raw) => f::raw::decode(bytes).or_else(|e| f::tiff::decode(bytes).map_err(|_| e)),
+        Some(Format::Webp) => f::webp::decode(bytes),
+        Some(Format::Heif) => f::heif::decode(bytes),
+        Some(Format::Psd) => f::misc::decode_psd(bytes),
+        Some(Format::Ico) => f::misc::decode_ico(bytes),
+        Some(Format::Pnm) => f::misc::decode_pnm(bytes),
+        Some(Format::Tga) => f::misc::decode_tga(bytes),
+    }
+}
+
+/// A picture for a thumbnail grid: an embedded preview when the file has a big enough one
+/// (HEIC), else the full picture. Returns (picture, full size).
+pub fn decode_preview(bytes: &[u8], min: usize) -> Result<(Image, (usize, usize)), &'static str> {
+    if sniff(bytes) == Some(Format::Heif) {
+        if let Some(t) = crate::imgfmt::heif::decode_thumb(bytes, min) {
+            return Ok(t);
+        }
+    }
+    let img = decode(bytes)?;
+    let size = (img.w, img.h);
+    Ok((img, size))
+}
+
+/// A JPEG as stored (no EXIF turning).
+pub fn decode_jpeg_raw(bytes: &[u8], _rgb: bool) -> Result<Image, &'static str> {
+    decode_basic(bytes)
+}
+
+fn decode_basic(bytes: &[u8]) -> Result<Image, &'static str> {
     let opts = DecoderOptions::default()
         .set_max_width(MAX_DIM)
         .set_max_height(MAX_DIM)
         .jpeg_set_out_colorspace(ColorSpace::RGB)
         .png_set_strip_to_8bit(true);
-    match sniff(bytes) {
-        Some(Format::Jpeg) => {
+    let jpeg = bytes.starts_with(&[0xFF, 0xD8]);
+    let png = bytes.starts_with(b"\x89PNG\r\n\x1a\n");
+    match (jpeg, png) {
+        (true, _) => {
             let mut d = JpegDecoder::new_with_options(ZCursor::new(bytes), opts);
             d.decode_headers().map_err(|_| "Not a valid JPEG")?;
             let info = d.info().ok_or("Not a valid JPEG")?;
@@ -56,7 +152,7 @@ pub fn decode(bytes: &[u8]) -> Result<Image, &'static str> {
             let comps = d.output_colorspace().map(|c| c.num_components()).unwrap_or(3);
             from_bytes(w, h, &data, comps)
         }
-        Some(Format::Png) => {
+        (_, true) => {
             let mut d = PngDecoder::new_with_options(ZCursor::new(bytes), opts);
             d.decode_headers().map_err(|_| "Not a valid PNG")?;
             let (w, h) = d.dimensions().ok_or("Not a valid PNG")?;
@@ -68,11 +164,11 @@ pub fn decode(bytes: &[u8]) -> Result<Image, &'static str> {
             let comps = d.colorspace().map(|c| c.num_components()).unwrap_or(3);
             from_bytes(w, h, &data, comps)
         }
-        None => Err("Unknown file type"),
+        _ => Err("Unknown file type"),
     }
 }
 
-fn check_size(w: usize, h: usize) -> Result<(), &'static str> {
+pub fn check_size(w: usize, h: usize) -> Result<(), &'static str> {
     if w == 0 || h == 0 || w > MAX_DIM || h > MAX_DIM || w * h > MAX_PIXELS {
         Err("Image too large")
     } else {

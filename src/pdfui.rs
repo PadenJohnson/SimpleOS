@@ -39,7 +39,7 @@ pub static KIND: Kind = Kind {
     keeps: &["pdf"],
     accent: ACCENT,
     empty: ["No PDF files yet.", "Plug in a USB drive that has PDFs, or make one from photos."],
-    extra: &[("PDF from photos", PICK_PHOTOS, &["jpg", "jpeg", "png"], "Choose photos for the PDF")],
+    extra: &[("PDF from photos", PICK_PHOTOS, &crate::image::PHOTO_EXTS, "Choose photos for the PDF")],
     icon,
 };
 
@@ -172,7 +172,7 @@ pub fn load(_name: &str, b: &[u8]) -> Result<PdfEd, String> {
 
 fn photo_from(bytes: &[u8]) -> Option<Photo> {
     match crate::image::sniff(bytes) {
-        Some(crate::image::Format::Jpeg) => {
+        Some(crate::image::Format::Jpeg) if crate::imgfmt::jpeg_orientation(bytes) == 1 => {
             use zune_core::bytestream::ZCursor;
             let mut d = zune_jpeg::JpegDecoder::new(ZCursor::new(bytes));
             d.decode_headers().ok()?;
@@ -185,7 +185,7 @@ fn photo_from(bytes: &[u8]) -> Option<Photo> {
             let img = crate::image::decode(bytes).ok()?;
             Some(rgb_photo(&img))
         }
-        Some(crate::image::Format::Png) => {
+        Some(_) => {
             let img = crate::image::decode(bytes).ok()?;
             Some(rgb_photo(&img))
         }
@@ -528,7 +528,7 @@ impl PdfEd {
             }
             Btn::Delete => return EdAction::Toast(String::from("A PDF needs at least one page")),
             Btn::AddPdf => return EdAction::Pick { purpose: PICK_PDF, exts: &["pdf"], title: "Add the pages of which PDF?", many: false },
-            Btn::AddPhotos => return EdAction::Pick { purpose: PICK_PHOTOS, exts: &["jpg", "jpeg", "png"], title: "Choose photos to add as pages", many: true },
+            Btn::AddPhotos => return EdAction::Pick { purpose: PICK_PHOTOS, exts: &crate::image::PHOTO_EXTS, title: "Choose photos to add as pages", many: true },
             _ => {}
         }
         EdAction::Redraw

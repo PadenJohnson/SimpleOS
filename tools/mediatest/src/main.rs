@@ -47,6 +47,8 @@ pub mod image;
 #[path = "../../../src/media/mod.rs"]
 #[allow(dead_code)]
 mod media;
+#[path = "../../../src/imgfmt/mod.rs"]
+mod imgfmt;
 
 /// The kernel's module layout, for `crate::video::...` paths.
 mod video {
@@ -87,6 +89,10 @@ fn main() {
         Some("audio") => audio(&args[2], &args[3]),
         Some("speed") => speed(&args[2]),
         Some("seek") => seek(&args[2]),
+        Some("mkheic") => mkheic(&args[2..]),
+        Some("mkpsd") => mkpsd(&args[2], &args[3]),
+        Some("mkico") => mkico(&args[2], &args[3], &args[4]),
+        Some("image") => image_test(&args[2], args.get(3).map(|s| s.as_str())),
         _ => eprintln!("usage: mediatest info|video|audio|speed <file> ..."),
     }
 }
@@ -347,3 +353,54 @@ fn seek(path: &str) {
         }
     }
 }
+
+/// Decode a photo with Solon's decoders; compare with an RGBA reference (FFmpeg) if given.
+fn image_test(path: &str, reference: Option<&str>) {
+    let bytes = std::fs::read(path).expect("read");
+    let t0 = Instant::now();
+    let r = image::decode(&bytes);
+    let ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let img = match r {
+        Ok(i) => i,
+        Err(e) => return println!("{:?}: can't decode: {}", image::sniff(&bytes), e),
+    };
+    println!("{:?} {}x{} opaque {} in {:.1} ms", image::sniff(&bytes), img.w, img.h, img.opaque, ms);
+    if std::env::var("MT_PREVIEW").is_ok() {
+        let t0 = Instant::now();
+        match image::decode_preview(&bytes, 160) {
+            Ok((p, (w, h))) => println!("preview {}x{} of {}x{} in {:.1} ms", p.w, p.h, w, h, t0.elapsed().as_secs_f64() * 1000.0),
+            Err(e) => println!("preview failed: {}", e),
+        }
+    }
+    if let Ok(name) = std::env::var("MT_PNG") {
+        std::fs::write(name, image::encode_png(&img)).ok();
+    }
+    let Some(rf) = reference else { return };
+    let refd = std::fs::read(rf).unwrap_or_default();
+    if refd.len() != img.w * img.h * 4 {
+        return println!("reference is {} bytes, expected {} ({}x{})", refd.len(), img.w * img.h * 4, img.w, img.h);
+    }
+    let (mut se, mut maxd, mut n) = (0f64, 0i32, 0usize);
+    let mut alpha_diff = 0usize;
+    for (i, p) in img.px.iter().enumerate() {
+        let ours = [(p >> 16) as u8, (p >> 8) as u8, *p as u8];
+        let a = (p >> 24) as u8;
+        let rr = &refd[i * 4..i * 4 + 4];
+        if (a as i32 - rr[3] as i32).abs() > 1 {
+            alpha_diff += 1;
+        }
+        if a == 0 && rr[3] == 0 {
+            continue;
+        }
+        for c in 0..3 {
+            let d = ours[c] as i32 - rr[c] as i32;
+            se += (d * d) as f64;
+            maxd = maxd.max(d.abs());
+            n += 1;
+        }
+    }
+    let psnr = if se == 0.0 { 99.0 } else { 10.0 * (255.0f64 * 255.0 * n as f64 / se).log10() };
+    println!("PSNR {:.2} dB, max diff {}, alpha mismatches {}", psnr, maxd, alpha_diff);
+}
+include!("mkheic.rs");
+include!("mkpsd.rs");

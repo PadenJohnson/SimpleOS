@@ -147,7 +147,7 @@ impl Slideshow {
             self.pos += 1;
             let (dir, file) = &self.photos[k];
             let r = storage.read_file(usb, file).map_err(|e| e.message()).and_then(|bytes| {
-                let turn = exif_orientation(&bytes);
+                let turn = 1; // decode() already turns photos upright
                 image::decode(&bytes).map(|img| (img, turn))
             });
             match r {
@@ -359,52 +359,6 @@ fn orient(img: &Image, turn: u8) -> Image {
     Image { w: ow, h: oh, px, opaque: img.opaque }
 }
 
-/// The EXIF orientation of a JPEG (1 = upright), from its APP1 "Exif" block.
-pub fn exif_orientation(b: &[u8]) -> u8 {
-    if !b.starts_with(&[0xFF, 0xD8]) {
-        return 1;
-    }
-    let mut i = 2;
-    while i + 4 <= b.len() && b[i] == 0xFF {
-        let marker = b[i + 1];
-        let len = u16::from_be_bytes([b[i + 2], b[i + 3]]) as usize;
-        if marker == 0xDA || len < 2 {
-            break; // image data: no EXIF before it
-        }
-        let seg = &b[(i + 4).min(b.len())..(i + 2 + len).min(b.len())];
-        if marker == 0xE1 && seg.starts_with(b"Exif\0\0") {
-            return tiff_orientation(&seg[6..]).unwrap_or(1);
-        }
-        i += 2 + len;
-    }
-    1
-}
-
-fn tiff_orientation(t: &[u8]) -> Option<u8> {
-    let le = match t.get(0..2)? {
-        b"II" => true,
-        b"MM" => false,
-        _ => return None,
-    };
-    let u16_at = |o: usize| -> Option<u16> {
-        let s = t.get(o..o + 2)?;
-        Some(if le { u16::from_le_bytes([s[0], s[1]]) } else { u16::from_be_bytes([s[0], s[1]]) })
-    };
-    let u32_at = |o: usize| -> Option<u32> {
-        let s = t.get(o..o + 4)?;
-        Some(if le { u32::from_le_bytes([s[0], s[1], s[2], s[3]]) } else { u32::from_be_bytes([s[0], s[1], s[2], s[3]]) })
-    };
-    let ifd = u32_at(4)? as usize;
-    let n = u16_at(ifd)? as usize;
-    for k in 0..n.min(200) {
-        let e = ifd + 2 + k * 12;
-        if u16_at(e)? == 0x0112 {
-            let v = u16_at(e + 8)?;
-            return (1..=8).contains(&v).then_some(v as u8);
-        }
-    }
-    None
-}
 
 // ---- the Photo Frame app (start it, and the screensaver settings) ------------------------
 

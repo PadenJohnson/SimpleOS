@@ -20,7 +20,11 @@ nothing to download.
   Light (exposure, contrast, highlights, shadows, whites, blacks), Color (temperature, tint,
   vibrance, saturation, black & white), Effects (clarity, vignette, sharpen, fade), 12
   presets with live previews, before/after, crop with print shapes, rotate and straighten,
-  undo; save as a copy, or replace with the original kept for Revert
+  undo; save as a copy, or replace with the original kept for Revert. Opens every common
+  photo type: JPEG, PNG, HEIC/HEIF (iPhone), WebP, GIF (first frame), TIFF, BMP, camera RAW
+  (CR2, CR3, NEF, ARW, DNG, RAF, ORF, RW2, PEF and more, via the full-size preview inside),
+  Photoshop PSD, TGA, ICO and PBM/PGM/PPM; photos taken sideways are turned upright. Edited
+  photos save as JPEG, or PNG when they have see-through parts. Not yet: AVIF and JPEG XL.
 - USB: USB 3 (xHCI) and USB 2 (EHCI) controllers: USB drives, SD card readers (FAT12/16/32
   and exFAT), hubs, printers and phones on either; keyboards and mice on USB 3 ports.
   USB drives are only changed when you ask: Files can add copies to them (never changing or
@@ -113,7 +117,7 @@ nothing to download.
 - Paint: a drawing program like MS Paint with a clean Mac-style look: pencil, brush, spray,
   eraser, fill, colour picker, text, lines, rectangles, rounded rectangles and ellipses
   (outline, filled or both), select and move, copy/cut/paste, crop, rotate, flip, resize,
-  zoom, undo/redo; opens and saves PNG and JPEG, and prints.
+  zoom, undo/redo; opens every photo type above, saves PNG and JPEG, and prints.
 - Calculator: big buttons, x and / before + and -, percent, square root, squares, 1/x,
   a history of sums, and the keyboard.
 - Photo Frame and screensaver: your photos full screen, one after another, fading into each
@@ -172,6 +176,6 @@ card whose output is saved to `test-outsound.wav`; with `-Cmdline "soundtest"` i
   the apps; `movie.rs` is the video editor's engine; `video/` holds the H.264 encoder and decoder (CAVLC and CABAC), AAC, FLAC, MP4 and AVI/WAV code (`tables.rs`: standard tables from FFmpeg); `videos.rs` is the player and `media/` its engine (containers and the MPEG-2, MPEG-4, HEVC, VP8, VP9, MP3, AC-3, Vorbis and Opus decoders); `games/` holds the games; `writer/` is Writer (with .docx), `pdf/` reads, draws and writes PDFs (`pdfui.rs` is the PDF app), `textedit.rs` the Text Editor and `docshell.rs` what those three share; `font.rs` and `raster.rs` draw text (fonts/: Noto Sans and Noto Serif, SIL Open Font License, see fonts/OFL.txt);
   `doc/` reads and writes spreadsheets (zip, XML, formulas, xlsx, csv); `xhci.rs`, `ehci.rs`, `usb.rs`, `msc.rs`, `usbprint.rs`, `nvme.rs`, `hda.rs` and
   `ahci.rs` are drivers; `fs/` holds partition tables, FAT and exFAT; `library.rs` is the
-  photo library; `print.rs` lays out pages and speaks PCL / IPP.
+  photo library; `image.rs` and `imgfmt/` read photo files (HEIC, WebP, GIF, TIFF, RAW previews, PSD...); `print.rs` lays out pages and speaks PCL / IPP.
 - `tools/`: build, image and test helpers. `docs/`: guide and screenshots. `samples/`:
   generated test photos.

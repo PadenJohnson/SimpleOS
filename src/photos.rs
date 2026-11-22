@@ -304,10 +304,12 @@ impl Photos {
         let t0 = ticks();
         let (max_w, max_h) = (self.max_w, self.max_h);
         let p = &mut self.photos[i];
-        p.state = match fetch(&p.source).and_then(|bytes| image::decode(&bytes)) {
-            Ok(full) => {
-                p.src_w = full.w;
-                p.src_h = full.h;
+        // The grid only needs a thumbnail: HEIC photos carry one, much quicker than the full picture.
+        let want_full = viewing == Some(i);
+        p.state = match fetch(&p.source).and_then(|bytes| if want_full { image::decode(&bytes).map(|f| (f.w, f.h, f)) } else { image::decode_preview(&bytes, THUMB_W as usize).map(|(f, (w, h))| (w, h, f)) }) {
+            Ok((src_w, src_h, full)) => {
+                p.src_w = src_w;
+                p.src_h = src_h;
                 let image = shrink_owned(full, max_w, max_h);
                 let thumb = image.shrink_to_fit(THUMB_W as usize, THUMB_H as usize);
                 kprintln!("solon: photo {} {}x{} loaded in {} ms", p.name, p.src_w, p.src_h, (ticks() - t0) * 1000 / HZ);

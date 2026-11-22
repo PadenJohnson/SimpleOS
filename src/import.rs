@@ -75,8 +75,7 @@ pub struct Import {
 }
 
 pub fn is_photo(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png")
+    crate::image::is_photo_name(name)
 }
 
 /// One drive/volume row on the Drives screen.

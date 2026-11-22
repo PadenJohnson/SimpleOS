@@ -626,13 +626,13 @@ impl Storage {
 
     /// Save an edited copy next to the original (or in "<date> Edited" for photos from
     /// outside the library). Returns (folder, new file).
-    pub fn save_copy(&mut self, usb: &mut Usb, folder: Option<&DirEntry>, original: &str, jpeg: &[u8]) -> Result<(DirEntry, DirEntry), FsError> {
+    pub fn save_copy(&mut self, usb: &mut Usb, folder: Option<&DirEntry>, original: &str, jpeg: &[u8], ext: &str) -> Result<(DirEntry, DirEntry), FsError> {
         let dir = match folder {
             Some(f) => f.clone(),
             None => self.import_folder(usb, "Edited")?,
         };
         let existing = self.names_in(usb, &dir)?;
-        let want = format!("{} (edited).jpg", stem(original));
+        let want = format!("{} (edited).{}", stem(original), ext);
         let name = unique_name(&existing, &want, u64::MAX).ok_or(FsError::Exists)?;
         let e = self.create_in(usb, &dir, &name, jpeg)?;
         Ok((dir, e))
@@ -640,7 +640,7 @@ impl Storage {
 
     /// Replace a library photo with its edited version, keeping the first original hidden
     /// in /Originals so it can be restored.
-    pub fn replace(&mut self, usb: &mut Usb, folder: &DirEntry, entry: &DirEntry, jpeg: &[u8]) -> Result<DirEntry, FsError> {
+    pub fn replace(&mut self, usb: &mut Usb, folder: &DirEntry, entry: &DirEntry, jpeg: &[u8], ext: &str) -> Result<DirEntry, FsError> {
         // Keep the original safe first (under a temporary name), then swap the photo.
         let (backup, original_as) = match self.backup_of(usb, folder, entry) {
             Some((_, b)) => {
@@ -657,7 +657,7 @@ impl Storage {
         };
         self.delete(usb, entry)?;
         let existing = self.names_in(usb, folder)?;
-        let name = unique_name(&existing, &format!("{}.jpg", stem(&entry.name)), u64::MAX).ok_or(FsError::Exists)?;
+        let name = unique_name(&existing, &format!("{}.{}", stem(&entry.name), ext), u64::MAX).ok_or(FsError::Exists)?;
         let edited = self.create_in(usb, folder, &name, jpeg)?;
         self.rekey_backup(usb, &backup, &original_as, &edited)?;
         Ok(edited)
@@ -730,7 +730,7 @@ impl Storage {
         edited_bytes.extend_from_slice(b"selftest edit");
         kprintln!("selftest: using \"{}\" in \"{}\"", photo.name, dir.name);
 
-        let edited = self.replace(usb, &dir, &photo, &edited_bytes).map_err(e2s)?;
+        let edited = self.replace(usb, &dir, &photo, &edited_bytes, "jpg").map_err(e2s)?;
         if self.backup_of(usb, &dir, &edited).is_none() {
             return fail("no original after replace");
         }
@@ -769,7 +769,7 @@ impl Storage {
 
         // Deleting an edited photo for good drops its original too.
         let copy = self.create_in(usb, &folder, "selftest copy.jpg", &original).map_err(e2s)?;
-        let copy_edited = self.replace(usb, &folder, &copy, &edited_bytes).map_err(e2s)?;
+        let copy_edited = self.replace(usb, &folder, &copy, &edited_bytes, "jpg").map_err(e2s)?;
         let key = backup_key(&copy_edited);
         self.recycle(usb, &copy_edited, "selftest folder").map_err(e2s)?;
         let (c, _) = self.bin_items(usb).into_iter().find(|(e, _)| e.name == copy_edited.name).ok_or("copy not in the bin")?;

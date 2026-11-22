@@ -33,7 +33,7 @@ pub static KIND: Kind = Kind {
     app: "Paint",
     list_title: "Pictures",
     new_label: "New picture",
-    exts: &["png", "jpg", "jpeg"],
+    exts: &crate::image::PHOTO_EXTS,
     save_ext: "png",
     keeps: &["png", "jpg", "jpeg"],
     accent: ACCENT,

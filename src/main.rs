@@ -35,6 +35,7 @@ mod hc;
 mod icons;
 mod import;
 mod image;
+mod imgfmt;
 mod install;
 mod interrupts;
 mod keys;

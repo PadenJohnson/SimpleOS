@@ -800,8 +800,7 @@ pub fn is_video(name: &str) -> bool {
     [".mp4", ".mov", ".m4v", ".3gp", ".avi", ".mkv", ".mts", ".webm"].iter().any(|e| n.ends_with(e))
 }
 
-/// Photos in formats Solon can't show yet but keeps (iPhone HEIC, RAW, GIF).
+/// Other photo types (all photo types are now readable; kept for older callers).
 pub fn is_other_photo(name: &str) -> bool {
-    let n = name.to_ascii_lowercase();
-    [".heic", ".heif", ".dng", ".gif", ".webp"].iter().any(|e| n.ends_with(e))
+    crate::image::is_photo_name(name)
 }

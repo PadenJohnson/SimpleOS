@@ -1170,7 +1170,7 @@ impl Desktop {
         Ok(format!("Sent {} page{} to {}", pages, if pages == 1 { "" } else { "s" }, printer.name))
     }
 
-    /// Re-decode the original at full resolution, apply the edits, save as JPEG.
+    /// Re-decode the original at full resolution, apply the edits, save as JPEG (PNG if it has transparency).
     fn save_edit(&mut self, i: usize, choice: SaveChoice, edits: Edits) -> Result<(), &'static str> {
         let src = self.photos.source(i).cloned().ok_or("Photo not found")?;
         let name = String::from(self.photos.name(i).unwrap_or("photo"));
@@ -1182,12 +1182,13 @@ impl Desktop {
         };
         let mut out = crate::edit::apply(&full, &edits);
         drop(full);
-        let jpeg = crate::edit::encode_jpeg(&mut out, 92)?;
+        // Photos with transparent parts (PNG, GIF, WebP...) stay PNG; the rest become JPEG.
+        let (jpeg, ext) = if out.opaque { (crate::edit::encode_jpeg(&mut out, 92)?, "jpg") } else { (crate::image::encode_png(&out), "png") };
         let (w, h) = (out.w, out.h);
         drop(out);
         let saved = match (choice, &src) {
             (SaveChoice::Replace, Source::Library { dir, entry }) => {
-                let e = self.storage.replace(&mut self.usb, dir, entry, &jpeg).map_err(|e| e.message())?;
+                let e = self.storage.replace(&mut self.usb, dir, entry, &jpeg, ext).map_err(|e| e.message())?;
                 kprintln!("editor: replaced \"{}\" with \"{}\" {}x{} {} bytes", entry.name, e.name, w, h, jpeg.len());
                 self.photos.end_edit();
                 self.photos.replace_item(i, e.name.clone(), Source::Library { dir: dir.clone(), entry: e.clone() });
@@ -1198,7 +1199,7 @@ impl Desktop {
                     Source::Library { dir, .. } => Some(dir),
                     _ => None,
                 };
-                let (dir, e) = self.storage.save_copy(&mut self.usb, folder, &name, &jpeg).map_err(|e| e.message())?;
+                let (dir, e) = self.storage.save_copy(&mut self.usb, folder, &name, &jpeg, ext).map_err(|e| e.message())?;
                 kprintln!("editor: saved copy \"{}\" in \"{}\" {}x{} {} bytes", e.name, dir.name, w, h, jpeg.len());
                 self.photos.end_edit();
                 self.photos.insert_after(i, e.name.clone(), Source::Library { dir, entry: e.clone() });

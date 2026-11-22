@@ -26,7 +26,7 @@ if ($Resolution) { $conf = $conf.TrimEnd() + "`n    resolution: $Resolution`n" }
 $count = 0
 foreach ($dir in $Photos) {
     if (-not (Test-Path $dir)) { Write-Host "Photo folder not found: $dir"; continue }
-    foreach ($f in Get-ChildItem $dir -File | Where-Object { $_.Extension -match '^\.(jpe?g|png|avi|wav|mp4|mov)$' } | Sort-Object Name) {
+    foreach ($f in Get-ChildItem $dir -File | Where-Object { $_.Extension -match '^\.(jpe?g|png|gif|bmp|tiff?|webp|heic|heif|psd|tga|ico|ppm|pgm|pbm|pam|dng|cr2|cr3|nef|arw|orf|rw2|raf|pef|srw|avi|wav|mp4|mov)$' } | Sort-Object Name) {
         $name = $f.Name -replace '[^A-Za-z0-9._-]', '_'   # Limine paths: keep names simple
         Copy-Item $f.FullName "esp\photos\$name"
         $conf += "    module_path: boot():/photos/$name`n"
