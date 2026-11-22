@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Before main is pushed: rebuild the USB image, boot-test it (UEFI and old BIOS) and publish it
+# as the GitHub release "latest". Turned on per clone with:  git config core.hooksPath .githooks
+# Skip once with:  SKIP_USB_IMAGE=1 git push
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+zero=0000000000000000000000000000000000000000
+sha=""
+while read -r lref lsha rref rsha; do
+  if [ "$rref" = refs/heads/main ] && [ "$lsha" != "$zero" ] && [ "$lsha" != "$rsha" ]; then sha=$lsha; fi
+done
+[ -n "$sha" ] || exit 0
+if [ "${SKIP_USB_IMAGE:-}" = 1 ]; then echo "pre-push: SKIP_USB_IMAGE=1, USB image not updated"; exit 0; fi
+
+fail() { echo "pre-push: $* (push stopped; SKIP_USB_IMAGE=1 git push to push anyway)" >&2; exit 1; }
+[ "$(git rev-parse HEAD)" = "$sha" ] || fail "the image is built from the checkout, so push from the commit being pushed (HEAD is not $sha)"
+git diff --quiet HEAD -- || fail "uncommitted changes would end up in the image; commit or stash them first"
+
+echo "pre-push: building the USB image for ${sha:0:7}..."
+tools/make-usb.sh || fail "tools/make-usb.sh failed"
+for mode in uefi bios; do
+  cp dist/solon.img test-out/stick.img 2>/dev/null || { mkdir -p test-out && cp dist/solon.img test-out/stick.img; }
+  extra=(); [ $mode = bios ] && extra=(--legacy-bios)
+  echo "pre-push: boot test of the image ($mode)..."
+  ./test.sh --seconds 180 --wait-for "solon: desktop ready" --boot-stick test-out/stick.img "${extra[@]}" > test-out/usb-$mode.log 2>&1 ||
+    fail "the image didn't boot ($mode); see test-out/usb-$mode.log"
+done
+rm -f test-out/stick.img
+tools/publish-usb.sh upload "$sha" || fail "publishing the image failed"
+# The release's tag can only point at the commit once the push has landed: do that afterwards.
+setsid nohup tools/publish-usb.sh retag "$sha" > dist/retag.log 2>&1 < /dev/null &
+exit 0

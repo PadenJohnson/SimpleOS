@@ -138,7 +138,9 @@ nothing to download.
 
 ## Making a USB stick
 
-See [docs/real-pc-guide.md](docs/real-pc-guide.md). In short:
+Download `solon.img` from the [latest release](https://github.com/PadenJohnson/SimpleOS/releases/tag/latest)
+(rebuilt and boot-tested before every push), or build it yourself. See
+[docs/real-pc-guide.md](docs/real-pc-guide.md). In short:
 
 ```powershell
 git clone https://github.com/limine-bootloader/limine.git --branch=v9.x-binary --depth=1
@@ -162,6 +164,8 @@ booting takes about 25 seconds) use `./run.sh` and `./test.sh`, which need `qemu
 | `.\test.ps1` | Build and boot headless; drives mouse/keyboard, takes screenshots, checks the log |
 | `./run.sh`, `./test.sh` | The same on Linux (`./test.sh --help`; same options as `test.ps1`, plus `--wait-for "solon: desktop ready"` to go on as soon as a log line appears) |
 | `.\tools\make-usb.ps1` | Build the real-PC USB files and disk image into `dist\` |
+| `tools/make-usb.sh` | The same on Linux |
+| `tools/publish-usb.sh` | Upload `dist/` to the GitHub release `latest` (run by the pre-push hook) |
 | `.\tools\make-samples.ps1` | Regenerate the sample photos |
 | `tools\mkimg` | Host tool: builds FAT/exFAT/GPT test disks, checks partition tables, decodes print jobs, copies files out of disk images (`exfat-get`) |
 | `tools\videotest` | Host tool: checks the H.264 encoder and decoder, AAC, FLAC, MP4 and AVI code against Windows' own encoders and decoders |
@@ -173,6 +177,11 @@ and `-Cmdline "testprinter=pcl"` (or ipp, urf, pclmono, pclxl, ps) (a fake print
 `-Cmdline "testphone"` (a pretend phone with photos, a video and a document), `-Sound` (a sound
 card whose output is saved to `test-out\sound.wav`; with `-Cmdline "soundtest"` it plays a tone). `test.sh` takes the same
 options, written either way: `--usb kbd mouse` or `-Usb kbd mouse`.
+
+Pushing `main` runs `.githooks/pre-push` (turn it on once per clone with
+`git config core.hooksPath .githooks`; needs Linux, QEMU and a logged-in `gh`): it rebuilds the USB
+image, boot-tests it with UEFI and old BIOS, and publishes it as the release `latest`.
+`SKIP_USB_IMAGE=1 git push` skips it.
 
 ## Layout
 

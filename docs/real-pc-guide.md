@@ -4,12 +4,23 @@ This guide covers making a Solon USB stick, booting a PC from it, and what to re
 Solon runs entirely from the stick. It doesn't change the PC's internal disk unless you
 explicitly choose **Set up Solon storage** in Import.
 
-## 1. Build the files
+## 1. Get the files
 
-In the project folder:
+The quickest way: download them from the
+[latest release](https://github.com/PadenJohnson/SimpleOS/releases/tag/latest) (`solon.img`,
+or `solon-usb.zip` for option B below). It's rebuilt and boot-tested every time new work is
+pushed.
+
+Or build them yourself in the project folder, on Windows:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tools\make-usb.ps1
+```
+
+or on Linux (including a Raspberry Pi; needs a C compiler besides Rust):
+
+```bash
+tools/make-usb.sh
 ```
 
 This creates:
@@ -161,7 +172,8 @@ Disks with 4K sectors aren't supported by the installer yet.
 
 ## Updating an installed Solon
 
-No reinstall needed: build or get the new version, then either write `dist\solon.img` to a
+No reinstall needed: download the [latest release](https://github.com/PadenJohnson/SimpleOS/releases/tag/latest)
+or build the new version, then either write `dist\solon.img` to a
 USB stick, or copy the `dist\solon-usb` folder's contents (the `boot` folder is what matters)
 onto any FAT32 or exFAT USB drive. On the installed PC, plug it in, open **Disks** and press
 **Update from USB** on the internal disk. Solon shows both versions (with their dates) and

@@ -1,4 +1,4 @@
-# Build Solon for a real PC.
+# Build Solon for a real PC. (tools/make-usb.sh is the Linux version: keep the two in step.)
 #
 #   powershell -ExecutionPolicy Bypass -File .\tools\make-usb.ps1
 #       -> dist\solon-usb\   files to copy onto a FAT32 USB stick (UEFI PCs)
