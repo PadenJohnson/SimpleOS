@@ -681,6 +681,21 @@ pub fn add(word: &str) {
     }
 }
 
+/// The words the user added, in order.
+pub fn user_words() -> Vec<String> {
+    USER.lock().clone()
+}
+
+/// Take a word out of the personal dictionary.
+pub fn remove(word: &str) {
+    let mut u = USER.lock();
+    let before = u.len();
+    u.retain(|w| w != word);
+    if u.len() != before {
+        DIRTY.store(true, Ordering::Relaxed);
+    }
+}
+
 /// Stop marking this word until the computer restarts.
 pub fn ignore(word: &str) {
     let w: String = word.chars().map(|c| if c == '\u{2019}' { '\'' } else { c }).collect();

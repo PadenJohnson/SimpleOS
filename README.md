@@ -101,12 +101,15 @@ nothing to download.
   internal disk (with a one-time notice at startup). It erases that disk after two warnings,
   copies Solon's boot area from the stick (so it starts on UEFI and old BIOS PCs) and
   copies everything in the stick's Solon storage. Remove the stick and restart.
-- Settings: screen resolution (any mode the PC offers; Solon restarts in it and asks "Keep
-  this resolution?", going back by itself after 15 seconds; the monitor's refresh rate and name
-  are shown but the refresh rate can't be changed without a graphics driver), background colour,
-  text and icon size (Normal / Large / Extra large; the whole
-  desktop is scaled, which also helps on 4K screens), 12/24-hour clock, date in the top bar,
-  setting the time and date, mouse speed. Saved in the library.
+- Settings, in sections with a sidebar: Appearance (background, text and icon size: Normal /
+  Large / Extra large, the whole desktop scaled, which also helps on 4K screens), Date & time
+  (12/24-hour clock, the date next to the clock, and setting the date on a calendar and the
+  time from drop-down lists), Display (screen resolution from a drop-down list of every mode
+  the PC offers; Solon restarts in it and asks "Keep this resolution?", going back by itself
+  after 15 seconds; the monitor's name and refresh rate; the screensaver), Mouse (speed),
+  Spelling (language, and the words you added, with Remove) and About. Saved in the library.
+  Right-click the desktop for quick ways to the background, display, screensaver, date and
+  time, text size and spelling settings.
 - Power button (top right): turn off screen, restart, shut down (ACPI, with confirmation)
 - Boots from a USB stick on UEFI and older BIOS PCs; on-screen diagnostics (F12) and a crash
   screen for reporting problems

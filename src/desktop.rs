@@ -16,7 +16,7 @@ use crate::print::{self, Layout, PrinterId, PrinterInfo};
 use crate::editor::SaveChoice;
 use crate::photos::{Bytes, PhotoAction, Photos, Source};
 use crate::settings::{self, Settings};
-use crate::settingsui::{SettingsAction, SettingsApp};
+use crate::settingsui::{Page, SettingsAction, SettingsApp};
 use crate::files::{CopyJob, Files, FilesAction};
 use crate::diskmgr::{DiskAction, DiskMgr};
 use crate::documents::{DocSrc, DocsAction, DocsApp};
@@ -257,6 +257,8 @@ pub struct Desktop {
     last_title: Option<(App, u64)>,
     /// The Applications menu is open (and which item the keyboard is on).
     apps_menu: Option<usize>,
+    /// The right-click menu on the desktop: where it opened, and the item under the pointer.
+    desk_menu: Option<(i32, i32, Option<usize>)>,
     /// The Applications menu is showing a folder.
     folder: Option<Folder>,
     /// Icons drawn small, for the dock (42 px) and title bars (22 px).
@@ -418,6 +420,7 @@ impl Desktop {
             clock: (0, 0),
             last_title: None,
             apps_menu: None,
+            desk_menu: None,
             folder: None,
             dock_icons: Vec::new(),
             title_icons: Vec::new(),
@@ -1695,6 +1698,65 @@ impl Desktop {
         Rect::new(0, 0, self.w, self.h - BAR_H)
     }
 
+    // ---- the desktop's right-click menu ------------------------------------------------
+
+    /// Its items: label, and the Settings page it opens (with the background chooser).
+    const DESK_MENU: [(&'static str, Page, bool); 7] = [
+        ("Change background", Page::Appearance, true),
+        ("Display and resolution", Page::Display, false),
+        ("Screensaver", Page::Display, false),
+        ("Date and time", Page::DateTime, false),
+        ("Text and icon size", Page::Appearance, false),
+        ("Spelling", Page::Spelling, false),
+        ("All settings", Page::Appearance, false),
+    ];
+
+    fn desk_menu_box(&self) -> Option<Rect> {
+        let (x, y, _) = self.desk_menu?;
+        let (w, h) = (250, Self::DESK_MENU.len() as i32 * 38 + 12 + 9);
+        let work = self.work();
+        Some(Rect::new(x.min(work.w - w - 4).max(4), y.min(work.h - h - 4).max(4), w, h))
+    }
+
+    fn desk_menu_item(&self, i: usize) -> Rect {
+        let b = self.desk_menu_box().unwrap_or(Rect::new(0, 0, 0, 0));
+        // A gap before "All settings".
+        let gap = if i + 1 == Self::DESK_MENU.len() { 9 } else { 0 };
+        Rect::new(b.x + 6, b.y + 6 + i as i32 * 38 + gap, b.w - 12, 38)
+    }
+
+    fn draw_desk_menu(&self, c: &mut Canvas) {
+        let Some(b) = self.desk_menu_box() else { return };
+        let hover = self.desk_menu.and_then(|m| m.2);
+        c.shadow(b.x, b.y + 4, b.w, b.h, 12, 18, 80);
+        c.round_rect(b.x, b.y, b.w, b.h, 12, rgb(252, 252, 253));
+        c.outline_rect(b.x + 8, b.y, b.w - 16, 1, rgb(226, 229, 234));
+        for (i, (label, _, _)) in Self::DESK_MENU.iter().enumerate() {
+            let r = self.desk_menu_item(i);
+            if i + 1 == Self::DESK_MENU.len() {
+                c.fill_rect(b.x + 12, r.y - 5, b.w - 24, 1, rgb(226, 229, 234));
+            }
+            if hover == Some(i) {
+                c.round_rect(r.x, r.y, r.w, r.h, 8, rgb(46, 134, 222));
+            }
+            let col = if hover == Some(i) { rgb(255, 255, 255) } else { rgb(32, 36, 44) };
+            c.text(r.x + 14, r.y + 10, label, Size::Small, i + 1 == Self::DESK_MENU.len(), col);
+        }
+    }
+
+    /// Open Settings at a page (from the desktop's menu).
+    fn open_settings(&mut self, page: Page, bg_picker: bool) {
+        self.open(App::Settings);
+        if self.minimized(App::Settings) {
+            self.raise(App::Settings);
+        }
+        self.settings_app.show(page, bg_picker);
+    }
+
+    fn minimized(&self, app: App) -> bool {
+        self.windows.iter().any(|w| w.app == app && w.minimized)
+    }
+
     fn is_open(&self, app: App) -> bool {
         self.windows.iter().any(|w| w.app == app)
     }
@@ -2154,6 +2216,7 @@ impl Desktop {
             c.text_centered(w / 2, y + 9, msg, Size::Small, true, rgb(255, 255, 255));
         }
         self.draw_apps_menu(c);
+        self.draw_desk_menu(c);
         if self.install_notice {
             self.draw_install_notice(c);
         }
@@ -2180,6 +2243,7 @@ impl Desktop {
             App::Movie => self.movie.on_wheel(wheel, x, y, body),
             App::Videos => self.videos.on_wheel(wheel, body),
             App::Calendar => self.calendar.on_wheel(wheel),
+            App::Settings => self.settings_app.on_wheel(wheel, body, &self.settings, self.screen),
             _ => false,
         }
     }
@@ -2194,6 +2258,7 @@ impl Desktop {
             App::Disks => self.disks.scroll_info(body),
             App::Documents => self.docs.scroll_info(body),
             App::Videos => self.videos.scroll_info(body),
+            App::Settings => self.settings_app.scroll_info(body, &self.settings, self.screen),
             app => self.doc_index(app).and_then(|k| self.doc_apps[k].1.scroll_info(body)),
         }
     }
@@ -2206,6 +2271,7 @@ impl Desktop {
             App::Disks => self.disks.set_scroll(v),
             App::Documents => self.docs.set_scroll(v),
             App::Videos => self.videos.set_scroll(v),
+            App::Settings => self.settings_app.set_scroll(v),
             app => {
                 if let Some(k) = self.doc_index(app) {
                     self.doc_apps[k].1.set_scroll(v, body);
@@ -2367,6 +2433,7 @@ impl Desktop {
                 self.printers_app.on_key(sc, n)
             }
             App::Calendar => self.calendar.on_key(sc).map(|a| self.cal_action(a)),
+            App::Settings if self.settings_app.on_key(sc) => Some(true),
             App::Backup => self.backup.on_key(sc, &mut self.storage, &mut self.usb).map(|a| self.backup_action(a, Self::now())),
             app if app.game().is_some() => self.games.key(app.game().unwrap(), sc, Self::now()),
             _ => None,
@@ -2430,6 +2497,26 @@ impl Desktop {
 
         // Right button: games use it (flags in Mines), editors show spelling suggestions.
         let rpressed = buttons & 2 != 0 && prev & 2 == 0;
+        if rpressed && self.apps_menu.is_none() && !self.power_menu && !self.install_notice {
+            let on_window = self.windows.iter().any(|w| !w.minimized && w.rect().contains(x, y));
+            if !on_window && self.work().contains(x, y) {
+                self.desk_menu = Some((x, y, None));
+                return true;
+            }
+            if self.desk_menu.take().is_some() {
+                redraw = true;
+            }
+        }
+        // The pointer over the desktop menu highlights an item.
+        if moved && self.desk_menu.is_some() {
+            let hover = (0..Self::DESK_MENU.len()).find(|&i| self.desk_menu_item(i).contains(x, y));
+            if let Some(m) = &mut self.desk_menu {
+                if m.2 != hover {
+                    m.2 = hover;
+                    redraw = true;
+                }
+            }
+        }
         if rpressed && self.apps_menu.is_none() {
             if let Some(i) = self.windows.iter().rposition(|w| !w.minimized && w.rect().contains(x, y)) {
                 let (app, body) = (self.windows[i].app, self.windows[i].body());
@@ -2533,6 +2620,19 @@ impl Desktop {
                 self.dismiss_install_notice(open.contains(x, y));
             }
             return true;
+        }
+        if self.desk_menu.is_some() {
+            let picked = (0..Self::DESK_MENU.len()).find(|&i| self.desk_menu_item(i).contains(x, y));
+            let inside = self.desk_menu_box().is_some_and(|b| b.contains(x, y));
+            self.desk_menu = None;
+            if let Some(i) = picked {
+                let (_, page, bg) = Self::DESK_MENU[i];
+                self.open_settings(page, bg);
+            }
+            if inside || picked.is_some() {
+                return true;
+            }
+            redraw = true;
         }
         if let Some(r) = self.power_click(x, y) {
             self.apps_menu = None;
@@ -2722,6 +2822,10 @@ impl Desktop {
                 return true;
             }
             return false;
+        }
+        if self.desk_menu.is_some() && sc & 0x80 == 0 {
+            self.desk_menu = None;
+            return true;
         }
         // Applications menu: arrows move, Enter opens, Esc closes.
         if let Some(sel) = self.apps_menu {
