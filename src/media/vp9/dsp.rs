@@ -971,16 +971,44 @@ pub fn itxfm_add(tx: usize, txtp: usize, d: &mut [u16], o: usize, stride: usize,
 /// Filter 8 positions along an edge. `sa` steps along the edge, `sb` across it.
 #[allow(clippy::too_many_arguments)]
 pub fn loop_filter(d: &mut [u16], at: usize, e: i32, i: i32, h: i32, sa: isize, sb: isize, wd: u32, bd: u32) {
+    // One copy per filter width and direction, so the compiler can drop the branches and
+    // (across x, where the pixels are adjacent) the bounds checks.
+    match (wd, sb == 1) {
+        (4, true) => lf_n::<4, true>(d, at, e, i, h, sa, sb, bd),
+        (8, true) => lf_n::<8, true>(d, at, e, i, h, sa, sb, bd),
+        (_, true) => lf_n::<16, true>(d, at, e, i, h, sa, sb, bd),
+        (4, false) => lf_n::<4, false>(d, at, e, i, h, sa, sb, bd),
+        (8, false) => lf_n::<8, false>(d, at, e, i, h, sa, sb, bd),
+        (_, false) => lf_n::<16, false>(d, at, e, i, h, sa, sb, bd),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn lf_n<const WD: u32, const X: bool>(d: &mut [u16], at: usize, e: i32, i: i32, h: i32, sa: isize, sb: isize, bd: u32) {
     let sh = bd - 8;
     let f = 1 << sh;
     let (e, i, h) = (e << sh, i << sh, h << sh);
     let mx = (1i32 << bd) - 1;
     let half = 1i32 << (bd - 1);
+    // Pixels -lo..lo across the edge: p0 is at -1, q0 at 0.
+    let lo: usize = if WD == 16 { 8 } else { 4 };
+    let st: usize = if X { 1 } else { sb as usize };
     for k in 0..8isize {
-        let base = at as isize + k * sa;
-        let px = |n: isize| d[(base + n * sb) as usize] as i32;
-        let (p3, p2, p1, p0) = (px(-4), px(-3), px(-2), px(-1));
-        let (q0, q1, q2, q3) = (px(0), px(1), px(2), px(3));
+        let base = (at as isize + k * sa) as usize;
+        let s = &mut d[base - lo * st..base + (lo - 1) * st + 1];
+        macro_rules! px {
+            ($n:expr) => {
+                s[(lo as isize + $n) as usize * st] as i32
+            };
+        }
+        macro_rules! set {
+            ($n:expr, $v:expr) => {
+                s[(lo as isize + $n) as usize * st] = ($v) as u16
+            };
+        }
+        let (p3, p2, p1, p0) = (px!(-4), px!(-3), px!(-2), px!(-1));
+        let (q0, q1, q2, q3) = (px!(0), px!(1), px!(2), px!(3));
         let fm = (p3 - p2).abs() <= i
             && (p2 - p1).abs() <= i
             && (p1 - p0).abs() <= i
@@ -991,63 +1019,53 @@ pub fn loop_filter(d: &mut [u16], at: usize, e: i32, i: i32, h: i32, sa: isize, 
         if !fm {
             continue;
         }
-        let flat8in = wd >= 8 && (p3 - p0).abs() <= f && (p2 - p0).abs() <= f && (p1 - p0).abs() <= f && (q1 - q0).abs() <= f && (q2 - q0).abs() <= f && (q3 - q0).abs() <= f;
-        let mut flat8out = false;
-        let (mut p7, mut p6, mut p5, mut p4, mut q4, mut q5, mut q6, mut q7) = (0, 0, 0, 0, 0, 0, 0, 0);
-        if wd >= 16 && flat8in {
-            let px = |n: isize| d[(base + n * sb) as usize] as i32;
-            p7 = px(-8);
-            p6 = px(-7);
-            p5 = px(-6);
-            p4 = px(-5);
-            q4 = px(4);
-            q5 = px(5);
-            q6 = px(6);
-            q7 = px(7);
-            flat8out = (p7 - p0).abs() <= f && (p6 - p0).abs() <= f && (p5 - p0).abs() <= f && (p4 - p0).abs() <= f && (q4 - q0).abs() <= f && (q5 - q0).abs() <= f && (q6 - q0).abs() <= f && (q7 - q0).abs() <= f;
-        }
-        let mut set = |n: isize, v: i32| d[(base + n * sb) as usize] = v as u16;
-        if wd >= 16 && flat8out && flat8in {
-            set(-7, (p7 * 7 + p6 * 2 + p5 + p4 + p3 + p2 + p1 + p0 + q0 + 8) >> 4);
-            set(-6, (p7 * 6 + p6 + p5 * 2 + p4 + p3 + p2 + p1 + p0 + q0 + q1 + 8) >> 4);
-            set(-5, (p7 * 5 + p6 + p5 + p4 * 2 + p3 + p2 + p1 + p0 + q0 + q1 + q2 + 8) >> 4);
-            set(-4, (p7 * 4 + p6 + p5 + p4 + p3 * 2 + p2 + p1 + p0 + q0 + q1 + q2 + q3 + 8) >> 4);
-            set(-3, (p7 * 3 + p6 + p5 + p4 + p3 + p2 * 2 + p1 + p0 + q0 + q1 + q2 + q3 + q4 + 8) >> 4);
-            set(-2, (p7 * 2 + p6 + p5 + p4 + p3 + p2 + p1 * 2 + p0 + q0 + q1 + q2 + q3 + q4 + q5 + 8) >> 4);
-            set(-1, (p7 + p6 + p5 + p4 + p3 + p2 + p1 + p0 * 2 + q0 + q1 + q2 + q3 + q4 + q5 + q6 + 8) >> 4);
-            set(0, (p6 + p5 + p4 + p3 + p2 + p1 + p0 + q0 * 2 + q1 + q2 + q3 + q4 + q5 + q6 + q7 + 8) >> 4);
-            set(1, (p5 + p4 + p3 + p2 + p1 + p0 + q0 + q1 * 2 + q2 + q3 + q4 + q5 + q6 + q7 * 2 + 8) >> 4);
-            set(2, (p4 + p3 + p2 + p1 + p0 + q0 + q1 + q2 * 2 + q3 + q4 + q5 + q6 + q7 * 3 + 8) >> 4);
-            set(3, (p3 + p2 + p1 + p0 + q0 + q1 + q2 + q3 * 2 + q4 + q5 + q6 + q7 * 4 + 8) >> 4);
-            set(4, (p2 + p1 + p0 + q0 + q1 + q2 + q3 + q4 * 2 + q5 + q6 + q7 * 5 + 8) >> 4);
-            set(5, (p1 + p0 + q0 + q1 + q2 + q3 + q4 + q5 * 2 + q6 + q7 * 6 + 8) >> 4);
-            set(6, (p0 + q0 + q1 + q2 + q3 + q4 + q5 + q6 * 2 + q7 * 7 + 8) >> 4);
-        } else if wd >= 8 && flat8in {
-            set(-3, (p3 * 3 + 2 * p2 + p1 + p0 + q0 + 4) >> 3);
-            set(-2, (p3 * 2 + p2 + 2 * p1 + p0 + q0 + q1 + 4) >> 3);
-            set(-1, (p3 + p2 + p1 + 2 * p0 + q0 + q1 + q2 + 4) >> 3);
-            set(0, (p2 + p1 + p0 + 2 * q0 + q1 + q2 + q3 + 4) >> 3);
-            set(1, (p1 + p0 + q0 + 2 * q1 + q2 + q3 * 2 + 4) >> 3);
-            set(2, (p0 + q0 + q1 + 2 * q2 + q3 * 3 + 4) >> 3);
-        } else {
-            let hev = (p1 - p0).abs() > h || (q1 - q0).abs() > h;
-            if hev {
-                let f = (p1 - q1).clamp(-half, half - 1);
-                let f = (3 * (q0 - p0) + f).clamp(-half, half - 1);
-                let f1 = (f + 4).min(half - 1) >> 3;
-                let f2 = (f + 3).min(half - 1) >> 3;
-                set(-1, (p0 + f2).clamp(0, mx));
-                set(0, (q0 - f1).clamp(0, mx));
-            } else {
-                let f = (3 * (q0 - p0)).clamp(-half, half - 1);
-                let f1 = (f + 4).min(half - 1) >> 3;
-                let f2 = (f + 3).min(half - 1) >> 3;
-                set(-1, (p0 + f2).clamp(0, mx));
-                set(0, (q0 - f1).clamp(0, mx));
-                let f = (f1 + 1) >> 1;
-                set(-2, (p1 + f).clamp(0, mx));
-                set(1, (q1 - f).clamp(0, mx));
+        let flat8in = WD >= 8 && (p3 - p0).abs() <= f && (p2 - p0).abs() <= f && (p1 - p0).abs() <= f && (q1 - q0).abs() <= f && (q2 - q0).abs() <= f && (q3 - q0).abs() <= f;
+        if WD >= 16 && flat8in {
+            let (p7, p6, p5, p4) = (px!(-8), px!(-7), px!(-6), px!(-5));
+            let (q4, q5, q6, q7) = (px!(4), px!(5), px!(6), px!(7));
+            let flat8out = (p7 - p0).abs() <= f && (p6 - p0).abs() <= f && (p5 - p0).abs() <= f && (p4 - p0).abs() <= f && (q4 - q0).abs() <= f && (q5 - q0).abs() <= f && (q6 - q0).abs() <= f && (q7 - q0).abs() <= f;
+            if flat8out {
+                set!(-7, (p7 * 7 + p6 * 2 + p5 + p4 + p3 + p2 + p1 + p0 + q0 + 8) >> 4);
+                set!(-6, (p7 * 6 + p6 + p5 * 2 + p4 + p3 + p2 + p1 + p0 + q0 + q1 + 8) >> 4);
+                set!(-5, (p7 * 5 + p6 + p5 + p4 * 2 + p3 + p2 + p1 + p0 + q0 + q1 + q2 + 8) >> 4);
+                set!(-4, (p7 * 4 + p6 + p5 + p4 + p3 * 2 + p2 + p1 + p0 + q0 + q1 + q2 + q3 + 8) >> 4);
+                set!(-3, (p7 * 3 + p6 + p5 + p4 + p3 + p2 * 2 + p1 + p0 + q0 + q1 + q2 + q3 + q4 + 8) >> 4);
+                set!(-2, (p7 * 2 + p6 + p5 + p4 + p3 + p2 + p1 * 2 + p0 + q0 + q1 + q2 + q3 + q4 + q5 + 8) >> 4);
+                set!(-1, (p7 + p6 + p5 + p4 + p3 + p2 + p1 + p0 * 2 + q0 + q1 + q2 + q3 + q4 + q5 + q6 + 8) >> 4);
+                set!(0, (p6 + p5 + p4 + p3 + p2 + p1 + p0 + q0 * 2 + q1 + q2 + q3 + q4 + q5 + q6 + q7 + 8) >> 4);
+                set!(1, (p5 + p4 + p3 + p2 + p1 + p0 + q0 + q1 * 2 + q2 + q3 + q4 + q5 + q6 + q7 * 2 + 8) >> 4);
+                set!(2, (p4 + p3 + p2 + p1 + p0 + q0 + q1 + q2 * 2 + q3 + q4 + q5 + q6 + q7 * 3 + 8) >> 4);
+                set!(3, (p3 + p2 + p1 + p0 + q0 + q1 + q2 + q3 * 2 + q4 + q5 + q6 + q7 * 4 + 8) >> 4);
+                set!(4, (p2 + p1 + p0 + q0 + q1 + q2 + q3 + q4 * 2 + q5 + q6 + q7 * 5 + 8) >> 4);
+                set!(5, (p1 + p0 + q0 + q1 + q2 + q3 + q4 + q5 * 2 + q6 + q7 * 6 + 8) >> 4);
+                set!(6, (p0 + q0 + q1 + q2 + q3 + q4 + q5 + q6 * 2 + q7 * 7 + 8) >> 4);
+                continue;
             }
+        }
+        if flat8in {
+            set!(-3, (p3 * 3 + 2 * p2 + p1 + p0 + q0 + 4) >> 3);
+            set!(-2, (p3 * 2 + p2 + 2 * p1 + p0 + q0 + q1 + 4) >> 3);
+            set!(-1, (p3 + p2 + p1 + 2 * p0 + q0 + q1 + q2 + 4) >> 3);
+            set!(0, (p2 + p1 + p0 + 2 * q0 + q1 + q2 + q3 + 4) >> 3);
+            set!(1, (p1 + p0 + q0 + 2 * q1 + q2 + q3 * 2 + 4) >> 3);
+            set!(2, (p0 + q0 + q1 + 2 * q2 + q3 * 3 + 4) >> 3);
+        } else if (p1 - p0).abs() > h || (q1 - q0).abs() > h {
+            // High edge variance.
+            let f = (p1 - q1).clamp(-half, half - 1);
+            let f = (3 * (q0 - p0) + f).clamp(-half, half - 1);
+            let f1 = (f + 4).min(half - 1) >> 3;
+            let f2 = (f + 3).min(half - 1) >> 3;
+            set!(-1, (p0 + f2).clamp(0, mx));
+            set!(0, (q0 - f1).clamp(0, mx));
+        } else {
+            let f = (3 * (q0 - p0)).clamp(-half, half - 1);
+            let f1 = (f + 4).min(half - 1) >> 3;
+            let f2 = (f + 3).min(half - 1) >> 3;
+            set!(-1, (p0 + f2).clamp(0, mx));
+            set!(0, (q0 - f1).clamp(0, mx));
+            let f = (f1 + 1) >> 1;
+            set!(-2, (p1 + f).clamp(0, mx));
+            set!(1, (q1 - f).clamp(0, mx));
         }
     }
 }

@@ -31,109 +31,157 @@ fn plane(p: &Pic, pl: Pl) -> (&[u16], usize) {
     }
 }
 
+/// Scratch space for `mc`, kept by the decoder so it isn't cleared for every block.
+pub const MC_SCRATCH: usize = 72 * 72 + 64 * 71;
+
+/// The 8 taps of filter `f` for sixteenth position `frac`, widened for the inner loops.
+#[inline]
+fn taps(f: usize, frac: usize) -> [i32; 8] {
+    let t = subpel(f, frac);
+    core::array::from_fn(|k| t[k] as i32)
+}
+
+#[inline(always)]
+fn store<const AVG: bool>(d: &mut u16, v: u16) {
+    *d = if AVG { ((*d as u32 + v as u32 + 1) >> 1) as u16 } else { v };
+}
+
 /// Predict a bw x bh block from `r` (picture size w x h in this plane) at integer position
 /// (x, y) plus sixteenth fraction (mx, my), into `dst` (put, or average when `avg`).
 #[allow(clippy::too_many_arguments)]
-fn mc(dst: &mut [u16], doff: usize, ds: usize, r: &[u16], rs: usize, w: i32, h: i32, x: i32, y: i32, mx: usize, my: usize, bw: usize, bh: usize, filter: usize, avg: bool, pmax: i32) {
+fn mc(dst: &mut [u16], doff: usize, ds: usize, r: &[u16], rs: usize, w: i32, h: i32, x: i32, y: i32, mx: usize, my: usize, bw: usize, bh: usize, filter: usize, avg: bool, pmax: i32, scratch: &mut [u16]) {
+    if avg {
+        mc_n::<true>(dst, doff, ds, r, rs, w, h, x, y, mx, my, bw, bh, filter, pmax, scratch)
+    } else {
+        mc_n::<false>(dst, doff, ds, r, rs, w, h, x, y, mx, my, bw, bh, filter, pmax, scratch)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn mc_n<const AVG: bool>(dst: &mut [u16], doff: usize, ds: usize, r: &[u16], rs: usize, w: i32, h: i32, x: i32, y: i32, mx: usize, my: usize, bw: usize, bh: usize, filter: usize, pmax: i32, scratch: &mut [u16]) {
+    let (win, tmp) = scratch.split_at_mut(72 * 72);
     // Source window: 3 before, 4 after when filtering.
     let (ex0, ex1) = if mx != 0 { (3, 4) } else { (0, 0) };
     let (ey0, ey1) = if my != 0 { (3, 4) } else { (0, 0) };
     let sw = bw + ex0 + ex1;
     let sh = bh + ey0 + ey1;
     let (sx, sy) = (x - ex0 as i32, y - ey0 as i32);
-    let mut win = [0u16; 72 * 72];
     let inside = sx >= 0 && sy >= 0 && sx + sw as i32 <= w && sy + sh as i32 <= h;
+    // `so`: where the window (top-left at (sx, sy)) starts in `src`.
     let (src, sst, so): (&[u16], usize, usize) = if inside {
         (r, rs, sy as usize * rs + sx as usize)
     } else {
         for j in 0..sh {
             let yy = (sy + j as i32).clamp(0, h - 1) as usize * rs;
-            for i in 0..sw {
-                win[j * 72 + i] = r[yy + (sx + i as i32).clamp(0, w - 1) as usize];
+            let row = &mut win[j * 72..j * 72 + sw];
+            for (i, p) in row.iter_mut().enumerate() {
+                *p = r[yy + (sx + i as i32).clamp(0, w - 1) as usize];
             }
         }
-        (&win, 72, 0)
+        (&*win, 72, 0)
     };
-    let put = |d: &mut u16, v: u16| *d = if avg { ((*d as u32 + v as u32 + 1) >> 1) as u16 } else { v };
     let base = so + ey0 * sst + ex0;
+    let drow = |j: usize| doff + j * ds..doff + j * ds + bw;
     if mx == 0 && my == 0 {
         for j in 0..bh {
             let s = &src[base + j * sst..base + j * sst + bw];
-            let d = &mut dst[doff + j * ds..doff + j * ds + bw];
-            for i in 0..bw {
-                put(&mut d[i], s[i]);
+            let d = &mut dst[drow(j)];
+            if AVG {
+                d.iter_mut().zip(s).for_each(|(d, &v)| store::<true>(d, v));
+            } else {
+                d.copy_from_slice(s);
             }
         }
         return;
     }
     if filter == 3 {
         // Bilinear.
-        let bil = |a: u16, b: u16, f: usize| (a as i32 + ((f as i32 * (b as i32 - a as i32) + 8) >> 4)) as u16;
+        let bil = |a: u16, b: u16, f: i32| (a as i32 + ((f * (b as i32 - a as i32) + 8) >> 4)) as u16;
+        let (fx, fy) = (mx as i32, my as i32);
         if my == 0 {
             for j in 0..bh {
-                for i in 0..bw {
-                    let o = base + j * sst + i;
-                    put(&mut dst[doff + j * ds + i], bil(src[o], src[o + 1], mx));
+                let s = &src[base + j * sst..base + j * sst + bw + 1];
+                let d = &mut dst[drow(j)];
+                for (i, p) in d.iter_mut().enumerate() {
+                    store::<AVG>(p, bil(s[i], s[i + 1], fx));
                 }
             }
         } else if mx == 0 {
             for j in 0..bh {
-                for i in 0..bw {
-                    let o = base + j * sst + i;
-                    put(&mut dst[doff + j * ds + i], bil(src[o], src[o + sst], my));
+                let s0 = &src[base + j * sst..base + j * sst + bw];
+                let s1 = &src[base + (j + 1) * sst..base + (j + 1) * sst + bw];
+                let d = &mut dst[drow(j)];
+                for (i, p) in d.iter_mut().enumerate() {
+                    store::<AVG>(p, bil(s0[i], s1[i], fy));
                 }
             }
         } else {
-            let mut tmp = [0u16; 64 * 65];
             for j in 0..bh + 1 {
-                for i in 0..bw {
-                    let o = base + j * sst + i;
-                    tmp[j * 64 + i] = bil(src[o], src[o + 1], mx);
+                let s = &src[base + j * sst..base + j * sst + bw + 1];
+                let t = &mut tmp[j * 64..j * 64 + bw];
+                for (i, p) in t.iter_mut().enumerate() {
+                    *p = bil(s[i], s[i + 1], fx);
                 }
             }
             for j in 0..bh {
-                for i in 0..bw {
-                    put(&mut dst[doff + j * ds + i], bil(tmp[j * 64 + i], tmp[(j + 1) * 64 + i], my));
+                let (t0, t1) = (&tmp[j * 64..j * 64 + bw], &tmp[(j + 1) * 64..(j + 1) * 64 + bw]);
+                let d = &mut dst[drow(j)];
+                for (i, p) in d.iter_mut().enumerate() {
+                    store::<AVG>(p, bil(t0[i], t1[i], fy));
                 }
             }
         }
         return;
     }
-    let tap = |s: &[u16], o: usize, st: usize, f: &[i16]| -> u16 {
-        let mut a = 64i32;
-        for k in 0..8 {
-            a += f[k] as i32 * s[o + k * st - 3 * st] as i32;
+    let fin = |a: i32| ((a + 64) >> 7).clamp(0, pmax) as u16;
+    // Horizontal 8-tap filter of the samples at `o`.., `out.len()` of them.
+    let hrow = |s: &[u16], o: usize, f: &[i32; 8], out: &mut [u16]| {
+        let s = &s[o - 3..o + out.len() + 4];
+        for (i, p) in out.iter_mut().enumerate() {
+            let t = &s[i..i + 8];
+            let mut a = 0;
+            for k in 0..8 {
+                a += f[k] * t[k] as i32;
+            }
+            *p = fin(a);
         }
-        (a >> 7).clamp(0, pmax) as u16
     };
     if my == 0 {
-        let f = subpel(filter, mx);
+        let f = taps(filter, mx);
+        let mut row = [0u16; 64];
         for j in 0..bh {
-            for i in 0..bw {
-                put(&mut dst[doff + j * ds + i], tap(src, base + j * sst + i, 1, f));
-            }
+            hrow(src, base + j * sst, &f, &mut row[..bw]);
+            let d = &mut dst[drow(j)];
+            d.iter_mut().zip(&row[..bw]).for_each(|(d, &v)| store::<AVG>(d, v));
         }
-    } else if mx == 0 {
-        let f = subpel(filter, my);
-        for j in 0..bh {
-            for i in 0..bw {
-                put(&mut dst[doff + j * ds + i], tap(src, base + j * sst + i, sst, f));
+        return;
+    }
+    // Vertical 8-tap filter: rows `o - 3 * st`, ..., `o + 4 * st` of `s`.
+    let vrow = |s: &[u16], o: usize, st: usize, f: &[i32; 8], d: &mut [u16]| {
+        let n = d.len();
+        let rows: [&[u16]; 8] = core::array::from_fn(|k| &s[o + k * st - 3 * st..o + k * st - 3 * st + n]);
+        for (i, p) in d.iter_mut().enumerate() {
+            let mut a = 0;
+            for k in 0..8 {
+                a += f[k] * rows[k][i] as i32;
             }
+            store::<AVG>(p, fin(a));
+        }
+    };
+    let fy = taps(filter, my);
+    if mx == 0 {
+        for j in 0..bh {
+            vrow(src, base + j * sst, sst, &fy, &mut dst[drow(j)]);
         }
     } else {
-        let fx = subpel(filter, mx);
-        let fy = subpel(filter, my);
-        let mut tmp = [0u16; 64 * 71];
+        let fx = taps(filter, mx);
         let b0 = base - 3 * sst;
         for j in 0..bh + 7 {
-            for i in 0..bw {
-                tmp[j * 64 + i] = tap(src, b0 + j * sst + i, 1, fx);
-            }
+            hrow(src, b0 + j * sst, &fx, &mut tmp[j * 64..j * 64 + bw]);
         }
         for j in 0..bh {
-            for i in 0..bw {
-                put(&mut dst[doff + j * ds + i], tap(&tmp, (j + 3) * 64 + i, 64, fy));
-            }
+            vrow(tmp, (j + 3) * 64, 64, &fy, &mut dst[drow(j)]);
         }
     }
 }
@@ -244,7 +292,7 @@ impl Vp9Dec {
             let yy = y as i32 + (mv.y as i32 >> 3);
             let mx = ((mv.x as i32 & 7) << 1) as usize;
             let my = ((mv.y as i32 & 7) << 1) as usize;
-            mc(&mut cur.y, y * ds + x, ds, r, rs, rf.w as i32, rf.h as i32, xx, yy, mx, my, bw, bh, filter, avg, pmax);
+            mc(&mut cur.y, y * ds + x, ds, r, rs, rf.w as i32, rf.h as i32, xx, yy, mx, my, bw, bh, filter, avg, pmax, &mut self.mc_buf);
             return;
         }
         // A reference of another size: positions scaled (as libvpx, each part separately).
@@ -276,8 +324,8 @@ impl Vp9Dec {
             let yy = y as i32 + (mv.y as i32 >> 4);
             let mx = (mv.x as i32 & 15) as usize;
             let my = (mv.y as i32 & 15) as usize;
-            mc(&mut cur.u, y * ds + x, ds, ru, rs, w, h, xx, yy, mx, my, bw, bh, filter, avg, pmax);
-            mc(&mut cur.v, y * ds + x, ds, rv, rs, w, h, xx, yy, mx, my, bw, bh, filter, avg, pmax);
+            mc(&mut cur.u, y * ds + x, ds, ru, rs, w, h, xx, yy, mx, my, bw, bh, filter, avg, pmax, &mut self.mc_buf);
+            mc(&mut cur.v, y * ds + x, ds, rv, rs, w, h, xx, yy, mx, my, bw, bh, filter, avg, pmax, &mut self.mc_buf);
             return;
         }
         let (xi, yi, pxi, pyi, pwi, phi) = (x as i32, y as i32, px as i32, py as i32, pw as i32, ph as i32);

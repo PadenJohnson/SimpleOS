@@ -266,6 +266,8 @@ pub struct Vp9Dec {
     above_filter: Vec<u8>,
     above_mv: Vec<[Mv; 2]>,
     intra_pred: [Vec<u16>; 3],
+    /// Scratch space for motion compensation.
+    mc_buf: Vec<u16>,
     lflvl: Vec<Filter>,
     // Left contexts and tile state.
     left_y_nnz: [u8; 16],
@@ -343,6 +345,7 @@ impl Vp9Dec {
             above_filter: Vec::new(),
             above_mv: Vec::new(),
             intra_pred: [Vec::new(), Vec::new(), Vec::new()],
+            mc_buf: vec![0; recon::MC_SCRATCH],
             lflvl: Vec::new(),
             left_y_nnz: [0; 16],
             left_mode: [0; 16],
@@ -1108,18 +1111,24 @@ impl Vp9Dec {
         let mut y = vec![0u8; ow * oh];
         let mut u = vec![128u8; ow * oh / 4];
         let mut v = vec![128u8; ow * oh / 4];
-        for r in 0..h {
-            for c in 0..w {
-                let s = conv(p.y[r * p.stride + c]);
-                y[r * ow + c] = if hdr { super::hevc::tone(s) } else { s };
+        // Row by row, as straight copies for 8-bit (the compiler vectorises them).
+        let row = |d: &mut [u8], s: &[u16], tone: bool| {
+            if shift == 0 {
+                d.iter_mut().zip(s).for_each(|(d, &s)| *d = s as u8);
+            } else if tone {
+                d.iter_mut().zip(s).for_each(|(d, &s)| *d = super::hevc::tone(conv(s)));
+            } else {
+                d.iter_mut().zip(s).for_each(|(d, &s)| *d = conv(s));
             }
+        };
+        for r in 0..h {
+            row(&mut y[r * ow..r * ow + w], &p.y[r * p.stride..r * p.stride + w], hdr);
         }
         let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
         for r in 0..ch {
-            for c in 0..cw {
-                u[r * (ow / 2) + c] = conv(p.u[r * p.uv_stride + c]);
-                v[r * (ow / 2) + c] = conv(p.v[r * p.uv_stride + c]);
-            }
+            let (d, s) = (r * (ow / 2), r * p.uv_stride);
+            row(&mut u[d..d + cw], &p.u[s..s + cw], false);
+            row(&mut v[d..d + cw], &p.v[s..s + cw], false);
         }
         self.out.push_back(Frame { width: w, height: h, y, u, v, stride: ow, crop_x: 0, crop_y: 0, bt709: self.bt709, full_range: self.full_range, poc: 0 });
     }
