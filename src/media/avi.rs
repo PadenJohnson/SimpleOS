@@ -295,7 +295,8 @@ pub(crate) fn video_codec(f: &[u8]) -> VCodec {
         b"H263" | b"U263" | b"S263" | b"M263" | b"X263" => VCodec::H263,
         b"VP80" => VCodec::Vp8,
         b"VP90" => VCodec::Vp9,
-        b"DIV3" | b"MP43" | b"DIV4" | b"MP42" | b"MPG4" | b"DIV5" | b"DIV6" | b"AP41" => VCodec::Other(String::from("DivX 3 (Microsoft MPEG-4)")),
+        b"DIV3" | b"MP43" | b"MPG3" | b"DIV4" | b"DIV5" | b"DIV6" | b"DVX3" | b"AP41" | b"COL1" | b"COL0" => VCodec::Divx3,
+        b"MP42" | b"MPG4" | b"DIV2" => VCodec::Other(String::from("Microsoft MPEG-4 version 1 or 2")),
         b"WMV1" | b"WMV2" | b"WMV3" | b"WVC1" | b"WMVA" => VCodec::Other(String::from("Windows Media Video")),
         _ => VCodec::Other(String::from_utf8_lossy(&f[16..20]).into_owned()),
     }

@@ -26,6 +26,8 @@ pub mod hevc;
 pub mod mpeg2;
 pub mod mpeg4;
 pub mod mpeg4tab;
+pub mod msmpeg4;
+pub mod msmpeg4tab;
 pub mod idct;
 pub mod vlc;
 pub mod opus;
@@ -57,6 +59,8 @@ pub enum VCodec {
     /// MPEG-1 and MPEG-2 (DVDs, TV recordings).
     Mpeg2 { config: Vec<u8> },
     Mjpeg,
+    /// DivX 3 (Microsoft MPEG-4 v3); the size comes from the container.
+    Divx3,
     Vp8,
     Vp9,
     Other(String),
@@ -86,6 +90,7 @@ impl VCodec {
             VCodec::H263 => "H.263",
             VCodec::Mpeg2 { .. } => "MPEG-2",
             VCodec::Mjpeg => "Motion JPEG",
+            VCodec::Divx3 => "DivX 3",
             VCodec::Vp8 => "VP8",
             VCodec::Vp9 => "VP9",
             VCodec::Other(s) => return s.clone(),
