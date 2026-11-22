@@ -212,6 +212,12 @@ pub struct SettingsApp {
     custom_thumb: Option<crate::image::Image>,
 }
 
+/// The resolutions offered: the PC's modes that are big enough for Solon's desktop.
+fn res_modes() -> Vec<(u32, u32)> {
+    let info = crate::display::INFO.lock().clone().unwrap_or_default();
+    info.modes.into_iter().filter(|&m| crate::display::usable(m)).collect()
+}
+
 fn twelve(h: u8) -> u8 {
     if h % 12 == 0 {
         12
@@ -387,16 +393,22 @@ impl SettingsApp {
     fn display(&self, ui: &mut Ui, s: &Settings) {
         let info = crate::display::INFO.lock().clone().unwrap_or_default();
         ui.card("Screen");
-        let mut help = String::from("Solon restarts in the new one and asks whether to keep it");
-        if info.modes.len() <= 1 {
-            help = String::from("This computer offers only one resolution");
-        }
+        let modes = res_modes();
+        let help = if modes.len() <= 1 {
+            String::from("This computer offers only one resolution")
+        } else if crate::display::vbe_present() {
+            String::from("Changes at once")
+        } else if modes.iter().any(|&m| crate::display::change_for(m) == crate::display::Change::Restart) {
+            format!("Changes at once up to {} x {}; bigger ones need a restart", info.boot.0, info.boot.1)
+        } else {
+            String::from("Changes at once (lower ones are scaled to fill the screen)")
+        };
         let row = ui.row("Resolution", &help, ROW + 8);
         let mut label = format!("{} x {}", info.current.0, info.current.1);
         if info.native == Some(info.current) {
             label += " (best)";
         }
-        ui.drop_right(row, 210, &label, if info.modes.len() > 1 { Act::Open(Drop::Resolution) } else { Act::None });
+        ui.drop_right(row, 210, &label, if modes.len() > 1 { Act::Open(Drop::Resolution) } else { Act::None });
         let row = ui.row("Monitor", "", ROW);
         let mut m = info.monitor.clone().unwrap_or_else(|| String::from("Unknown"));
         if let Some(hz) = info.refresh {
@@ -451,8 +463,21 @@ impl SettingsApp {
             Drop::Minute => ((0..60).map(|m| format!("{:02}", m)).collect(), 6, Some(mi as usize)),
             Drop::Resolution => {
                 let info = crate::display::INFO.lock().clone().unwrap_or_default();
-                let v = info.modes.iter().map(|&(w, h)| if info.native == Some((w, h)) { format!("{} x {} (best)", w, h) } else { format!("{} x {}", w, h) }).collect();
-                (v, 1, info.modes.iter().position(|&m| m == info.current))
+                let modes = res_modes();
+                let v = modes
+                    .iter()
+                    .map(|&(w, h)| {
+                        let mut l = format!("{} x {}", w, h);
+                        if info.native == Some((w, h)) {
+                            l += " (best)";
+                        }
+                        if crate::display::change_for((w, h)) == crate::display::Change::Restart {
+                            l += " (restart)";
+                        }
+                        l
+                    })
+                    .collect();
+                (v, 1, modes.iter().position(|&m| m == info.current))
             }
             Drop::Saver => (SAVERS.iter().map(|x| String::from(*x)).collect(), 1, Some(s.saver)),
             Drop::SaverWait => (SAVER_WAIT.iter().map(|x| String::from(x.0)).collect(), 1, Some(s.saver_wait)),
@@ -502,7 +527,7 @@ impl SettingsApp {
             }
             Drop::Resolution => {
                 let info = crate::display::INFO.lock().clone().unwrap_or_default();
-                if let Some(&m) = info.modes.get(i) {
+                if let Some(&m) = res_modes().get(i) {
                     if m != info.current {
                         return SettingsAction::Resolution(Some(m));
                     }

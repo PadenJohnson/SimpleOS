@@ -1,9 +1,16 @@
 //! The screen: the resolutions the PC's firmware offers, what the monitor says about itself
-//! (its name, best resolution and refresh rate, from EDID), and choosing a resolution by
-//! writing it into the boot loader's settings (limine.conf) for the next start.
+//! (its name, best resolution and refresh rate, from EDID), and changing the resolution.
 //!
-//! A change is tried first: limine.conf gets a "# solon-trial" note, and after the restart
-//! Solon asks "Keep this resolution?". If nobody answers, the old one goes back.
+//! Changes happen at once where possible:
+//! - On graphics Solon can drive itself (QEMU, VirtualBox and Bochs: the "Bochs VBE"
+//!   registers), the card switches to the new mode.
+//! - Otherwise the screen stays in the mode the PC started in (normally the monitor's best)
+//!   and a lower resolution is drawn at its size and scaled up to fill the screen, the way a
+//!   monitor shows a resolution that isn't its own.
+//! - Only a resolution bigger than the start-up mode on other graphics needs a restart: it's
+//!   written into the boot loader's settings (limine.conf) with a "# solon-trial" note, and
+//!   after the restart Solon asks "Keep this resolution?". If nobody answers, the old one
+//!   goes back.
 
 use alloc::format;
 use alloc::string::String;
@@ -24,6 +31,124 @@ pub struct DisplayInfo {
     pub monitor: Option<String>,
     /// The monitor's own (best) resolution.
     pub native: Option<(u32, u32)>,
+    /// The mode the screen started in, and the one it's in now (can differ from `current`,
+    /// the resolution the desktop is drawn at, when that's scaled up).
+    pub boot: (u32, u32),
+    pub framebuffer: (u32, u32),
+}
+
+/// Solon can draw a desktop no smaller than this (scaled pixels), so smaller resolutions
+/// aren't offered.
+pub fn usable(m: (u32, u32)) -> bool {
+    m.0 as usize >= crate::settings::MIN_W && m.1 as usize >= crate::settings::MIN_H
+}
+
+/// How a resolution can be shown.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Change {
+    /// The graphics card switches to it.
+    Switch,
+    /// Drawn at that size and scaled to the screen.
+    Scale,
+    /// Only after a restart.
+    Restart,
+}
+
+pub fn change_for(m: (u32, u32)) -> Change {
+    let fb = INFO.lock().as_ref().map(|i| i.boot).unwrap_or((0, 0));
+    if vbe_present() {
+        Change::Switch
+    } else if m.0 <= fb.0 && m.1 <= fb.1 {
+        Change::Scale
+    } else {
+        Change::Restart
+    }
+}
+
+// ---- Bochs VBE (QEMU std VGA, VirtualBox, Bochs) ------------------------------------------
+
+const VBE_INDEX: u16 = 0x01CE;
+const VBE_DATA: u16 = 0x01CF;
+
+/// The card's video memory: physical address and size, and where Solon maps it.
+struct Vbe {
+    phys: u64,
+    size: u64,
+    virt: u64,
+}
+
+static VBE: Mutex<Option<Vbe>> = Mutex::new(None);
+
+fn vbe_reg(i: u16) -> u16 {
+    use x86_64::instructions::port::Port;
+    unsafe {
+        Port::<u16>::new(VBE_INDEX).write(i);
+        Port::<u16>::new(VBE_DATA).read()
+    }
+}
+
+fn vbe_set(i: u16, v: u16) {
+    use x86_64::instructions::port::Port;
+    unsafe {
+        Port::<u16>::new(VBE_INDEX).write(i);
+        Port::<u16>::new(VBE_DATA).write(v);
+    }
+}
+
+pub fn vbe_present() -> bool {
+    VBE.lock().is_some()
+}
+
+/// Look for graphics Solon can switch modes on itself: QEMU's standard VGA (1234:1111) or
+/// VirtualBox's (80EE:BEEF), answering on the Bochs VBE registers.
+pub fn init_driver() {
+    let Some(dev) = crate::pci::scan().into_iter().find(|d| d.class == 3 && matches!((d.vendor, d.device), (0x1234, 0x1111) | (0x80EE, 0xBEEF))) else { return };
+    let id = vbe_reg(0);
+    if !(0xB0C0..=0xB0CF).contains(&id) {
+        kprintln!("display: graphics {:04x}:{:04x} without Bochs VBE ({:#x})", dev.vendor, dev.device, id);
+        return;
+    }
+    let Some((phys, bar)) = dev.bar(0) else { return };
+    // Newer versions tell the memory size (in 64 KiB); otherwise the BAR's size.
+    let mem64k = if id >= 0xB0C5 { vbe_reg(0x0A) as u64 } else { 0 };
+    let size = if mem64k > 0 { mem64k * 65536 } else { bar }.min(bar.max(16 << 20));
+    let virt = crate::memory::map_framebuffer(phys, size);
+    kprintln!("display: Bochs VBE {:#x}, {} MiB video memory: resolution changes need no restart", id, size >> 20);
+    *VBE.lock() = Some(Vbe { phys, size, virt });
+}
+
+/// Switch the card to w x h at 32 bits; returns where the picture now is and its row length.
+pub fn vbe_switch(w: u32, h: u32) -> Option<(*mut u8, usize)> {
+    let g = VBE.lock();
+    let v = g.as_ref()?;
+    if w as u64 * h as u64 * 4 > v.size || w > 0xFFFF || h > 0xFFFF {
+        return None;
+    }
+    vbe_set(4, 0); // off while changing
+    vbe_set(3, 32);
+    vbe_set(1, w as u16);
+    vbe_set(2, h as u16);
+    vbe_set(6, w as u16); // virtual width and height
+    vbe_set(7, h as u16);
+    vbe_set(8, 0);
+    vbe_set(9, 0);
+    vbe_set(4, 0x01 | 0x40); // enabled, linear framebuffer
+    if vbe_reg(1) != w as u16 || vbe_reg(2) != h as u16 {
+        return None;
+    }
+    let _ = v.phys;
+    let mut info = INFO.lock();
+    if let Some(i) = info.as_mut() {
+        i.framebuffer = (w, h);
+    }
+    Some((v.virt as *mut u8, w as usize * 4))
+}
+
+/// The desktop is now drawn at this resolution.
+pub fn set_current(m: (u32, u32)) {
+    if let Some(i) = INFO.lock().as_mut() {
+        i.current = m;
+    }
 }
 
 pub static INFO: Mutex<Option<DisplayInfo>> = Mutex::new(None);
@@ -33,7 +158,7 @@ pub fn init(modes: &[(u32, u32, u16)], current: (u32, u32), edid: Option<&[u8]>)
     m.push(current);
     m.sort_by(|a, b| (b.0 * b.1, b.0).cmp(&(a.0 * a.1, a.0)));
     m.dedup();
-    let mut info = DisplayInfo { modes: m, current, ..DisplayInfo::default() };
+    let mut info = DisplayInfo { modes: m, current, boot: current, framebuffer: current, ..DisplayInfo::default() };
     if let Some(e) = edid {
         parse_edid(e, &mut info);
     }

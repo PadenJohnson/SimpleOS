@@ -1,4 +1,6 @@
-//! Minimal 32-bpp linear framebuffer access.
+//! Minimal 32-bpp linear framebuffer access, and putting the desktop on it: as is, enlarged
+//! by whole or half steps (text size), or smoothly scaled into part of the screen (a lower
+//! resolution shown the way a monitor would, with black bars if its shape differs).
 
 use core::ptr;
 use limine::framebuffer::Framebuffer;
@@ -30,6 +32,88 @@ impl Screen {
             g_shift: fb.green_mask_shift(),
             b_shift: fb.blue_mask_shift(),
         })
+    }
+
+    /// The graphics card switched to another mode (Bochs VBE): new address, size and row length.
+    pub fn set_mode(&mut self, base: *mut u8, width: usize, height: usize, pitch: usize) {
+        self.base = base;
+        self.width = width;
+        self.height = height;
+        self.pitch = pitch;
+    }
+
+    /// Paint the whole screen black (around a scaled desktop).
+    pub fn clear(&self) {
+        for row in 0..self.height {
+            let dst = unsafe { self.base.add(row * self.pitch) as *mut u32 };
+            for i in 0..self.width {
+                unsafe { ptr::write_volatile(dst.add(i), 0) };
+            }
+        }
+    }
+
+    /// Put the desktop canvas on the screen in `dst` (x, y, w, h): directly when it fills the
+    /// screen at a whole/half text scale, otherwise smoothly scaled.
+    pub fn present(&self, c: &crate::gfx::Canvas, scale: u32, dst: (usize, usize, usize, usize)) {
+        let full = dst == (0, 0, self.width, self.height);
+        if full && c.w * scale as usize / 2 == self.width && c.h * scale as usize / 2 == self.height {
+            self.blit_scaled(c, scale)
+        } else {
+            self.blit_fit(c, dst)
+        }
+    }
+
+    /// Scale a canvas into `dst` with bilinear filtering (what a monitor does with a resolution
+    /// that isn't its own).
+    pub fn blit_fit(&self, c: &crate::gfx::Canvas, dst: (usize, usize, usize, usize)) {
+        let (dx, dy, dw, dh) = dst;
+        let (dw, dh) = (dw.min(self.width.saturating_sub(dx)), dh.min(self.height.saturating_sub(dy)));
+        if dw == 0 || dh == 0 || c.w == 0 || c.h == 0 {
+            return;
+        }
+        let native = self.r_shift == 16 && self.g_shift == 8 && self.b_shift == 0;
+        // Source position of each output column: index and weight of the next one (0..256).
+        let xmap: alloc::vec::Vec<(usize, u32)> = (0..dw)
+            .map(|x| {
+                let f = (((x as u64 * 2 + 1) * c.w as u64 * 256) / (dw as u64 * 2)).saturating_sub(128);
+                (((f >> 8) as usize).min(c.w - 1), (f & 255) as u32)
+            })
+            .collect();
+        let lerp = |a: u32, b: u32, w: u32| -> u32 {
+            let rb = ((a & 0xFF00FF) * (256 - w) + (b & 0xFF00FF) * w) >> 8;
+            let g = ((a & 0x00FF00) * (256 - w) + (b & 0x00FF00) * w) >> 8;
+            (rb & 0xFF00FF) | (g & 0x00FF00)
+        };
+        let hrow = |sy: usize, out: &mut [u32]| {
+            let src = &c.px[sy * c.w..(sy + 1) * c.w];
+            for (o, &(i, w)) in out.iter_mut().zip(&xmap) {
+                *o = if w == 0 || i + 1 >= c.w { src[i] } else { lerp(src[i], src[i + 1], w) };
+            }
+        };
+        let mut a = alloc::vec![0u32; dw];
+        let mut b = alloc::vec![0u32; dw];
+        let mut line = alloc::vec![0u32; dw];
+        let mut have = (usize::MAX, usize::MAX);
+        for row in 0..dh {
+            let f = (((row as u64 * 2 + 1) * c.h as u64 * 256) / (dh as u64 * 2)).saturating_sub(128);
+            let (y0, wy) = (((f >> 8) as usize).min(c.h - 1), (f & 255) as u32);
+            let y1 = (y0 + 1).min(c.h - 1);
+            if have != (y0, y1) {
+                if have.1 == y0 {
+                    core::mem::swap(&mut a, &mut b);
+                } else {
+                    hrow(y0, &mut a);
+                }
+                hrow(y1, &mut b);
+                have = (y0, y1);
+            }
+            for i in 0..dw {
+                let p = if wy == 0 { a[i] } else { lerp(a[i], b[i], wy) };
+                line[i] = if native { p } else { self.pack(Rgb((p >> 16) as u8, (p >> 8) as u8, p as u8)) };
+            }
+            let d = unsafe { self.base.add((dy + row) * self.pitch + dx * 4) as *mut u32 };
+            unsafe { ptr::copy_nonoverlapping(line.as_ptr(), d, dw) };
+        }
     }
 
     /// Let the crash screen draw here too.

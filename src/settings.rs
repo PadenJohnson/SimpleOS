@@ -48,12 +48,14 @@ pub struct Settings {
     pub shuffle: bool,
     /// Spelling: index into spell::CHOICES (English (US), English (UK), off).
     pub spelling: usize,
+    /// The resolution the desktop is shown at; (0, 0) = the mode the screen started in.
+    pub resolution: (u32, u32),
 }
 
 impl Settings {
     /// First-boot defaults: bigger text on very high-resolution screens.
     pub fn defaults(screen_w: usize, screen_h: usize) -> Settings {
-        let mut s = Settings { background: crate::wallpaper::DEFAULT, size: 0, clock24: false, show_date: true, mouse: 1, install_notice: false, saver: 0, saver_wait: 1, slide_time: 1, shuffle: true, spelling: 0 };
+        let mut s = Settings { background: crate::wallpaper::DEFAULT, size: 0, clock24: false, show_date: true, mouse: 1, install_notice: false, saver: 0, saver_wait: 1, slide_time: 1, shuffle: true, spelling: 0, resolution: (0, 0) };
         for i in (0..SIZES.len()).rev() {
             if screen_w >= 2400 && s.size_fits(i, screen_w, screen_h) {
                 s.size = i;
@@ -75,8 +77,8 @@ impl Settings {
 
     pub fn to_text(&self) -> String {
         format!(
-            "background={}\nsize={}\nclock24={}\nshow_date={}\nmouse={}\ninstall_notice={}\nsaver={}\nsaver_wait={}\nslide_time={}\nshuffle={}\nspelling={}\n",
-            self.background, self.size, self.clock24 as u8, self.show_date as u8, self.mouse, self.install_notice as u8, self.saver, self.saver_wait, self.slide_time, self.shuffle as u8, self.spelling
+            "background={}\nsize={}\nclock24={}\nshow_date={}\nmouse={}\ninstall_notice={}\nsaver={}\nsaver_wait={}\nslide_time={}\nshuffle={}\nspelling={}\nresolution={}x{}\n",
+            self.background, self.size, self.clock24 as u8, self.show_date as u8, self.mouse, self.install_notice as u8, self.saver, self.saver_wait, self.slide_time, self.shuffle as u8, self.spelling, self.resolution.0, self.resolution.1
         )
     }
 
@@ -85,6 +87,13 @@ impl Settings {
         for line in text.lines() {
             let Some((k, v)) = line.split_once('=') else { continue };
             let n: usize = v.trim().parse().unwrap_or(usize::MAX);
+            if k.trim() == "resolution" {
+                let mut it = v.trim().split('x').map(|p| p.trim().parse::<u32>().unwrap_or(0));
+                if let (Some(rw), Some(rh)) = (it.next(), it.next()) {
+                    s.resolution = (rw, rh);
+                }
+                continue;
+            }
             match k.trim() {
                 "background" if n < crate::wallpaper::COUNT => s.background = n,
                 "size" if n < SIZES.len() => s.size = n,

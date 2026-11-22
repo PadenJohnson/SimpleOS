@@ -172,7 +172,7 @@ extern "C" fn kmain() -> ! {
         .get_response()
         .and_then(|resp| resp.framebuffers().next())
         .and_then(|fb| Screen::new(&fb));
-    let Some(screen) = screen else {
+    let Some(mut screen) = screen else {
         kprintln!("solon: no usable 32-bpp framebuffer");
         halt();
     };
@@ -183,6 +183,10 @@ extern "C" fn kmain() -> ! {
     if let Some(fb) = FRAMEBUFFER_REQUEST.get_response().and_then(|resp| resp.framebuffers().next()) {
         let modes: alloc::vec::Vec<(u32, u32, u16)> = fb.modes().unwrap_or(&[]).iter().map(|m| (m.width as u32, m.height as u32, m.bpp)).collect();
         display::init(&modes, (w as u32, h as u32), fb.edid());
+    }
+    // Boot option "novbe": leave QEMU's graphics alone, as on a real PC (for testing scaling).
+    if !EXECUTABLE_CMDLINE_REQUEST.get_response().and_then(|r| r.cmdline().to_str().ok()).is_some_and(|c| c.split_whitespace().any(|w| w == "novbe")) {
+        display::init_driver();
     }
 
     // Which disk did we boot from? (Its GPT disk ID; lets Solon keep its library on its own stick.)
@@ -264,7 +268,7 @@ extern "C" fn kmain() -> ! {
     });
 
     // Settings (saved in the library), then the display scale they ask for.
-    let settings = match storage.read_root_file(&mut usb, "Settings.txt") {
+    let mut settings = match storage.read_root_file(&mut usb, "Settings.txt") {
         Some(t) => Settings::from_text(core::str::from_utf8(&t).unwrap_or(""), w, h),
         None => Settings::defaults(w, h),
     };
@@ -274,9 +278,13 @@ extern "C" fn kmain() -> ! {
     if let Some(t) = storage.read_root_file(&mut usb, "Dictionary.txt") {
         spell::load_user(core::str::from_utf8(&t).unwrap_or(""));
     }
+    // The resolution to show the desktop at (switching the card, or scaled up).
+    let mut view = apply_view(&mut screen, (w, h), settings.resolution);
+    if !settings.size_fits(settings.size, view.res.0, view.res.1) {
+        settings.size = 0;
+    }
     let mut scale = settings.scale();
-    let logical = |s: u32| (w * 2 / s as usize, h * 2 / s as usize);
-    let (mut lw, mut lh) = logical(scale);
+    let (mut lw, mut lh) = view.logical(scale);
     ps2::set_bounds(lw, lh);
 
     // Photos on the boot drive (loaded into memory by the bootloader); decoded in the background.
@@ -304,20 +312,20 @@ extern "C" fn kmain() -> ! {
     }
 
     let mut canvas = Canvas::new(lw, lh);
-    let mut desktop = Desktop::new(lw, lh, photos, usb, storage, settings, (w, h));
+    let mut desktop = Desktop::new(lw, lh, photos, usb, storage, settings, view.res);
     desktop.show_library();
     let (hh, mm, _) = rtc::time();
     desktop.set_clock(hh, mm);
     desktop.draw(&mut canvas);
-    screen.blit_scaled(&canvas, scale);
+    screen.present(&canvas, scale, view.dst);
 
     // The mouse moves in desktop (logical) pixels; the cursor is drawn on the real screen.
     let mut cursor = Cursor::new();
-    cursor.set_zoom(if scale >= 3 { 2 } else { 1 });
-    let to_screen = |v: i32, s: u32| v as usize * s as usize / 2;
+    cursor.set_zoom(view.cursor_zoom(lw));
     let (mut mx, mut my) = ps2::mouse_pos();
-    cursor.show_at(&screen, to_screen(mx, scale), to_screen(my, scale));
-    kprintln!("solon: display {}x{}, desktop {}x{} (scale {}%)", w, h, lw, lh, scale * 50);
+    let (cx, cy) = view.to_screen(mx, my, lw, lh);
+    cursor.show_at(&screen, cx, cy);
+    kprintln!("solon: display {}x{}, desktop {}x{} (scale {}%)", view.res.0, view.res.1, lw, lh, scale * 50);
     kprintln!("solon: desktop ready");
     let crash_test = EXECUTABLE_CMDLINE_REQUEST
         .get_response()
@@ -378,27 +386,30 @@ extern "C" fn kmain() -> ! {
 
         match desktop.take_request() {
             Some(PowerRequest::Rescale) => {
-                // Text size changed: draw the desktop at a new logical size.
-                scale = desktop.settings().scale();
-                (lw, lh) = logical(scale);
+                // Text size or resolution changed: draw the desktop at a new size.
+                cursor.hide(&screen);
+                let s = desktop.settings();
+                view = apply_view(&mut screen, (w, h), s.resolution);
+                scale = s.scale();
+                (lw, lh) = view.logical(scale);
                 canvas = Canvas::new(lw, lh);
                 desktop.resize(lw, lh);
+                desktop.set_screen(view.res);
                 ps2::set_bounds(lw, lh);
                 (mx, my) = ps2::mouse_pos();
-                cursor.hide(&screen);
-                cursor.set_zoom(if scale >= 3 { 2 } else { 1 });
-                kprintln!("solon: desktop {}x{} (scale {}%)", lw, lh, scale * 50);
+                cursor.set_zoom(view.cursor_zoom(lw));
+                kprintln!("solon: display {}x{}, desktop {}x{} (scale {}%)", view.res.0, view.res.1, lw, lh, scale * 50);
                 redraw = true;
             }
             Some(req @ (PowerRequest::ShutDown | PowerRequest::Restart)) => {
                 cursor.hide(&screen);
                 let shutting = req == PowerRequest::ShutDown;
-                message(&mut canvas, &screen, scale, if shutting { "Turning off..." } else { "Restarting..." }, "");
+                message(&mut canvas, &screen, scale, view.dst, if shutting { "Turning off..." } else { "Restarting..." }, "");
                 if shutting {
                     desktop.prepare_power_off();
                     power::shutdown(acpi.as_ref());
                     // Still here: the PC didn't switch itself off.
-                    message(&mut canvas, &screen, scale, "It's now safe to turn off your computer.", "Hold the power button for a few seconds.");
+                    message(&mut canvas, &screen, scale, view.dst, "It's now safe to turn off your computer.", "Hold the power button for a few seconds.");
                     halt();
                 }
                 power::restart(acpi.as_ref());
@@ -409,24 +420,79 @@ extern "C" fn kmain() -> ! {
         if redraw {
             desktop.draw(&mut canvas);
             cursor.hide(&screen);
-            screen.blit_scaled(&canvas, scale);
+            screen.present(&canvas, scale, view.dst);
             if !desktop.hide_pointer() {
-                cursor.show_at(&screen, to_screen(mx, scale), to_screen(my, scale));
+                let (cx, cy) = view.to_screen(mx, my, lw, lh);
+                cursor.show_at(&screen, cx, cy);
             }
         } else if moved && !desktop.hide_pointer() {
-            cursor.show_at(&screen, to_screen(mx, scale), to_screen(my, scale));
+            let (cx, cy) = view.to_screen(mx, my, lw, lh);
+            cursor.show_at(&screen, cx, cy);
         }
     }
 }
 
+/// Where the desktop goes on the screen.
+struct View {
+    /// The resolution it's shown at.
+    res: (usize, usize),
+    /// Where on the screen (x, y, w, h): all of it, or a scaled-up part with black bars.
+    dst: (usize, usize, usize, usize),
+}
+
+impl View {
+    /// The desktop's size in its own (text-size scaled) pixels.
+    fn logical(&self, scale: u32) -> (usize, usize) {
+        (self.res.0 * 2 / scale as usize, self.res.1 * 2 / scale as usize)
+    }
+    fn to_screen(&self, x: i32, y: i32, lw: usize, lh: usize) -> (usize, usize) {
+        let (dx, dy, dw, dh) = self.dst;
+        (dx + x.max(0) as usize * dw / lw.max(1), dy + y.max(0) as usize * dh / lh.max(1))
+    }
+    /// A bigger pointer when the desktop is enlarged 1.5 times or more.
+    fn cursor_zoom(&self, lw: usize) -> usize {
+        if self.dst.2 * 2 >= lw * 3 {
+            2
+        } else {
+            1
+        }
+    }
+}
+
+/// Show the desktop at resolution `want` ((0, 0) = the mode the screen started in, `boot`):
+/// switch the graphics card if Solon can, else scale it up from the start-up mode.
+fn apply_view(screen: &mut Screen, boot: (usize, usize), want: (u32, u32)) -> View {
+    let target = if want == (0, 0) { boot } else { (want.0 as usize, want.1 as usize) };
+    if display::vbe_present() && (screen.width, screen.height) != target {
+        match display::vbe_switch(target.0 as u32, target.1 as u32) {
+            Some((base, pitch)) => {
+                screen.set_mode(base, target.0, target.1, pitch);
+                screen.register_for_crashes();
+                kprintln!("display: switched to {}x{}", target.0, target.1);
+            }
+            None => kprintln!("display: couldn't switch to {}x{}", target.0, target.1),
+        }
+    }
+    let (fw, fh) = (screen.width, screen.height);
+    let res = if target.0 <= fw && target.1 <= fh && display::usable((target.0 as u32, target.1 as u32)) { target } else { (fw, fh) };
+    display::set_current((res.0 as u32, res.1 as u32));
+    if res == (fw, fh) {
+        return View { res, dst: (0, 0, fw, fh) };
+    }
+    // As big as fits with the same shape, in the middle; black around it.
+    let (dw, dh) = if fw * res.1 <= fh * res.0 { (fw, res.1 * fw / res.0) } else { (res.0 * fh / res.1, fh) };
+    screen.clear();
+    View { res, dst: ((fw - dw) / 2, (fh - dh) / 2, dw, dh) }
+}
+
 /// A full-screen message (shutting down, restarting...).
-fn message(c: &mut Canvas, screen: &Screen, scale: u32, title: &str, line: &str) {
+fn message(c: &mut Canvas, screen: &Screen, scale: u32, dst: (usize, usize, usize, usize), title: &str, line: &str) {
     let (w, h) = (c.w as i32, c.h as i32);
     c.reset_clip();
     c.fill_rect(0, 0, w, h, gfx::rgb(14, 20, 28));
     c.text_centered(w / 2, h / 2 - 30, title, gfx::Size::Large, true, gfx::rgb(240, 242, 245));
     c.text_centered(w / 2, h / 2 + 20, line, gfx::Size::Small, false, gfx::rgb(170, 180, 190));
-    screen.blit_scaled(c, scale);
+    screen.present(c, scale, dst);
 }
 
 fn halt() -> ! {

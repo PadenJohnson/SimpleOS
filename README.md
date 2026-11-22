@@ -104,9 +104,12 @@ nothing to download.
 - Settings, in sections with a sidebar: Appearance (background, text and icon size: Normal /
   Large / Extra large, the whole desktop scaled, which also helps on 4K screens), Date & time
   (12/24-hour clock, the date next to the clock, and setting the date on a calendar and the
-  time from drop-down lists), Display (screen resolution from a drop-down list of every mode
-  the PC offers; Solon restarts in it and asks "Keep this resolution?", going back by itself
-  after 15 seconds; the monitor's name and refresh rate; the screensaver), Mouse (speed),
+  time from drop-down lists), Display (screen resolution from a drop-down list, changed at once
+  without a restart: in virtual machines (QEMU, VirtualBox) the graphics switch modes; on
+  other PCs lower resolutions are drawn at their size and scaled smoothly to fill the screen,
+  as a monitor does; only one bigger than the screen's start-up mode needs a restart, after
+  which Solon asks "Keep this resolution?" and goes back by itself after 15 seconds; the
+  monitor's name and refresh rate; the screensaver), Mouse (speed),
   Spelling (language, and the words you added, with Remove) and About. Saved in the library.
   Right-click the desktop for quick ways to the background, display, screensaver, date and
   time, text size and spelling settings.
@@ -185,7 +188,8 @@ booting takes about 25 seconds) use `./run.sh` and `./test.sh`, which need `qemu
 `test.ps1` options include `-Usb` (keyboard, mouse, read-only or writable USB drives, hot-plugging), `-Internal`
 (NVMe/SATA disk images), `-BootStick` / `-LegacyBios` (boot from a USB image like a real PC)
 and `-Cmdline "testprinter=pcl"` (or ipp, urf, pclmono, pclxl, ps) (a fake printer whose jobs are captured for checking) or
-`-Cmdline "testphone"` (a pretend phone with photos, a video and a document), `-Sound` (a sound
+`-Cmdline "testphone"` (a pretend phone with photos, a video and a document), `-Cmdline "novbe"`
+(leave QEMU's graphics alone, so resolution changes are scaled as on a real PC), `-Sound` (a sound
 card whose output is saved to `test-out\sound.wav`; with `-Cmdline "soundtest"` it plays a tone). `test.sh` takes the same
 options, written either way: `--usb kbd mouse` or `-Usb kbd mouse`.
 

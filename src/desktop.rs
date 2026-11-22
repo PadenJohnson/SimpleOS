@@ -494,6 +494,11 @@ impl Desktop {
     }
 
     /// The desktop is now drawn at a new (scaled) size.
+    /// The resolution the desktop is now shown at.
+    pub fn set_screen(&mut self, res: (usize, usize)) {
+        self.screen = res;
+    }
+
     pub fn resize(&mut self, w: usize, h: usize) {
         self.w = w as i32;
         self.h = h as i32;
@@ -505,7 +510,7 @@ impl Desktop {
         self.settings = n;
         crate::ps2::set_speed(settings::MOUSE[n.mouse].1);
         crate::spell::set_mode(n.spelling);
-        if n.size != old.size {
+        if n.size != old.size || n.resolution != old.resolution {
             self.request = Some(PowerRequest::Rescale);
         }
         kprintln!("settings: {:?}", n);
@@ -2382,6 +2387,19 @@ impl Desktop {
                     }
                     SettingsAction::Screensaver => {
                         self.open(App::PhotoFrame);
+                        redraw = true;
+                    }
+                    SettingsAction::Resolution(Some(m)) if crate::display::change_for(m) != crate::display::Change::Restart => {
+                        // At once: the card switches, or the desktop is scaled to the screen.
+                        let boot = crate::display::INFO.lock().as_ref().map(|i| i.boot).unwrap_or((0, 0));
+                        let mut n = self.settings;
+                        n.resolution = if m == boot { (0, 0) } else { m };
+                        if !n.size_fits(n.size, m.0 as usize, m.1 as usize) {
+                            n.size = 0;
+                        }
+                        kprintln!("display: {}x{} ({:?})", m.0, m.1, crate::display::change_for(m));
+                        self.apply_settings(n);
+                        self.toast = Some((format!("Resolution {} x {}", m.0, m.1), now + 3 * HZ));
                         redraw = true;
                     }
                     SettingsAction::Resolution(m) => {

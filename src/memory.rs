@@ -102,8 +102,18 @@ unsafe impl FrameAllocator<Size4KiB> for HeapFrames {
     }
 }
 
+/// Map a graphics card's video memory (cached, for fast drawing; used for virtual machines'
+/// cards, which don't need write-combining). Returns the virtual address.
+pub fn map_framebuffer(phys: u64, size: u64) -> u64 {
+    map_with(phys, size, PageTableFlags::PRESENT | PageTableFlags::WRITABLE)
+}
+
 /// Map `size` bytes of device registers at physical address `phys`. Returns the virtual address.
 pub fn map_mmio(phys: u64, size: u64) -> u64 {
+    map_with(phys, size, PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE | PageTableFlags::WRITE_THROUGH)
+}
+
+fn map_with(phys: u64, size: u64, flags: PageTableFlags) -> u64 {
     let hhdm = HHDM.load(Relaxed);
     let first = phys & !0xFFF;
     let pages = ((phys + size + 0xFFF) & !0xFFF) / 4096 - first / 4096;
@@ -114,10 +124,6 @@ pub fn map_mmio(phys: u64, size: u64) -> u64 {
     let (l4_frame, _) = Cr3::read();
     let l4 = unsafe { &mut *((l4_frame.start_address().as_u64() + hhdm) as *mut PageTable) };
     let mut mapper = unsafe { OffsetPageTable::new(l4, VirtAddr::new(hhdm)) };
-    let flags = PageTableFlags::PRESENT
-        | PageTableFlags::WRITABLE
-        | PageTableFlags::NO_CACHE
-        | PageTableFlags::WRITE_THROUGH;
     for i in 0..pages {
         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt_base + i * 4096));
         let frame = PhysFrame::containing_address(PhysAddr::new(first + i * 4096));
