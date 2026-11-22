@@ -303,27 +303,28 @@ pub(crate) fn video_codec(f: &[u8]) -> VCodec {
 }
 
 fn audio_codec(f: &[u8]) -> ACodec {
-    let tag = le16(f, 0);
+    let mut tag = le16(f, 0);
+    let extensible = tag == 0xFFFE;
+    if extensible && f.len() >= 26 {
+        // WAVE_FORMAT_EXTENSIBLE (used for more than two channels): the real format is in
+        // the sub-format GUID.
+        tag = le16(f, 24);
+    }
     let bits = le16(f, 14);
     let extra = if f.len() >= 18 { f.get(18..(18 + le16(f, 16) as usize).min(f.len())).unwrap_or(&[]).to_vec() } else { Vec::new() };
     match tag {
         1 => ACodec::Pcm { bits, big_endian: false, float: false },
         3 => ACodec::Pcm { bits, big_endian: false, float: true },
-        0xFFFE if f.len() >= 26 => match le16(f, 24) {
-            1 => ACodec::Pcm { bits, big_endian: false, float: false },
-            3 => ACodec::Pcm { bits, big_endian: false, float: true },
-            _ => ACodec::Other(String::from("unknown sound")),
-        },
         0x50 | 0x55 => ACodec::MpegAudio,
         0x2000 => ACodec::Ac3,
         0xFF | 0x1610 | 0x706D | 0x4143 => {
-            if extra.len() >= 2 {
+            if extra.len() >= 2 && !extensible {
                 ACodec::Aac { asc: extra }
             } else {
                 ACodec::AacAdts
             }
         }
-        0x2001 => ACodec::Other(String::from("DTS")),
+        0x2001 => ACodec::Dts,
         0x160..=0x163 => ACodec::Other(String::from("Windows Media Audio")),
         _ => ACodec::Other(alloc::format!("sound format {:#x}", tag)),
     }

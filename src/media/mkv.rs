@@ -583,7 +583,7 @@ fn audio_codec(id: &str, private: &[u8], rate: u32, channels: u16, bits: u16) ->
         "A_PCM/FLOAT/IEEE" => ACodec::Pcm { bits, big_endian: false, float: true },
         "A_VORBIS" => ACodec::Vorbis { headers: private.to_vec() },
         "A_OPUS" => ACodec::Opus { head: private.to_vec() },
-        "A_DTS" => ACodec::Other(String::from("DTS")),
+        "A_DTS" => ACodec::Dts,
         "A_FLAC" => ACodec::Other(String::from("FLAC")),
         "A_TRUEHD" => ACodec::Other(String::from("Dolby TrueHD")),
         "A_MS/ACM" => ACodec::Other(String::from("Windows sound format")),

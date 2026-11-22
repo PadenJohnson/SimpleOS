@@ -15,6 +15,7 @@ pub mod ac3tab;
 pub mod amr;
 pub mod avi;
 pub mod dec;
+pub mod dts;
 pub mod engine;
 pub mod es;
 pub mod mkv;
@@ -81,6 +82,8 @@ pub enum ACodec {
     Opus { head: Vec<u8> },
     /// AMR speech (old phones); `wide` = AMR-WB (16 kHz).
     Amr { wide: bool },
+    /// DTS (core; DTS-HD streams play their core).
+    Dts,
     Other(String),
 }
 
@@ -113,6 +116,7 @@ impl ACodec {
             ACodec::Opus { .. } => "Opus",
             ACodec::Amr { wide: false } => "AMR",
             ACodec::Amr { wide: true } => "AMR-WB",
+            ACodec::Dts => "DTS",
             ACodec::Other(s) => return s.clone(),
         })
     }

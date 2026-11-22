@@ -128,7 +128,7 @@ impl PsDemux {
                         let body = &u[hl..];
                         match body.first() {
                             Some(&s @ 0x80..=0x87) => asid = Some((Sid { id, sub: Some(s) }, ACodec::Ac3, 48000, 2)),
-                            Some(&s @ 0x88..=0x8F) => asid = Some((Sid { id, sub: Some(s) }, ACodec::Other(String::from("DTS")), 48000, 2)),
+                            Some(&s @ 0x88..=0x8F) => asid = Some((Sid { id, sub: Some(s) }, ACodec::Dts, 48000, 2)),
                             Some(&s @ 0xA0..=0xA7) if body.len() > 6 => {
                                 let f = body[5];
                                 let bits = [16, 20, 24, 0][(f >> 6) as usize];

@@ -198,6 +198,7 @@ impl TsDemux {
             let (_, hl) = pes_header(pl)?;
             let b = pl.get(hl..hl + 6)?;
             return match (b[0], b[1]) {
+                (0x7F, 0xFE) if b[2] == 0x80 && b[3] == 0x01 => Some(ACodec::Dts),
                 (0x0B, 0x77) => Some(if b[5] >> 3 > 10 { ACodec::Eac3 } else { ACodec::Ac3 }),
                 (0xFF, x) if x & 0xF6 == 0xF0 => Some(ACodec::AacAdts),
                 (0xFF, x) if x & 0xE0 == 0xE0 && x & 0x06 != 0 => Some(ACodec::MpegAudio),
@@ -440,11 +441,12 @@ fn audio_type(ty: u8, desc: &[u8]) -> Option<ACodec> {
         0x11 => ACodec::Other(String::from("AAC (LATM)")),
         0x81 => ACodec::Ac3,
         0x87 => ACodec::Eac3,
-        0x82 | 0x85 | 0x86 => ACodec::Other(String::from("DTS")),
+        0x82 | 0x85 | 0x86 => ACodec::Dts,
         0x80 => ACodec::Other(String::from("Blu-ray PCM")),
         0x06 if has_desc(desc, 0x6A) || registration(desc) == Some(*b"AC-3") => ACodec::Ac3,
         0x06 if has_desc(desc, 0x7A) || registration(desc) == Some(*b"EAC3") => ACodec::Eac3,
-        0x06 if has_desc(desc, 0x7B) => ACodec::Other(String::from("DTS")),
+        0x06 if has_desc(desc, 0x7B) => ACodec::Dts,
+        0x06 if matches!(registration(desc), Some(r) if &r[..3] == b"DTS") => ACodec::Dts,
         _ => return None,
     })
 }

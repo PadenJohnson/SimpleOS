@@ -82,6 +82,7 @@ pub fn audio(info: &AudioInfo) -> Result<Box<dyn AudioDec>, String> {
         ACodec::Vorbis { headers } => Ok(Box::new(super::vorbis::VorbisDec::new(headers))),
         ACodec::Opus { head } => Ok(Box::new(super::opus::OpusDec::new(head))),
         &ACodec::Amr { wide } => Ok(Box::new(super::amr::AmrDec::new(wide))),
+        ACodec::Dts => Ok(Box::new(super::dts::DtsDec::new())),
         &ACodec::Pcm { bits, big_endian, float } => Ok(Box::new(PcmDec { bits, big_endian, float, channels: info.channels.max(1), rate: info.rate.max(1) })),
         other => Err(format!("The sound is {}, which Solon can't play yet", other.name())),
     }
