@@ -50,7 +50,7 @@ mod media;
 
 /// The kernel's module layout, for `crate::video::...` paths.
 mod video {
-    pub use super::{aac, avi, h264d, mp4read, mp4src};
+    pub use super::{aac, avi, bits, h264d, mp4read, mp4src};
 }
 
 use std::fs::File;
@@ -236,9 +236,13 @@ fn audio(path: &str, reference: &str) {
     println!("decoded {:.2} s of sound in {:.2} s", total as f64 / 48000.0, t0.elapsed().as_secs_f64());
     // Signal to noise, allowing a small time offset (resampling and decoder delay differ).
     let mut best = (f64::MIN, 0i64);
-    for shift in -2400i64..=2400 {
-        if shift % 8 != 0 {
-            continue;
+    let mut shifts: Vec<i64> = (-2400i64..=2400).step_by(8).collect();
+    let mut refine = true;
+    while let Some(shift) = shifts.pop() {
+        if shifts.is_empty() && refine {
+            refine = false;
+            let b = best.1;
+            shifts.extend(b - 8..=b + 8);
         }
         let (mut sig, mut noise) = (0f64, 0f64);
         for i in (4800..total.saturating_sub(4800)).step_by(7) {

@@ -331,8 +331,16 @@ impl Engine {
             let i = p >> 8;
             let f = (p & 255) as i32;
             for ch in 0..2usize {
-                let s = |j: i64| if j >= 0 && j < frames { self.abuf[j as usize * 2 + ch] as i32 } else { 0 };
-                out.push(((s(i) * (256 - f) + s(i + 1) * f) >> 8) as i16);
+                let s = |j: i64| if j >= 0 && j < frames { self.abuf[j as usize * 2 + ch] as i64 } else { 0 };
+                // Cubic (Catmull-Rom) interpolation: much cleaner than a straight line when
+                // going up from 22 or 16 kHz.
+                let (p0, p1, p2, p3) = (s(i - 1), s(i), s(i + 1), s(i + 2));
+                let t = f as i64; // 0..255
+                let a = -p0 + 3 * p1 - 3 * p2 + p3;
+                let b = 2 * p0 - 5 * p1 + 4 * p2 - p3;
+                let c = p2 - p0;
+                let v = ((((a * t >> 8) + b) * t >> 8) + c) * t / 512 + p1;
+                out.push(v.clamp(-32768, 32767) as i16);
             }
         }
         // Drop what's been played.

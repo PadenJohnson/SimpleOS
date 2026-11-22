@@ -10,12 +10,16 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+pub mod ac3;
+pub mod ac3tab;
 pub mod avi;
 pub mod dec;
 pub mod engine;
 pub mod es;
 pub mod mkv;
 pub mod mp4;
+pub mod mpa;
+pub mod mpatab;
 pub mod mpegps;
 pub mod mpegts;
 

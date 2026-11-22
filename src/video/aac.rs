@@ -56,7 +56,7 @@ impl Book {
 /// y = [u[m/2..m], -reverse(u), -u[0..m/2]] (times 2/n). The DCT-IV is done with an
 /// n/4-point complex FFT: z_j = (X[2j] - i X[m-1-2j]) e^{i pi j/m}, S = sum z_j e^{+2 pi i pj/l},
 /// w_p = S_p e^{i pi (p + 1/4)/m}, u[2p] = Re w_p, u[m-1-2p] = Im w_p.
-struct Imdct {
+pub(crate) struct Imdct {
     n: usize,
     pre: Vec<(f32, f32)>,
     post: Vec<(f32, f32)>,
@@ -66,7 +66,7 @@ struct Imdct {
 }
 
 impl Imdct {
-    fn new(n: usize) -> Imdct {
+    pub(crate) fn new(n: usize) -> Imdct {
         let (m, l) = (n / 2, n / 4);
         let pre = (0..l).map(|j| {
             let a = PI * j as f32 / m as f32;
@@ -106,7 +106,7 @@ impl Imdct {
         }
     }
 
-    fn run(&self, input: &[f32], out: &mut [f32]) {
+    pub(crate) fn run(&self, input: &[f32], out: &mut [f32]) {
         let (n, m, l) = (self.n, self.n / 2, self.n / 4);
         let mut re = vec![0f32; l];
         let mut im = vec![0f32; l];
@@ -170,7 +170,7 @@ fn bessel_i0(x: f32) -> f32 {
 }
 
 /// Rising half of a KBD window of length n (n/2 values).
-fn kbd(n: usize, alpha: f32) -> Vec<f32> {
+pub(crate) fn kbd(n: usize, alpha: f32) -> Vec<f32> {
     let half = n / 2;
     let kernel: Vec<f32> = (0..=half)
         .map(|j| {
