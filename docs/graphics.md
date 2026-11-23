@@ -101,6 +101,17 @@ without NVIDIA's signed firmware, so screen modes and several monitors are possi
      PRAMIN window at 256 MiB gave 0xbad0acXX instead of what was written, so the engine had
      nothing to look the picture's handle up in. Video memory is now tested and written
      through BAR1 instead, and the log says where PRAMIN does and doesn't work.
+     Second try (build 5cd963f): the firmware locks video memory from 256 MiB to about
+     10 GiB (the MMU lock range, 0x1fa82c/0x1fa830) until NVIDIA's own driver unlocks it,
+     so reads there give 0xbad0acXX through BAR1 and PRAMIN alike. Solon's block now sits at
+     48 MiB, below the lock, and every word read back right. The window channel took all
+     its commands, but the engine rejected the window's UPDATE: "invalid state", code 0x2e.
+     The register dump shows the firmware runs its own screen with composition bypass and
+     no input LUT, while Solon had switched blending and the input LUT on. Now the window
+     tries the firmware's way first, then NVIDIA's driver's way (nvkms: opaque blending,
+     identity input LUT, the colour conversion stages off), then opaque without the LUT,
+     clearing each rejection and logging its code; and the window's position goes in an
+     update of its own first.
      The firmware's monitor isn't touched. The VBIOS's scripts run in Solon's port of
      nouveau's script interpreter, which logs every register they write. If a step fails,
      Solon stops the channels, switches the link off and puts the registers back.

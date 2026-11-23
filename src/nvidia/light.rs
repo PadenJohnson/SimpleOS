@@ -61,6 +61,10 @@ pub struct Lit {
 
 pub static LIT: Mutex<Option<Lit>> = Mutex::new(None);
 
+/// A try got as far as setting the monitor's mode; the head keeps it, so another try in the
+/// same session finds no dark monitor. Say so instead.
+static MODE_SET: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 /// A display channel and its command buffer.
 struct Chan {
     name: &'static str,
@@ -108,10 +112,15 @@ impl Chan {
     }
 
     fn state(&self, r: &Bar0) -> u32 {
+        r.rd(self.state_reg())
+    }
+
+    /// The channel's status register (NV_PDISP_FE_CHNSTATUS_CORE/WIN/WINIM).
+    fn state_reg(&self) -> u32 {
         if self.ctrl == 0 {
-            r.rd(0x610630)
+            0x610630
         } else {
-            r.rd(0x610664 + (self.ctrl - 1) * 4)
+            0x610664 + (self.ctrl - 1) * 4
         }
     }
 
@@ -323,6 +332,9 @@ pub fn light_second() -> String {
     if LIT.lock().is_some() {
         return String::from("Solon already lit a second monitor");
     }
+    if MODE_SET.load(core::sync::atomic::Ordering::Relaxed) {
+        return String::from("The first try already set up the second monitor; restart the PC to try again (press S to save the first try's log)");
+    }
     let card = CARD.lock();
     let Some(c) = card.as_ref() else { return String::from("No NVIDIA card (or the driver is off)") };
     if !(0x172..=0x177).contains(&c.chipset) {
@@ -352,6 +364,9 @@ pub fn light_second() -> String {
         }
         Err(e) => {
             kprintln!("nvidia: lighting failed: {}", e);
+            if l.undo.updated {
+                MODE_SET.store(true, core::sync::atomic::Ordering::Relaxed);
+            }
             l.put_back();
             format!("Couldn't light the monitor: {}", e)
         }
@@ -557,12 +572,16 @@ impl<'a, 'b> Light<'a, 'b> {
             "nvidia:   picture at video memory {:#x} ({} KiB, pitch {}), mapped {:?}, {} of 3 spot checks wrong",
             pic, size >> 10, pitch, crate::memory::caching_of(virt), wrong
         );
-        self.show_window(w, h, pitch)?;
-        let olut = match self.output_lut() {
-            Ok(()) => "",
-            Err(e) => {
-                kprintln!("nvidia:   output LUT: {}", e);
-                " (without its output LUT)"
+        let needs_olut = self.show_window(w, h, pitch)?;
+        let olut = if !needs_olut {
+            ""
+        } else {
+            match self.output_lut() {
+                Ok(()) => "",
+                Err(e) => {
+                    kprintln!("nvidia:   output LUT: {}", e);
+                    " (without its output LUT)"
+                }
             }
         };
         let vpll = r.rd(0xef18 + self.head * 0x40);
@@ -1436,77 +1455,141 @@ impl<'a, 'b> Light<'a, 'b> {
         Some(out.join("; "))
     }
 
-    /// Step 6: point the window at the picture (nouveau wndwc67e_image_set, wndwc57e_ilut_set,
-    /// wndwc57e_csc_clr, wndwc37e_blend_set, wimmc37b_point/update, wndwc37e_update), then
-    /// wait for it to show. Each command goes alone, and the engine must finish it before the
-    /// next, so a stall names the command it's stuck on.
-    fn show_window(&mut self, w: u32, h: u32, pitch: u32) -> Result<(), String> {
+    /// Send methods to a channel one at a time; the engine must finish each before the next,
+    /// so a stall names its method. `which`: 0 core, 1 window, 2 window-immediate.
+    fn send(&mut self, which: usize, cmds: &[(u32, &[u32], &str)]) -> Result<(), String> {
         let r = self.r;
-        let size = h << 16 | w;
-        let identity: [u32; 12] = [0x10000, 0, 0, 0, 0, 0x10000, 0, 0, 0, 0, 0x10000, 0];
-        // Input LUT: 4 header entries + 1024 + 1, 10-bit direct, no interpolation.
-        let ilut_ctl = (4 + 1024 + 1) << 8 | 2 << 2;
-        let pic = ((self.inst + PIC_AT) >> 8) as u32;
-        let ilut = ((self.inst + ILUT_AT) >> 8) as u32;
-        let cmds: [(u32, &[u32], &str); 12] = [
-            (0x218, &[0, 0], "no semaphore, no notifier"),
-            (0x308, &[1], "present at vertical blank"),
-            (0x224, &[size, 0, 0xcf, pitch >> 6], "size, storage, A8R8G8B8, pitch"),
-            (0x240, &[H_VRAM], "the picture's memory handle"),
-            (0x260, &[pic], "the picture's offset"),
-            (0x290, &[0], "source position"),
-            (0x298, &[size], "source size"),
-            (0x2a4, &[size], "output size"),
-            (0x440, &[ilut_ctl, H_VRAM, ilut], "input LUT"),
-            (0x400, &identity, "colour conversion"),
-            (0x2ec, &[0xff << 4, 0xff, 0x7722, 0xffff_0000, 0xffff_0000, 0xffff_0000, 0xffff_0000], "blending"),
-            (0x370, &[0, 1 << self.wndw], "interlocks: this window only"),
-        ];
-        let status = 0x610664 + self.wndw * 4;
-        for &(m, d, what) in &cmds {
-            let wn = &mut self.chans[1];
-            wn.mthd(r, m, d)?;
-            wn.kick(r);
-            let (user, put) = (wn.user(), wn.put as u32);
+        let status = self.chans[which].state_reg();
+        for &(m, d, what) in cmds {
+            let c = &mut self.chans[which];
+            c.mthd(r, m, d)?;
+            c.kick(r);
+            let (user, put) = (c.user(), c.put as u32);
             // Done: everything read, and the channel idle or no method running.
             let done = super::poll_ms(r, 50_000_000, 300, |r| {
                 let s = r.rd(status);
                 r.rd(user + 4) == put && ((s >> 16) & 0xf == 4 || s & 0x8000_0000 == 0)
             });
             if !done {
-                kprintln!("nvidia:   window channel stuck on method {:#x} ({}): status {}, GET {:#x} of {:#x}", m, what, chan_status(r.rd(status)), r.rd(user + 4), put);
-                self.window_report(&cmds);
-                return Err(format!("the window channel got stuck on method {:#x} ({})", m, what));
+                let name = self.chans[which].name;
+                kprintln!("nvidia:   {} channel stuck on method {:#x} ({}): status {}, GET {:#x} of {:#x}", name, m, what, chan_status(r.rd(status)), r.rd(user + 4), put);
+                return Err(format!("the {} channel got stuck on method {:#x} ({})", name, m, what));
             }
         }
-        kprintln!("nvidia:   window channel took all {} commands", cmds.len());
-        // The window's position, through the immediate channel, interlocked with the window.
-        {
-            let wi = &mut self.chans[2];
-            wi.mthd(r, 0x208, &[0])?;
-            wi.mthd(r, 0x200, &[1 | 1 << 1])?;
-            wi.kick(r);
-        }
-        {
-            let wn = &mut self.chans[1];
-            wn.mthd(r, 0x200, &[1 | 1 << 12])?;
-            wn.kick(r);
-        }
+        Ok(())
+    }
+
+    /// Step 6: point the window at the picture, then try colour pipelines until the engine
+    /// takes one: first the firmware's own (composition bypass, no input LUT: how it runs its
+    /// screen on this card), then NVIDIA's driver's (opaque blending, identity input LUT, the
+    /// colour conversion stages off: nvkms EvoFlipC5Common), then opaque without the LUT.
+    /// An update the engine rejects raises an exception, which is logged and cleared before
+    /// the next try. Returns whether the head needs the output LUT.
+    fn show_window(&mut self, w: u32, h: u32, pitch: u32) -> Result<bool, String> {
+        let r = self.r;
+        let size = h << 16 | w;
+        let pic = ((self.inst + PIC_AT) >> 8) as u32;
+        let ilut = ((self.inst + ILUT_AT) >> 8) as u32;
+        let chid = 1 + self.wndw;
+        let status = 0x610664 + self.wndw * 4;
         let armed = 0x690000 + self.wndw * 0x1000 + 0x800;
-        // Taken: the armed state (what's on screen) has the new size and offset.
-        let shown = super::poll_ms(r, 50_000_000, 2000, |r| r.rd(armed + 0x224) == size && r.rd(armed + 0x260) == pic);
-        kprintln!(
-            "nvidia:   window {}: {} (armed picture handle {:#x}, size {:#x}, offset {:#x}; status {}, GET {:#x} of {:#x}; immediate: status {}, GET {:#x} of {:#x})",
-            self.wndw, if shown { "showing the picture" } else { "didn't take the picture" }, r.rd(armed + 0x240), r.rd(armed + 0x224), r.rd(armed + 0x260),
-            chan_status(r.rd(status)), r.rd(self.chans[1].user() + 4), self.chans[1].put,
-            chan_status(r.rd(0x6106e4 + self.wndw * 4)), r.rd(self.chans[2].user() + 4), self.chans[2].put
-        );
-        if shown {
-            Ok(())
-        } else {
-            self.window_report(&cmds);
-            Err(String::from("the window didn't take the picture"))
+        // The window's position first, through the window-immediate channel on its own (not
+        // interlocked), so window updates don't wait on it.
+        let imm = 0x690000 + (32 + self.wndw) * 0x1000;
+        kprintln!("nvidia:   window position before: {:#x} (armed {:#x})", r.rd(imm + 0x208), r.rd(imm + 0x808));
+        self.send(2, &[(0x208, &[0], "position 0,0"), (0x200, &[1], "update")])?;
+        let placed = super::poll_ms(r, 50_000_000, 500, |r| r.rd(imm + 0x808) == 0);
+        kprintln!("nvidia:   window position: {:#x} (armed {:#x}{}), status {}", r.rd(imm + 0x208), r.rd(imm + 0x808), if placed { "" } else { ", not taken" }, chan_status(r.rd(0x6106e4 + self.wndw * 4)));
+        // The surface: the same for every try.
+        let surface: [(u32, &[u32], &str); 7] = [
+            (0x218, &[0, 0], "no semaphore, no notifier"),
+            (0x224, &[size, 0, 0xcf, pitch >> 6], "size, storage, A8R8G8B8, pitch"),
+            (0x240, &[H_VRAM], "the picture's memory handle"),
+            (0x260, &[pic], "the picture's offset"),
+            (0x290, &[0], "source position"),
+            (0x298, &[size], "source size"),
+            (0x2a4, &[size], "output size"),
+        ];
+        if let Err(e) = self.send(1, &surface) {
+            self.window_report(&surface);
+            return Err(e);
         }
+        kprintln!("nvidia:   window channel took the surface");
+        let fw_fmt: [u32; 12] = [0xfffc, 0, 0, 0, 0, 0xfffc, 0, 0, 0, 0, 0xfffc, 0];
+        let identity: [u32; 12] = [0x10000, 0, 0, 0, 0, 0x10000, 0, 0, 0, 0, 0x10000, 0];
+        let ilut_ctl = (4 + 1024 + 1) << 8 | 2 << 2; // 4 header entries + 1025, 10-bit direct
+        let interlock = 1 << self.wndw;
+        let firmware: [(u32, &[u32], &str); 5] = [
+            (0x308, &[0], "present: as soon as possible"),
+            (0x2ec, &[0x1_0000, 0, 1], "composition bypass"),
+            (0x440, &[0, 0, 0], "no input LUT"),
+            (0x400, &fw_fmt, "format conversion (the firmware's)"),
+            (0x370, &[0, interlock], "interlocks: this window only"),
+        ];
+        let nvidia: [(u32, &[u32], &str); 12] = [
+            (0x308, &[1], "present at vertical blank"),
+            (0x2ec, &[0xff << 4, 0, 0x11], "opaque blending"),
+            (0x440, &[ilut_ctl, H_VRAM, ilut], "identity input LUT"),
+            (0x400, &identity, "format conversion: identity"),
+            (0x45c, &[0], "colour conversion 00 off"),
+            (0x4a0, &[0], "colour LUT 0 off"),
+            (0x4bc, &[0], "colour conversion 01 off"),
+            (0x528, &[0, 0], "no tone-mapping LUT"),
+            (0x53c, &[0], "colour conversion 10 off"),
+            (0x580, &[0], "colour LUT 1 off"),
+            (0x59c, &[0], "colour conversion 11 off"),
+            (0x370, &[0, interlock], "interlocks: this window only"),
+        ];
+        let plain: [(u32, &[u32], &str); 2] = [(0x440, &[0, 0, 0], "no input LUT"), (0x370, &[0, interlock], "interlocks: this window only")];
+        let tries: [(&str, &[(u32, &[u32], &str)], bool); 3] = [
+            ("composition bypass, no input LUT (the firmware's way)", &firmware, false),
+            ("opaque, identity input LUT (NVIDIA's driver's way)", &nvidia, true),
+            ("opaque, no input LUT", &plain, false),
+        ];
+        for (k, &(what, cmds, olut)) in tries.iter().enumerate() {
+            if let Err(e) = self.send(1, cmds) {
+                self.window_report(cmds);
+                return Err(e);
+            }
+            {
+                let wn = &mut self.chans[1];
+                wn.mthd(r, 0x200, &[1])?;
+                wn.kick(r);
+            }
+            let mut outcome = 0; // 1: shown, 2: rejected
+            super::poll_ms(r, 50_000_000, 1000, |r| {
+                if r.rd(armed + 0x224) == size && r.rd(armed + 0x260) == pic {
+                    outcome = 1;
+                } else if (r.rd(status) >> 8) & 0xf == 0xb || r.rd(0x61184c) & (1 << self.wndw) != 0 {
+                    outcome = 2;
+                }
+                outcome != 0
+            });
+            let stat = r.rd(0x611020 + chid * 12);
+            let (data, code) = (r.rd(0x611024 + chid * 12), r.rd(0x611028 + chid * 12));
+            kprintln!(
+                "nvidia:   try {} ({}): {} (window status {}, exception state {:#x}, data {:#x}, code {:#x}; armed size {:#x}, offset {:#x})",
+                k + 1, what, match outcome { 1 => "showing the picture", 2 => "rejected", _ => "no answer" },
+                chan_status(r.rd(status)), stat, data, code, r.rd(armed + 0x224), r.rd(armed + 0x260)
+            );
+            if outcome == 1 {
+                return Ok(olut);
+            }
+            if outcome == 2 {
+                // Clear the exception (nouveau gv100_disp_exception) and wait for the channel.
+                r.wr(0x611020 + chid * 12, 0x9000_0000);
+                r.wr(0x61184c, 1 << self.wndw);
+                let back = super::poll_ms(r, 50_000_000, 500, |r| (r.rd(status) >> 8) & 0xf != 0xb);
+                kprintln!("nvidia:   exception cleared; window status {}", chan_status(r.rd(status)));
+                if !back {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        self.window_report(&surface);
+        Err(String::from("the window didn't take the picture"))
     }
 
     /// Step 7: the head's identity output LUT (nouveau headc57d_olut_set: 10-bit direct,
