@@ -1093,6 +1093,9 @@ impl Desktop {
         let mut y = 76;
         for line in &lines[start..end] {
             let s = core::str::from_utf8(line).unwrap_or("?");
+            // The saved log keeps whole lines; the screen shows what fits.
+            let cut = s.char_indices().nth(220).map(|(i, _)| i).unwrap_or(s.len());
+            let s = &s[..cut];
             let color = if s.contains("fail") || s.contains("error") || s.contains("FAIL") || s.contains("PANIC") {
                 rgb(255, 140, 120)
             } else {

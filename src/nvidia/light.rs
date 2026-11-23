@@ -6,7 +6,9 @@
 //!    its first window and a free output resource (SOR) (nvkm/engine/disp/outp.c).
 //! 2. Set up the display engine as tu102_disp_init does, with Solon's own instance memory in
 //!    video memory: an object table (core/ramht.c) and a memory handle for the picture
-//!    (dma/usergv100.c).
+//!    (dma/usergv100.c). The video memory is tested first and written through BAR1: on the
+//!    RTX 3080, the table written through the PRAMIN window at 256 MiB read back as
+//!    0xbad0acXX, and the window channel stalled (most likely on the picture's handle).
 //! 3. Start the core, window and window-immediate channels (gv100.c), their command buffers in
 //!    system memory.
 //! 4. Route the SOR to the connector's pads and train the DisplayPort link (dp.c, ga102.c,
@@ -29,14 +31,20 @@ use alloc::vec::Vec;
 use core::sync::atomic::{fence, Ordering::SeqCst};
 use spin::Mutex;
 
-/// Where Solon puts the display engine's instance memory (64 KiB) and the second picture in
-/// video memory: above the firmware's picture (at 0), far below what it keeps at the top.
-const INST: u64 = 0x1000_0000;
-const PIC: u64 = 0x1100_0000;
+/// Solon's block of video memory (chosen and tested at run time): the display engine's
+/// instance memory (64 KiB), the window's input LUT and the head's output LUT after it, and
+/// the picture 1 MiB in.
+const ILUT_AT: u64 = 0x1_0000;
+const OLUT_AT: u64 = 0x1_4000;
+const LUT_BYTES: usize = 0x2100;
+const PIC_AT: u64 = 0x10_0000;
 /// Object handles: the picture's memory (nouveau NV50_DISP_HANDLE_WNDW_CTX(0)), and the
 /// firmware's own ("DAVE"), added back so the picture it shows keeps resolving.
 const H_VRAM: u32 = 0xfb00_0000;
 const H_FIRMWARE: u32 = 0x4556_4144;
+/// The client number in object table entries, as nouveau writes it (and gives each channel
+/// at 0x610b2c).
+const CLIENT: u32 = 0x40;
 
 /// A monitor Solon lit, kept for drawing to it later.
 #[allow(dead_code)]
@@ -296,6 +304,10 @@ struct Light<'a, 'b> {
     head: u32,
     wndw: u32,
     sor: u32,
+    /// BAR1 (physical): video memory as the CPU sees it (mapped one to one).
+    bar1: u64,
+    /// Solon's block of video memory: instance memory and input LUT, picture at PIC_AT.
+    inst: u64,
     /// The trained link: rate (0.27 Gbit/s units), lanes, enhanced framing.
     bw: u8,
     nr: u8,
@@ -437,6 +449,8 @@ impl<'a, 'b> Light<'a, 'b> {
             head,
             wndw,
             sor,
+            bar1: 0,
+            inst: 0,
             bw: 0,
             nr: 0,
             ef: false,
@@ -482,9 +496,9 @@ impl<'a, 'b> Light<'a, 'b> {
         let m = self.mode;
         let (w, h) = (m.hdisplay, m.vdisplay);
         let pitch = (w * 4 + 255) & !255;
-        if PIC + pitch as u64 * h as u64 > bar1_size.min(self.vram) {
-            return Err(String::from("the picture doesn't fit in the video memory window"));
-        }
+        let size = pitch as u64 * h as u64;
+        self.bar1 = bar1;
+        self.choose_memory(bar1_size, size)?;
         // PCI: bus mastering on (the channels read their commands from system memory), and
         // the card's legacy interrupt off (Solon polls).
         let (bus, dev, func) = self.at;
@@ -493,7 +507,7 @@ impl<'a, 'b> Light<'a, 'b> {
         crate::pci::write32(bus, dev, func, 0x04, (cmd & 0xffff) | 0x4 | 0x400);
 
         // The object table first, then point the engine at it.
-        self.instance_memory();
+        self.instance_memory()?;
         self.disp_init();
         // Step 3: channels.
         let mut core = Chan::new("core", 0);
@@ -522,15 +536,39 @@ impl<'a, 'b> Light<'a, 'b> {
         }
 
         // Step 6: the picture.
-        let size = pitch as u64 * h as u64;
-        let virt = crate::memory::map_wc(bar1 + PIC, size);
-        kprintln!("nvidia:   picture at video memory {:#x} ({} KiB, pitch {}), mapped {:?}", PIC, size >> 10, pitch, crate::memory::caching_of(virt));
+        let pic = self.inst + PIC_AT;
+        let virt = crate::memory::map_wc(bar1 + pic, size);
         draw_test_picture(virt, w, h, pitch, &self.describe());
+        // Spot checks that the picture landed (rows at the top, middle and bottom).
+        let wrong = [0u64, h as u64 / 2, h as u64 - 1]
+            .iter()
+            .filter(|&&y| {
+                let p = (virt + y * pitch as u64 + 8) as *mut u32;
+                unsafe {
+                    let v = core::ptr::read_volatile(p);
+                    core::ptr::write_volatile(p, v ^ 0x00ff_ffff);
+                    let back = core::ptr::read_volatile(p);
+                    core::ptr::write_volatile(p, v);
+                    back != v ^ 0x00ff_ffff
+                }
+            })
+            .count();
+        kprintln!(
+            "nvidia:   picture at video memory {:#x} ({} KiB, pitch {}), mapped {:?}, {} of 3 spot checks wrong",
+            pic, size >> 10, pitch, crate::memory::caching_of(virt), wrong
+        );
         self.show_window(w, h, pitch)?;
+        let olut = match self.output_lut() {
+            Ok(()) => "",
+            Err(e) => {
+                kprintln!("nvidia:   output LUT: {}", e);
+                " (without its output LUT)"
+            }
+        };
         let vpll = r.rd(0xef18 + self.head * 0x40);
         let msg = format!(
-            "Lit the second monitor: {}x{} at {}.{:02} Hz on head {} through output {}, DisplayPort {} lanes at {}.{} Gbit/s (pixel clock {:#x})",
-            w, h, m.refresh() / 100, m.refresh() % 100, self.head, self.sor, self.nr, self.bw as u32 * 27 / 100, self.bw as u32 * 27 / 10 % 10, vpll
+            "Lit the second monitor{}: {}x{} at {}.{:02} Hz on head {} through output {}, DisplayPort {} lanes at {}.{} Gbit/s (pixel clock {:#x})",
+            olut, w, h, m.refresh() / 100, m.refresh() % 100, self.head, self.sor, self.nr, self.bw as u32 * 27 / 100, self.bw as u32 * 27 / 10 % 10, vpll
         );
         let chans = core::mem::take(&mut self.chans);
         Ok((msg, Lit { head: self.head, sor: self.sor, w, h, pitch, virt, chans }))
@@ -591,7 +629,7 @@ impl<'a, 'b> Light<'a, 'b> {
         }
         // Instance memory in video memory (target 1).
         self.set(0x610010, 0x8 | 1);
-        self.set(0x610014, (INST >> 16) as u32);
+        self.set(0x610014, (self.inst >> 16) as u32);
         // Interrupt status Solon polls (CTRL_DISP: awaken, error, supervisor 1-3), exceptions
         // reported but not enabled, as nouveau.
         self.set(0x611cf0, 0x187);
@@ -610,14 +648,126 @@ impl<'a, 'b> Light<'a, 'b> {
         self.set(0x611db4, 0);
     }
 
+    /// Step 1b: Solon's block of video memory. What the firmware's screen uses (its picture,
+    /// input and output LUTs, cursor: head 0 and window 0's armed state) is kept clear, and
+    /// each candidate is tested through BAR1 (a value written and read back, the old one put
+    /// back) before it's used.
+    fn choose_memory(&mut self, bar1_size: u64, pic_size: u64) -> Result<(), String> {
+        let r = self.r;
+        const MIB: u64 = 0x10_0000;
+        let need = PIC_AT + pic_size;
+        let (w0, h0) = (0x690800, 0x68a000);
+        let fw_pic = Some((r.rd(w0 + 0x260) as u64) << 8).filter(|&a| a < self.vram).unwrap_or(0);
+        let fw_size = r.rd(w0 + 0x224);
+        let fw_pitch = (r.rd(w0 + 0x230) & 0x1fff) as u64 * 64;
+        let fw_end = fw_pic + fw_pitch.max(0x4000) * ((fw_size >> 16) as u64).max(2160);
+        let mut used: Vec<(&str, u64, u64)> = Vec::from([("picture", fw_pic, fw_end)]);
+        let mut lut = |what: &'static str, handle: u32, offset: u32, len: u64| {
+            if handle != 0 {
+                let at = (offset as u64) << 8;
+                used.push((what, at, at + len));
+            }
+        };
+        lut("input LUT", r.rd(w0 + 0x444), r.rd(w0 + 0x448), 0x4000);
+        lut("output LUT", r.rd(h0 + 0x288), r.rd(h0 + 0x28c), 0x4000);
+        lut("cursor", r.rd(h0 + 0x088), r.rd(h0 + 0x090), 0x4_0000);
+        kprintln!(
+            "nvidia:   the firmware's screen uses: {}",
+            used.iter().map(|(w, a, b)| format!("{} {:#x}..{:#x}", w, a, b)).collect::<Vec<_>>().join(", ")
+        );
+        self.log_fb_regions();
+        let top = bar1_size.min(self.vram).saturating_sub(64 * MIB);
+        let mut cands: Vec<u64> = Vec::from([((fw_end + 16 * MIB) & !(16 * MIB - 1)).max(32 * MIB), 64 * MIB, 128 * MIB, 256 * MIB, 512 * MIB, 1024 * MIB, 2048 * MIB, 4096 * MIB]);
+        cands.sort_unstable();
+        cands.dedup();
+        let mut chosen = None;
+        for base in cands {
+            if base + need > top {
+                continue;
+            }
+            if let Some((what, _, _)) = used.iter().find(|&&(_, a, b)| base < b + MIB && a < base + need + MIB) {
+                kprintln!("nvidia:   video memory {:#x}: next to the firmware's {}, skipped", base, what);
+                continue;
+            }
+            let points = [base, base + ILUT_AT, base + PIC_AT, (base + need / 2) & !3, base + need - 4];
+            let mut bad = Vec::new();
+            for (k, &p) in points.iter().enumerate() {
+                let pattern = 0x5a00_0000 | (k as u32) << 16 | (p >> 20) as u32 & 0xffff;
+                let (old, back) = self.bar1_test(p, pattern);
+                if back != pattern {
+                    bad.push(format!("{:#x}: wrote {:#x}, read {:#x} (was {:#x})", p, pattern, back, old));
+                }
+            }
+            let pramin = super::vram_read(r, base, 4);
+            kprintln!(
+                "nvidia:   video memory {:#x}: BAR1 write test {}{}; PRAMIN reads {:02x?}",
+                base, if bad.is_empty() { "passed" } else { "failed" },
+                if bad.is_empty() { String::new() } else { format!(" ({})", bad.join(", ")) }, pramin
+            );
+            if bad.is_empty() && chosen.is_none() {
+                chosen = Some(base);
+            }
+        }
+        let base = chosen.ok_or_else(|| String::from("no video memory passed the write test"))?;
+        // For the record: whether the PRAMIN window sees the same memory there (a value written
+        // through BAR1, read through PRAMIN), and only then whether a PRAMIN write lands.
+        let p = crate::memory::map_mmio(self.bar1 + base, 4) as *mut u32;
+        let tag = (base >> 20) as u32 & 0xffff;
+        let (one, two) = (0x3c3c_0000 | tag, 0xa5a5_0000 | tag);
+        unsafe {
+            let old = core::ptr::read_volatile(p);
+            core::ptr::write_volatile(p, one);
+            let seen = super::vram_read(r, base, 4);
+            let seen = u32::from_le_bytes([seen[0], seen[1], seen[2], seen[3]]);
+            let mut note = format!("BAR1 wrote {:#x}, PRAMIN read {:#x}", one, seen);
+            if seen == one {
+                super::vram_write(r, base, &[two]);
+                note.push_str(&format!("; PRAMIN wrote {:#x}, BAR1 read {:#x}", two, core::ptr::read_volatile(p)));
+            }
+            core::ptr::write_volatile(p, old);
+            kprintln!("nvidia:   using video memory {:#x}; PRAMIN check: {}", base, note);
+        }
+        self.inst = base;
+        Ok(())
+    }
+
+    /// Write a value into video memory through BAR1 and read it back, then put the old value
+    /// back. Returns (old value, value read back).
+    fn bar1_test(&self, addr: u64, pattern: u32) -> (u32, u32) {
+        let p = crate::memory::map_mmio(self.bar1 + addr, 4) as *mut u32;
+        unsafe {
+            let old = core::ptr::read_volatile(p);
+            core::ptr::write_volatile(p, pattern);
+            let back = core::ptr::read_volatile(p);
+            core::ptr::write_volatile(p, old);
+            (old, back)
+        }
+    }
+
+    /// The memory controller's protected ranges, for the log (WPR2 and the MMU lock, as
+    /// open-gpu-kernel-modules reads them: bits 31:4 are the address >> 12).
+    fn log_fb_regions(&self) {
+        let r = self.r;
+        let at = |v: u32| ((v & !0xf) as u64) << 8;
+        let (w2lo, w2hi, lklo, lkhi) = (r.rd(0x1fa824), r.rd(0x1fa828), r.rd(0x1fa82c), r.rd(0x1fa830));
+        kprintln!(
+            "nvidia:   protected video memory: WPR2 {:#x}..{:#x}, locked {:#x}..{:#x} (lock PLM {:#x}, VPR status {:#x}, local memory range {:#x})",
+            at(w2lo), at(w2hi) | 0xfff, at(lklo), at(lkhi) | 0xfff, r.rd(0x1fa7c8), r.rd(0x1fa80c), r.rd(0x100ce0)
+        );
+        let raw: Vec<String> = (0..16).map(|k| format!("{:08x}", r.rd(0x1fa800 + k * 4))).collect();
+        kprintln!("nvidia:   0x1fa800: {}", raw.join(" "));
+    }
+
     /// Step 2b: the object table (1024 entries of handle and context, nouveau core/ramht.c)
     /// and two context DMAs covering all of video memory (target video memory, read-write,
     /// pitch: flags 0x5, nouveau gv100_dmaobj_bind), one for the new window's channel and one
-    /// under the firmware's handle for window 0's.
-    fn instance_memory(&self) {
-        let mut img = alloc::vec![0u32; 0x10000 / 4];
+    /// under the firmware's handle for window 0's (the core channel gets the first one too);
+    /// then the identity LUTs nouveau gives every window and head on these chips
+    /// (wndwc57e_ilut_load, headc57d_olut_load). Written through BAR1 and read back.
+    fn instance_memory(&self) -> Result<(), String> {
+        let mut img = alloc::vec![0u32; (OLUT_AT as usize + LUT_BYTES) / 4];
         let limit = (self.vram.max(1) - 1) >> 8;
-        let objects = [(0x2000u32, 1 + self.wndw, H_VRAM), (0x2020u32, 1, H_FIRMWARE)];
+        let objects = [(0x2000u32, 1 + self.wndw, H_VRAM), (0x2000u32, 0, H_VRAM), (0x2020u32, 1, H_FIRMWARE)];
         for &(obj, chid, handle) in &objects {
             let o = obj as usize / 4;
             img[o] = 0x5;
@@ -625,17 +775,46 @@ impl<'a, 'b> Light<'a, 'b> {
             img[o + 2] = 0;
             img[o + 3] = limit as u32;
             img[o + 4] = (limit >> 32) as u32;
-            let mut slot = ramht_hash(chid, handle);
-            while img[slot as usize * 2] != 0 || img[slot as usize * 2 + 1] != 0 {
-                slot = (slot + 1) % 1024;
+            // At nouveau's hash and at NVIDIA's (which also folds in the client number), in
+            // case the engine looks in only one place.
+            let ctx = chid << 25 | CLIENT | obj << 9;
+            let mut slots = Vec::new();
+            for start in [ramht_hash(chid, handle), ramht_hash_rm(chid, CLIENT, handle)] {
+                let mut slot = start as usize;
+                while (img[slot * 2] != 0 || img[slot * 2 + 1] != 0) && (img[slot * 2], img[slot * 2 + 1]) != (handle, ctx) {
+                    slot = (slot + 1) % 1024;
+                }
+                img[slot * 2] = handle;
+                img[slot * 2 + 1] = ctx;
+                slots.push(slot);
             }
-            img[slot as usize * 2] = handle;
-            img[slot as usize * 2 + 1] = chid << 25 | 0x40 | obj << 9;
-            kprintln!("nvidia:   object table slot {}: handle {:#010x}, channel {}, memory object at {:#x}", slot, handle, chid, obj);
+            kprintln!("nvidia:   object table slots {:?}: handle {:#010x}, channel {}, memory object at {:#x}", slots, handle, chid, obj);
         }
-        super::vram_write(self.r, INST, &img);
-        let back = super::vram_read(self.r, INST + 0x2000, 20);
-        kprintln!("nvidia:   instance memory at video memory {:#x}; first object reads back {:02x?}", INST, back);
+        // The LUTs: a 32-byte header, then 1025 entries of red, green and blue: FP16 for the
+        // window's input LUT, 16-bit fractions for the head's output LUT (headc57d_olut_load).
+        for i in 0..=1024usize {
+            let v = (i.min(1023) * 64) as u32;
+            for (at, x) in [(ILUT_AT, fp16_of_unorm16(v) as u32), (OLUT_AT, v)] {
+                let o = (at as usize + 0x20 + i * 8) / 4;
+                img[o] = x | x << 16;
+                img[o + 1] = x;
+            }
+        }
+        let p = crate::memory::map_wc(self.bar1 + self.inst, (img.len() * 4) as u64) as *mut u32;
+        for (k, &v) in img.iter().enumerate() {
+            unsafe { core::ptr::write_volatile(p.add(k), v) };
+        }
+        unsafe { core::arch::x86_64::_mm_sfence() };
+        let wrong = img.iter().enumerate().filter(|&(k, &v)| unsafe { core::ptr::read_volatile(p.add(k)) } != v).count();
+        let pramin = super::vram_read(self.r, self.inst + 0x2000, 20);
+        kprintln!(
+            "nvidia:   instance memory at video memory {:#x}, written through BAR1: {} of {} words read back wrong; PRAMIN sees the first object as {:02x?}",
+            self.inst, wrong, img.len(), pramin
+        );
+        if wrong != 0 {
+            return Err(format!("{} words of the display engine's object table didn't stick", wrong));
+        }
+        Ok(())
     }
 
     /// The new window's state after its channel started (whether the engine reset it, or it
@@ -1257,33 +1436,50 @@ impl<'a, 'b> Light<'a, 'b> {
         Some(out.join("; "))
     }
 
-    /// Step 6: point the window at the picture (nouveau wndwc67e_image_set, wndwc57e_csc_clr,
-    /// wndwc57e_ilut_clr, wndwc37e_blend_set, wimmc37b_point/update, wndwc37e_update), then
-    /// wait for it to show.
+    /// Step 6: point the window at the picture (nouveau wndwc67e_image_set, wndwc57e_ilut_set,
+    /// wndwc57e_csc_clr, wndwc37e_blend_set, wimmc37b_point/update, wndwc37e_update), then
+    /// wait for it to show. Each command goes alone, and the engine must finish it before the
+    /// next, so a stall names the command it's stuck on.
     fn show_window(&mut self, w: u32, h: u32, pitch: u32) -> Result<(), String> {
         let r = self.r;
         let size = h << 16 | w;
         let identity: [u32; 12] = [0x10000, 0, 0, 0, 0, 0x10000, 0, 0, 0, 0, 0x10000, 0];
-        let cmds: [(u32, &[u32]); 12] = [
-            (0x218, &[0, 0]),                     // no semaphore, no notifier
-            (0x308, &[1]),                        // present: interval 1, at vertical blank
-            (0x224, &[size, 0, 0xcf, pitch >> 6]), // size, pitch layout, A8R8G8B8, pitch / 64
-            (0x240, &[H_VRAM]),
-            (0x260, &[(PIC >> 8) as u32]),
-            (0x290, &[0]),
-            (0x298, &[size]),
-            (0x2a4, &[size]),
-            (0x400, &identity),                   // colour conversion: none
-            (0x444, &[0]),                        // no input LUT
-            (0x2ec, &[0xff << 4, 0xff, 0x7722, 0xffff_0000, 0xffff_0000, 0xffff_0000, 0xffff_0000]),
-            (0x370, &[0, 1 << self.wndw]),        // interlocks: no core; this window
+        // Input LUT: 4 header entries + 1024 + 1, 10-bit direct, no interpolation.
+        let ilut_ctl = (4 + 1024 + 1) << 8 | 2 << 2;
+        let pic = ((self.inst + PIC_AT) >> 8) as u32;
+        let ilut = ((self.inst + ILUT_AT) >> 8) as u32;
+        let cmds: [(u32, &[u32], &str); 12] = [
+            (0x218, &[0, 0], "no semaphore, no notifier"),
+            (0x308, &[1], "present at vertical blank"),
+            (0x224, &[size, 0, 0xcf, pitch >> 6], "size, storage, A8R8G8B8, pitch"),
+            (0x240, &[H_VRAM], "the picture's memory handle"),
+            (0x260, &[pic], "the picture's offset"),
+            (0x290, &[0], "source position"),
+            (0x298, &[size], "source size"),
+            (0x2a4, &[size], "output size"),
+            (0x440, &[ilut_ctl, H_VRAM, ilut], "input LUT"),
+            (0x400, &identity, "colour conversion"),
+            (0x2ec, &[0xff << 4, 0xff, 0x7722, 0xffff_0000, 0xffff_0000, 0xffff_0000, 0xffff_0000], "blending"),
+            (0x370, &[0, 1 << self.wndw], "interlocks: this window only"),
         ];
-        {
+        let status = 0x610664 + self.wndw * 4;
+        for &(m, d, what) in &cmds {
             let wn = &mut self.chans[1];
-            for (m, d) in cmds {
-                wn.mthd(r, m, d)?;
+            wn.mthd(r, m, d)?;
+            wn.kick(r);
+            let (user, put) = (wn.user(), wn.put as u32);
+            // Done: everything read, and the channel idle or no method running.
+            let done = super::poll_ms(r, 50_000_000, 300, |r| {
+                let s = r.rd(status);
+                r.rd(user + 4) == put && ((s >> 16) & 0xf == 4 || s & 0x8000_0000 == 0)
+            });
+            if !done {
+                kprintln!("nvidia:   window channel stuck on method {:#x} ({}): status {}, GET {:#x} of {:#x}", m, what, chan_status(r.rd(status)), r.rd(user + 4), put);
+                self.window_report(&cmds);
+                return Err(format!("the window channel got stuck on method {:#x} ({})", m, what));
             }
         }
+        kprintln!("nvidia:   window channel took all {} commands", cmds.len());
         // The window's position, through the immediate channel, interlocked with the window.
         {
             let wi = &mut self.chans[2];
@@ -1297,20 +1493,97 @@ impl<'a, 'b> Light<'a, 'b> {
             wn.kick(r);
         }
         let armed = 0x690000 + self.wndw * 0x1000 + 0x800;
-        let shown = super::poll_ms(r, 50_000_000, 2000, |r| r.rd(armed + 0x240) == H_VRAM && r.rd(armed + 0x224) == size);
-        if let Some(e) = self.exceptions() {
-            kprintln!("nvidia:   display engine exception: {}", e);
-        }
+        // Taken: the armed state (what's on screen) has the new size and offset.
+        let shown = super::poll_ms(r, 50_000_000, 2000, |r| r.rd(armed + 0x224) == size && r.rd(armed + 0x260) == pic);
         kprintln!(
-            "nvidia:   window {}: {} (armed picture handle {:#x}, size {:#x}; GET {:#x} of {:#x}, immediate GET {:#x} of {:#x})",
-            self.wndw, if shown { "showing the picture" } else { "didn't take the picture" }, r.rd(armed + 0x240), r.rd(armed + 0x224),
-            r.rd(self.chans[1].user() + 4), self.chans[1].put, r.rd(self.chans[2].user() + 4), self.chans[2].put
+            "nvidia:   window {}: {} (armed picture handle {:#x}, size {:#x}, offset {:#x}; status {}, GET {:#x} of {:#x}; immediate: status {}, GET {:#x} of {:#x})",
+            self.wndw, if shown { "showing the picture" } else { "didn't take the picture" }, r.rd(armed + 0x240), r.rd(armed + 0x224), r.rd(armed + 0x260),
+            chan_status(r.rd(status)), r.rd(self.chans[1].user() + 4), self.chans[1].put,
+            chan_status(r.rd(0x6106e4 + self.wndw * 4)), r.rd(self.chans[2].user() + 4), self.chans[2].put
         );
         if shown {
             Ok(())
         } else {
+            self.window_report(&cmds);
             Err(String::from("the window didn't take the picture"))
         }
+    }
+
+    /// Step 7: the head's identity output LUT (nouveau headc57d_olut_set: 10-bit direct,
+    /// interpolated, 1029 entries), in a core update of its own once the picture shows, so a
+    /// problem here can't keep the picture away. A LUT change shouldn't need the supervisor;
+    /// any request that comes anyway is answered with nothing to do.
+    fn output_lut(&mut self) -> Result<(), String> {
+        let r = self.r;
+        let hoff = self.head * 0x400;
+        let olut = ((self.inst + OLUT_AT) >> 8) as u32;
+        let ctl = 1 | 2 << 2 | (4 + 1024 + 1) << 8;
+        let cmds: [(u32, &[u32]); 3] = [(0x2280 + hoff, &[ctl, 0xffff_ffff, H_VRAM, olut]), (0x218, &[0, 0]), (0x200, &[1])];
+        let put = {
+            let core = &mut self.chans[0];
+            for (m, d) in cmds {
+                core.mthd(r, m, d)?;
+            }
+            core.kick(r);
+            core.put as u32
+        };
+        let hz = crate::interrupts::HZ;
+        let start = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
+        loop {
+            let pending = r.rd(0x611c30) & 7;
+            if pending != 0 {
+                r.wr(0x611860, pending);
+                let heads = r.rd(0x610060) & 0xff;
+                kprintln!("nvidia:   output LUT: supervisor {} came (status {:#x}, head {} {:#x}); nothing to do", pending.trailing_zeros() + 1, r.rd(0x6107a8), self.head, r.rd(0x6107ac + self.head * 4));
+                for h in (0..8).filter(|h| heads & (1 << h) != 0) {
+                    r.wr(0x6107ac + h * 4, 0);
+                }
+                r.wr(0x6107a8, 0x8000_0000);
+            }
+            if r.rd(0x680004) == put && r.rd(0x610630) & 0x1f_0000 == 0xb_0000 && r.rd(0x688000 + 0x228c + hoff) == olut {
+                kprintln!("nvidia:   output LUT on (armed control {:#x}, handle {:#x}, offset {:#x})", r.rd(0x688000 + 0x2280 + hoff), r.rd(0x688000 + 0x2288 + hoff), r.rd(0x688000 + 0x228c + hoff));
+                return Ok(());
+            }
+            if crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed) > start + hz {
+                if let Some(e) = self.exceptions() {
+                    kprintln!("nvidia:   display engine exception: {}", e);
+                }
+                return Err(format!(
+                    "the core channel didn't take it (GET {:#x} of {:#x}, status {:#x}, armed LUT offset {:#x}, exception state {:#x})",
+                    r.rd(0x680004), put, r.rd(0x610630), r.rd(0x688000 + 0x228c + hoff), r.rd(0x611020)
+                ));
+            }
+        }
+    }
+
+    /// After a window failure: exceptions (read directly, whether or not they raised an
+    /// interrupt), the interrupt state, and which of the commands the window's state holds.
+    fn window_report(&self, cmds: &[(u32, &[u32], &str)]) {
+        let r = self.r;
+        if let Some(e) = self.exceptions() {
+            kprintln!("nvidia:   display engine exception: {}", e);
+        }
+        for chid in [0, 1 + self.wndw, 33 + self.wndw] {
+            let stat = r.rd(0x611020 + chid * 12);
+            if stat != 0 {
+                kprintln!(
+                    "nvidia:   channel {} exception state {:#x} (reason {}, method {:#x}), data {:#x}, code {:#x}",
+                    chid, stat, (stat >> 12) & 7, (stat & 0xfff) << 2, r.rd(0x611024 + chid * 12), r.rd(0x611028 + chid * 12)
+                );
+            }
+        }
+        kprintln!(
+            "nvidia:   interrupts {:#x}, control {:#x}, error {:#x}, window exceptions {:#x}, immediate {:#x}, other {:#x}",
+            r.rd(0x611ec0), r.rd(0x611c30), r.rd(0x611848), r.rd(0x61184c), r.rd(0x611850), r.rd(0x611854)
+        );
+        let asy = 0x690000 + self.wndw * 0x1000;
+        let mut held = Vec::new();
+        for &(m, d, _) in cmds {
+            let got: Vec<u32> = (0..d.len() as u32).map(|k| r.rd(asy + m + k * 4)).collect();
+            let same = got.iter().zip(d.iter()).filter(|(a, b)| a == b).count();
+            held.push(format!("{:#x} {}/{}", m, same, d.len()));
+        }
+        kprintln!("nvidia:   window state holds (method: values that match): {}", held.join(", "));
     }
 
     /// After a failure: stop the channels, turn the link off, unroute, and put back the
@@ -1354,6 +1627,66 @@ fn ramht_hash(chid: u32, handle: u32) -> u32 {
         h >>= 10;
     }
     (hash ^ chid << 6) & 0x3ff
+}
+
+/// The display object table's hash as NVIDIA's driver computes it, client number included
+/// (open-gpu-kernel-modules instmemHashFunc_v03_00).
+fn ramht_hash_rm(chid: u32, client: u32, handle: u32) -> u32 {
+    (handle & 0x3ff)
+        ^ ((handle >> 10) & 0x3ff)
+        ^ ((handle >> 20) & 0x3ff)
+        ^ (((client & 0xff) << 2) | (handle >> 30))
+        ^ (((chid & 0xf) << 6) | ((client >> 8) & 0x3f))
+        ^ ((chid >> 4) & 7)
+}
+
+/// A 0..1 value in 16 bits as a half float (nouveau fixedU0_16_FP16).
+fn fp16_of_unorm16(v: u32) -> u16 {
+    let mut fixed = v & 0xffff;
+    if fixed == 0 {
+        return 0;
+    }
+    let mut exp: i32 = 0;
+    loop {
+        exp -= 1;
+        if fixed & 0x8000 != 0 {
+            break;
+        }
+        fixed = (fixed << 1) & 0xffff;
+    }
+    let man = ((fixed << 1) & 0xffc0) >> 6;
+    (((exp + 15) as u32) << 10 | man) as u16
+}
+
+/// A display channel's status register in words (open-gpu-kernel-modules dev_disp.h v03_00,
+/// NV_PDISP_FE_CHNSTATUS_WIN: state 19:16, update state 11:8, method executing bit 31).
+fn chan_status(s: u32) -> String {
+    let state = match (s >> 16) & 0xf {
+        0 => "deallocated",
+        1 => "unconnected",
+        2 | 3 => "starting",
+        4 => "idle",
+        5 => "busy",
+        6 | 7 => "shutting down",
+        _ => "?",
+    };
+    let upd = match (s >> 8) & 0xf {
+        0 => "init",
+        1 => "idle",
+        2 => "wait block",
+        3 => "wait MPI",
+        4 => "wait interlock 1",
+        5 => "wait state check",
+        6 => "wait ready to flip",
+        7 => "wait interlock 2",
+        8 => "check pending loadv",
+        9 => "send update",
+        10 => "wait PRM",
+        11 => "exception",
+        12 => "wait interlock abort",
+        _ => "?",
+    };
+    format!("{:#x} ({}, update {}, {})", s, state, upd, if s & 0x8000_0000 != 0 { "executing a method" } else { "no method running" })
 }
 
 /// The SOR an output's pad links are routed to (nouveau gm200_sor_route_get).

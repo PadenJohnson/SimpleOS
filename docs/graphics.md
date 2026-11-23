@@ -79,8 +79,11 @@ without NVIDIA's signed firmware, so screen modes and several monitors are possi
      DisplayPort monitor the firmware left dark, following nouveau step by step:
      1. pick the monitor (a DP output whose monitor answers on AUX and that no head shows), a
         free head and its first window, and a free output resource (SOR), as nouveau does;
-     2. set up the display engine (tu102_disp_init) with Solon's instance memory at video
-        memory 256 MiB: an object table and a context DMA covering video memory;
+     2. set up the display engine (tu102_disp_init) with Solon's instance memory: an object
+        table and a context DMA covering video memory, plus the identity input and output
+        LUTs nouveau gives every window and head on these chips. The block of video memory is
+        chosen at run time, clear of what the firmware's screen uses, tested through BAR1,
+        and written through BAR1;
      3. start the core, window and window-immediate channels;
      4. route the SOR to the connector's pads and train the DisplayPort link: the VBIOS's
         scripts (spread spectrum, the per-rate scripts, after-training), then clock recovery
@@ -88,8 +91,16 @@ without NVIDIA's signed firmware, so screen modes and several monitors are possi
      5. send the output, head mode and window ownership to the core channel and UPDATE, then
         answer the engine's three supervisor requests: the pixel clock (VPLL), the VBIOS's
         output scripts, the DisplayPort stream settings;
-     6. draw a test picture at video memory 272 MiB (through BAR1, write-combined) and point
-        the window at it.
+     6. draw a test picture 1 MiB into Solon's block (through BAR1, write-combined) and point
+        the window at it, one command at a time, so a stall names its command; then the
+        head's output LUT, in a core update of its own.
+     First try on the RTX 3080 (build fcd01da): the link trained (4 lanes at 5.4 Gbit/s), the
+     mode was set (2560x1440 at 60 Hz) and the LG woke up with a signal, but the screen stayed
+     black: the window channel stalled 0x50 bytes into its commands, still executing a method.
+     The object table apparently never reached video memory: reading it back through the
+     PRAMIN window at 256 MiB gave 0xbad0acXX instead of what was written, so the engine had
+     nothing to look the picture's handle up in. Video memory is now tested and written
+     through BAR1 instead, and the log says where PRAMIN does and doesn't work.
      The firmware's monitor isn't touched. The VBIOS's scripts run in Solon's port of
      nouveau's script interpreter, which logs every register they write. If a step fails,
      Solon stops the channels, switches the link off and puts the registers back.

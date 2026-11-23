@@ -33,7 +33,7 @@ impl LogBuf {
             let b = self.buf[k % LOG_SIZE];
             if b == b'\n' {
                 out.push(core::mem::take(&mut cur));
-            } else if cur.len() < 160 {
+            } else if cur.len() < 1000 {
                 cur.push(b);
             }
         }

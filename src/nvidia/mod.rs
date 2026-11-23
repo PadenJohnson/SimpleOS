@@ -143,7 +143,7 @@ fn chip_name(chipset: u32) -> &'static str {
 }
 
 /// Display register ranges saved to the stick: (start, number of 32-bit registers).
-const SNAPSHOT: [(u32, u32); 19] = [
+const SNAPSHOT: [(u32, u32); 21] = [
     (0x000000, 0x40),   // PMC: chip identification
     (0xb80f00, 0x40),   // BAR1/BAR2 instance blocks and modes (Turing and newer)
     (0x001700, 0x10),   // PRAMIN window and BAR1/BAR2 setup
@@ -154,6 +154,8 @@ const SNAPSHOT: [(u32, u32); 19] = [
     (0x00ef00, 0x100),  // VPLLs (pixel clocks)
     (0x021200, 0x40),   // GPIO lines (bit 14: the pin's level)
     (0x088000, 0x40),   // PCI configuration (mirror)
+    (0x100c00, 0x40),   // memory controller: flushes, local memory range (0x100ce0)
+    (0x1fa7c0, 0x20),   // protected video memory: WPR2, MMU lock, VPR
     (0x610000, 0x800),  // display: capabilities, channels, interrupts
     (0x612000, 0x800),  // SOR clocks (0x612300 + SOR * 0x800) and pad-link routing
     (0x616000, 0x800),  // heads: capabilities, raster generator
