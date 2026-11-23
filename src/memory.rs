@@ -141,6 +141,32 @@ pub fn map_framebuffer(phys: u64, size: u64) -> u64 {
     map_with(phys, size, PageTableFlags::PRESENT | PageTableFlags::WRITABLE)
 }
 
+/// Map video memory write-combined (writes go out in bursts), using the PAT entry the boot
+/// loader set up for write-combining (index 5: PWT and the PAT bit); uncached if there isn't
+/// one. Returns the virtual address.
+pub fn map_wc(phys: u64, size: u64) -> u64 {
+    let pat = unsafe { x86_64::registers::model_specific::Msr::new(0x277).read() };
+    if (pat >> 40) & 7 != 1 {
+        return map_mmio(phys, size);
+    }
+    let virt = map_with(phys, size, PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::WRITE_THROUGH);
+    // The PAT bit of a 4 KiB entry is bit 7, which the mapper won't set itself.
+    let hhdm = HHDM.load(Relaxed);
+    let (l4_frame, _) = Cr3::read();
+    let l4 = unsafe { &mut *((l4_frame.start_address().as_u64() + hhdm) as *mut PageTable) };
+    let mut mapper = unsafe { OffsetPageTable::new(l4, VirtAddr::new(hhdm)) };
+    let first = virt & !0xFFF;
+    let pages = ((virt + size + 0xFFF) & !0xFFF) / 4096 - first / 4096;
+    for i in 0..pages {
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(first + i * 4096));
+        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::WRITE_THROUGH | PageTableFlags::HUGE_PAGE;
+        if let Ok(f) = unsafe { mapper.update_flags(page, flags) } {
+            f.flush();
+        }
+    }
+    virt
+}
+
 /// Map `size` bytes of device registers at physical address `phys`. Returns the virtual address.
 pub fn map_mmio(phys: u64, size: u64) -> u64 {
     map_with(phys, size, PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE | PageTableFlags::WRITE_THROUGH)

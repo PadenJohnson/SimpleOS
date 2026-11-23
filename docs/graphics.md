@@ -73,8 +73,26 @@ without NVIDIA's signed firmware, so screen modes and several monitors are possi
      couldn't read system memory; the test now turns it on for the duration. It also checks
      BAR1's mode (0xb80f40) and compares the picture read through PRAMIN with the CPU's view
      through BAR1, to tell whether BAR1 maps video memory directly.
-   - 3c: light head 1 on DisplayPort 3: core and window commands, the supervisor steps
-     (pixel clock, output routing, DisplayPort link training), a picture of its own.
+     Result on the RTX 3080: the channel read Solon's command (with bus mastering on), and
+     BAR1 maps video memory directly (the picture read through PRAMIN matched the CPU's view).
+   - 3c (on request: F12, then L; `src/nvidia/light.rs`, `src/nvidia/bios.rs`): light a
+     DisplayPort monitor the firmware left dark, following nouveau step by step:
+     1. pick the monitor (a DP output whose monitor answers on AUX and that no head shows), a
+        free head and its first window, and a free output resource (SOR), as nouveau does;
+     2. set up the display engine (tu102_disp_init) with Solon's instance memory at video
+        memory 256 MiB: an object table and a context DMA covering video memory;
+     3. start the core, window and window-immediate channels;
+     4. route the SOR to the connector's pads and train the DisplayPort link: the VBIOS's
+        scripts (spread spectrum, the per-rate scripts, after-training), then clock recovery
+        and equalisation with the monitor over AUX, most lanes and fastest rate first;
+     5. send the output, head mode and window ownership to the core channel and UPDATE, then
+        answer the engine's three supervisor requests: the pixel clock (VPLL), the VBIOS's
+        output scripts, the DisplayPort stream settings;
+     6. draw a test picture at video memory 272 MiB (through BAR1, write-combined) and point
+        the window at it.
+     The firmware's monitor isn't touched. The VBIOS's scripts run in Solon's port of
+     nouveau's script interpreter, which logs every register they write. If a step fails,
+     Solon stops the channels, switches the link off and puts the registers back.
 4. **Stage 4: more monitors.** Light the other heads and outputs (DisplayPort link training,
    HDMI); the desktop spans them.
 

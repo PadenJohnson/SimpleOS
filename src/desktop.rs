@@ -1087,7 +1087,7 @@ impl Desktop {
         let info = format!(
             "Screen {}x{}   |   Build {}   |   Lines {}-{} of {}   |   Up/Down, Page Up/Down, Home/End to scroll   |   S: save to the stick{}   |   F12 or Esc to close",
             w, h, env!("SOLON_BUILD"), start + 1, end, lines.len(),
-            if crate::nvidia::present() { "   |   T: test the NVIDIA driver" } else { "" }
+            if crate::nvidia::present() { "   |   T: test the NVIDIA driver   |   L: light the second monitor" } else { "" }
         );
         c.text(24, 44, &info, Size::Small, false, rgb(160, 170, 180));
         let mut y = 76;
@@ -2960,6 +2960,12 @@ impl Desktop {
                     let msg = crate::nvidia::channel_test();
                     kprintln!("diagnostics: {}", msg);
                     self.toast = Some((msg, Self::now() + 10 * HZ));
+                }
+                0x26 if crate::nvidia::present() => {
+                    // L: light the second monitor with the NVIDIA driver (stage 3c).
+                    let msg = crate::nvidia::light::light_second();
+                    kprintln!("diagnostics: {}", msg);
+                    self.toast = Some((msg, Self::now() + 15 * HZ));
                 }
                 _ => return false,
             }

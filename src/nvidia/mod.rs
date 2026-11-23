@@ -23,6 +23,9 @@
 //! command buffer in system memory, sends one command that leaves everything as it is, checks
 //! the engine read it, and stops the channel (nouveau gv100_disp_core_init/fini).
 //!
+//! Stage 3c, only when asked (F12, then L), lights a second monitor with the card's own
+//! display engine (`light.rs`), running the VBIOS's scripts for it (`bios.rs`).
+//!
 //! Everything goes to the log, and the VBIOS, the monitors' EDIDs, the register snapshot and
 //! the video memory read in stage 3a can be saved to the Solon stick (F12, then S) to build the
 //! next stage from. Boot option "nonvidia" skips it all.
@@ -31,6 +34,9 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
+
+pub mod bios;
+pub mod light;
 
 /// A connector on the card, from the VBIOS, and what's plugged into it.
 pub struct Conn {
@@ -60,7 +66,7 @@ pub struct Report {
     pub vram: Vec<(&'static str, u64, Vec<u8>)>,
 }
 
-/// The card, kept for stage 3b (run later, from the diagnostics screen).
+/// The card, kept for stages 3b and 3c (run later, from the diagnostics screen).
 struct Card {
     bar0: u64,
     /// PCI location (bus, device, function).
@@ -68,6 +74,10 @@ struct Card {
     /// The firmware's picture as the CPU sees it (virtual address), and its row length.
     fb: u64,
     pitch: usize,
+    chipset: u32,
+    vram_mb: u32,
+    /// BAR1 (video memory window): physical address and size.
+    bar1: Option<(u64, u64)>,
 }
 
 static CARD: Mutex<Option<Card>> = Mutex::new(None);
@@ -79,16 +89,28 @@ pub fn present() -> bool {
 
 pub static REPORT: Mutex<Option<Report>> = Mutex::new(None);
 
-struct Bar0 {
+pub struct Bar0 {
     base: u64,
 }
 
 impl Bar0 {
-    fn rd(&self, off: u32) -> u32 {
+    pub fn rd(&self, off: u32) -> u32 {
         unsafe { core::ptr::read_volatile((self.base + off as u64) as *const u32) }
     }
-    fn wr(&self, off: u32, v: u32) {
+    pub fn wr(&self, off: u32, v: u32) {
         unsafe { core::ptr::write_volatile((self.base + off as u64) as *mut u32, v) }
+    }
+    /// Read-modify-write (nouveau nvkm_mask): clears `mask`, sets `val`; returns the old value.
+    pub fn mask(&self, off: u32, mask: u32, val: u32) -> u32 {
+        let old = self.rd(off);
+        self.wr(off, (old & !mask) | val);
+        old
+    }
+    pub fn rd8(&self, off: u32) -> u8 {
+        unsafe { core::ptr::read_volatile((self.base + off as u64) as *const u8) }
+    }
+    pub fn wr8(&self, off: u32, v: u8) {
+        unsafe { core::ptr::write_volatile((self.base + off as u64) as *mut u8, v) }
     }
 }
 
@@ -121,24 +143,26 @@ fn chip_name(chipset: u32) -> &'static str {
 }
 
 /// Display register ranges saved to the stick: (start, number of 32-bit registers).
-const SNAPSHOT: [(u32, u32); 17] = [
+const SNAPSHOT: [(u32, u32); 19] = [
     (0x000000, 0x40),   // PMC: chip identification
     (0xb80f00, 0x40),   // BAR1/BAR2 instance blocks and modes (Turing and newer)
     (0x001700, 0x10),   // PRAMIN window and BAR1/BAR2 setup
     (0x00d900, 0x200),  // AUX channels and I2C pads
+    (0x00e800, 0x40),   // DisplayPort spread spectrum (0xe86c)
     (0x00e900, 0x40),   // VPLL enables
     (0x00ec00, 0x40),   // SOR clocks
     (0x00ef00, 0x100),  // VPLLs (pixel clocks)
     (0x021200, 0x40),   // GPIO lines (bit 14: the pin's level)
     (0x088000, 0x40),   // PCI configuration (mirror)
     (0x610000, 0x800),  // display: capabilities, channels, interrupts
-    (0x612000, 0x100),  // SOR clocks and routing (padlinks)
+    (0x612000, 0x800),  // SOR clocks (0x612300 + SOR * 0x800) and pad-link routing
     (0x616000, 0x800),  // heads: capabilities, raster generator
     (0x61c000, 0x800),  // SORs (outputs): capabilities, links
     (0x625000, 0x400),  // display: ownership, VBIOS image location
     (0x640000, 0x400),  // capabilities the driver publishes to the engine
     (0x680000, 0x4000), // core channel state: assembly and armed (what's on screen)
     (0x690000, 0x2000), // window channels 0-7: state (assembly, armed at +0x800)
+    (0x6b0000, 0x1000), // window-immediate channels 0-3: state
 ];
 
 /// Run stages 1, 2 and 3a on an NVIDIA card. `bar0`: its register window; `bar1`: its video
@@ -149,13 +173,13 @@ pub fn probe(bar0: (u64, u64), bar1: Option<(u64, u64)>, fb: u64, at: (u8, u8, u
         return;
     }
     let r = Bar0 { base: crate::memory::map_mmio(bar0.0, 0x0100_0000) };
-    *CARD.lock() = Some(Card { bar0: r.base, at, fb: fb_virt, pitch });
     let boot0 = r.rd(0x000000);
     let chipset = (boot0 & 0x1ff0_0000) >> 20;
     let name = chip_name(chipset);
     kprintln!("nvidia: chip {} (chipset {:#x}, revision {:#x}, PMC_BOOT_0 {:#010x})", name, chipset, boot0 & 0xff, boot0);
     // Video memory in MiB (Ampere: nouveau ga102_fb_vidmem_size).
     let vram_mb = if chipset >= 0x170 { r.rd(0x1183a4) } else { 0 };
+    *CARD.lock() = Some(Card { bar0: r.base, at, fb: fb_virt, pitch, chipset, vram_mb, bar1 });
     if vram_mb != 0 {
         kprintln!("nvidia: {} MiB video memory", vram_mb);
     }
@@ -514,6 +538,38 @@ fn poll_ms(r: &Bar0, tries: u32, ms: u64, mut f: impl FnMut(&Bar0) -> bool) -> b
     f(r)
 }
 
+/// Busy-wait about `us` microseconds, timed by the processor's time-stamp counter (calibrated
+/// once against the 100 Hz timer).
+pub fn udelay(us: u64) {
+    use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    static PER_US: AtomicU64 = AtomicU64::new(0);
+    let tsc = || unsafe { core::arch::x86_64::_rdtsc() };
+    let mut per_us = PER_US.load(Relaxed);
+    if per_us == 0 {
+        // Measure over 10 timer ticks (100 ms).
+        let ticks = &crate::interrupts::TICKS;
+        let t0 = ticks.load(Relaxed);
+        while ticks.load(Relaxed) == t0 {
+            core::hint::spin_loop();
+        }
+        let (start, c0) = (ticks.load(Relaxed), tsc());
+        while ticks.load(Relaxed) < start + 10 {
+            core::hint::spin_loop();
+        }
+        per_us = ((tsc() - c0) / 100_000).max(1);
+        PER_US.store(per_us, Relaxed);
+        kprintln!("nvidia: {} time-stamp counts per microsecond", per_us);
+    }
+    let end = tsc() + us * per_us;
+    while tsc() < end {
+        core::hint::spin_loop();
+    }
+}
+
+pub fn mdelay(ms: u64) {
+    udelay(ms * 1000);
+}
+
 /// One AUX transaction on channel `ch` (nouveau gm200_i2c_aux_xfer): `ty` 8 = native write,
 /// 9 = native read, 0/1 = I2C write/read (+4 = more to follow), up to 16 bytes at `addr`.
 /// Returns the sink's reply code (0 = done) and the bytes read.
@@ -591,8 +647,22 @@ fn aux(r: &Bar0, ch: u8, ty: u8, addr: u32, data: &[u8], size: usize) -> Result<
     result.map(|_| ((stat >> 16) & 0xf, out))
 }
 
+/// Write bytes to the monitor's DisplayPort configuration (DPCD) at `addr`.
+pub fn dpcd_write(r: &Bar0, ch: u8, addr: u32, data: &[u8]) -> Result<(), &'static str> {
+    let mut done = 0;
+    while done < data.len() {
+        let k = (data.len() - done).min(16);
+        let (reply, _) = aux(r, ch, 8, addr + done as u32, &data[done..done + k], k)?;
+        if reply != 0 {
+            return Err("the monitor refused the DPCD write");
+        }
+        done += k;
+    }
+    Ok(())
+}
+
 /// Read `n` bytes of the monitor's DisplayPort configuration (DPCD) at `addr`.
-fn dpcd(r: &Bar0, ch: u8, addr: u32, n: usize) -> Result<Vec<u8>, &'static str> {
+pub fn dpcd(r: &Bar0, ch: u8, addr: u32, n: usize) -> Result<Vec<u8>, &'static str> {
     let mut out = Vec::new();
     while out.len() < n {
         let k = (n - out.len()).min(16);
@@ -609,7 +679,7 @@ fn dpcd(r: &Bar0, ch: u8, addr: u32, n: usize) -> Result<Vec<u8>, &'static str> 
 /// at address 0x50, as one I2C session per block (nouveau aux.c, the DisplayPort standard):
 /// address-only start, the offset, then 16-byte reads with "more to follow" (MOT, +4) set on
 /// all but the last.
-fn edid(r: &Bar0, ch: u8) -> Result<Vec<u8>, &'static str> {
+pub fn edid(r: &Bar0, ch: u8) -> Result<Vec<u8>, &'static str> {
     let mut out: Vec<u8> = Vec::new();
     let mut want = 128;
     while out.len() < want && out.len() < 256 {
@@ -720,7 +790,7 @@ fn talk_to_monitor(r: &Bar0, ch: u8, c: &mut Conn) {
 
 /// Read video memory through the BAR0 PRAMIN window (1 MiB at 0x700000, positioned in 64 KiB
 /// steps by 0x001700), putting the window back afterwards.
-fn vram_read(r: &Bar0, addr: u64, len: usize) -> Vec<u8> {
+pub fn vram_read(r: &Bar0, addr: u64, len: usize) -> Vec<u8> {
     let saved = r.rd(0x001700);
     let mut out = Vec::with_capacity(len);
     let mut at = addr;
@@ -737,6 +807,26 @@ fn vram_read(r: &Bar0, addr: u64, len: usize) -> Vec<u8> {
     r.wr(0x001700, saved);
     out.truncate(len);
     out
+}
+
+/// Write video memory through the PRAMIN window (32-bit words), putting the window back.
+pub fn vram_write(r: &Bar0, addr: u64, words: &[u32]) {
+    let saved = r.rd(0x001700);
+    let mut at = addr;
+    let mut k = 0;
+    while k < words.len() {
+        let base = at & !0xffff;
+        r.wr(0x001700, (base >> 16) as u32);
+        let mut off = (at - base) as u32;
+        while off < 0x10_0000 && k < words.len() {
+            r.wr(0x700000 + off, words[k]);
+            off += 4;
+            k += 1;
+        }
+        at = base + 0x10_0000;
+    }
+    let _ = r.rd(0x700000);
+    r.wr(0x001700, saved);
 }
 
 fn le32(b: &[u8], o: usize) -> u32 {
