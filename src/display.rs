@@ -153,6 +153,17 @@ pub fn set_current(m: (u32, u32)) {
 
 pub static INFO: Mutex<Option<DisplayInfo>> = Mutex::new(None);
 
+/// How many screens (monitors) the firmware switched on.
+static SCREENS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(1);
+
+pub fn set_screens(n: usize) {
+    SCREENS.store(n.max(1), core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn screens() -> usize {
+    SCREENS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn init(modes: &[(u32, u32, u16)], current: (u32, u32), edid: Option<&[u8]>) {
     let mut m: Vec<(u32, u32)> = modes.iter().filter(|x| x.2 == 32 && x.0 >= 640 && x.1 >= 480).map(|x| (x.0, x.1)).collect();
     m.push(current);

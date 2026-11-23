@@ -223,6 +223,8 @@ pub struct Xhci {
     pci: pci::Device,
     /// Intel ports were moved over from the USB 2 controller (devices reconnect shortly).
     pub switched_ports: bool,
+    /// Which ports are USB 3 (from the controller's Supported Protocol tables; index = port).
+    usb3: Vec<bool>,
 }
 
 #[inline]
@@ -339,6 +341,7 @@ impl Xhci {
             port_changes: Vec::new(),
             pci: *dev,
             switched_ports,
+            usb3: Self::usb3_ports(cap, hcc1, max_ports),
         };
         // Power all ports; connected ones are picked up through port changes.
         for p in 1..=max_ports {
@@ -355,6 +358,32 @@ impl Xhci {
         }
         kprintln!("xhci {}: {} ports, {} slots, {}-byte contexts", hc.name, hc.max_ports, max_slots, csz);
         Some(hc)
+    }
+
+    /// Which ports speak USB 3, from the Supported Protocol capabilities (ID 2): a port's
+    /// speed field is 0 until its link is up, so it can't tell.
+    fn usb3_ports(cap: u64, hcc1: u32, max_ports: u8) -> Vec<bool> {
+        let mut v = alloc::vec![false; max_ports as usize + 1];
+        let mut off = ((hcc1 >> 16) as u64) << 2;
+        while off != 0 {
+            let p = cap + off;
+            let d0 = r32(p);
+            if d0 & 0xFF == 2 && d0 >> 24 >= 3 {
+                let d2 = r32(p + 8);
+                let (first, count) = ((d2 & 0xFF) as usize, ((d2 >> 8) & 0xFF) as usize);
+                for port in first..first + count {
+                    if let Some(x) = v.get_mut(port) {
+                        *x = true;
+                    }
+                }
+            }
+            let next = ((d0 >> 8) & 0xFF) as u64;
+            if next == 0 {
+                break;
+            }
+            off += next << 2;
+        }
+        v
     }
 
     /// Ask the firmware (BIOS/UEFI SMM) to give up the controller.
@@ -425,18 +454,28 @@ impl Xhci {
         if v & PORT_CCS == 0 {
             return None;
         }
-        if v & PORT_PED == 0 {
-            // USB 2 ports need a reset to enable; USB 3 ports normally enable themselves,
-            // so if one hasn't, try a warm reset.
-            let usb3 = Speed::from_portsc(v) == Speed::Super;
-            self.write_portsc(port, v | if usb3 { PORT_WPR } else { PORT_PR });
+        let usb3 = self.usb3.get(port as usize).copied().unwrap_or(false) || Speed::from_portsc(v) == Speed::Super;
+        if v & PORT_PED == 0 && usb3 {
+            // USB 3 ports enable themselves once link training is done (the link state reads
+            // "Polling" meanwhile); give it time, then try a warm reset.
+            if !wait_until(1000, || self.portsc(port) & PORT_PED != 0) {
+                kprintln!("xhci: port {} still training (portsc {:#x}), warm reset", port, self.portsc(port));
+                let v = self.portsc(port);
+                self.write_portsc(port, v | PORT_WPR);
+                wait_until(1000, || self.portsc(port) & (PORT_PRC | 1 << 19) != 0 || self.portsc(port) & PORT_PED != 0);
+                wait_until(500, || self.portsc(port) & PORT_PED != 0);
+            }
+            self.clear_port_changes(port);
+        } else if v & PORT_PED == 0 {
+            // USB 2 ports need a reset to enable.
+            self.write_portsc(port, v | PORT_PR);
             wait_until(500, || self.portsc(port) & PORT_PRC != 0 || self.portsc(port) & PORT_PED != 0);
             wait_until(100, || self.portsc(port) & PORT_PED != 0);
             self.clear_port_changes(port);
         }
         let v = self.portsc(port);
         if v & PORT_PED == 0 {
-            kprintln!("xhci: port {} would not enable (portsc {:#x})", port, v);
+            kprintln!("xhci: {} port {} would not enable (portsc {:#x})", if usb3 { "USB 3" } else { "USB 2" }, port, v);
             return None;
         }
         wait_until(20, || false); // reset recovery time

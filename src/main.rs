@@ -187,6 +187,16 @@ extern "C" fn kmain() -> ! {
         display::init(&modes, (w as u32, h as u32), fb.edid());
     }
     gpu::init(screen.base_addr().wrapping_sub(hhdm));
+    // Monitors the firmware switched on: each gets its own picture. (With one, a second
+    // monitor needs a native driver for the card; see docs/graphics.md.)
+    if let Some(resp) = FRAMEBUFFER_REQUEST.get_response() {
+        let fbs: alloc::vec::Vec<_> = resp.framebuffers().collect();
+        kprintln!("display: the firmware set up {} screen(s)", fbs.len());
+        for (i, fb) in fbs.iter().enumerate() {
+            kprintln!("display:   screen {}: {}x{}, {} bpp, monitor info {}", i + 1, fb.width(), fb.height(), fb.bpp(), if fb.edid().is_some() { "yes" } else { "no" });
+        }
+        display::set_screens(fbs.len());
+    }
     // Boot option "novbe": leave QEMU's graphics alone, as on a real PC (for testing scaling).
     if !EXECUTABLE_CMDLINE_REQUEST.get_response().and_then(|r| r.cmdline().to_str().ok()).is_some_and(|c| c.split_whitespace().any(|w| w == "novbe")) {
         display::init_driver();

@@ -46,6 +46,16 @@ Each driver step starts read-only: the driver reads the card's current state and
 a report from your PC shows what Solon sees, without risk), then takes over mode setting,
 with the firmware's picture kept as the fallback if anything fails.
 
+## Tested PCs
+
+- **GeForce RTX 3080 (Ampere, 2020)**, 1920x1080: recognised correctly, works through the
+  firmware's screen. A native driver (more resolutions, a second monitor) would need NVIDIA's
+  GSP firmware to be loaded and driven through its interface first, the biggest single piece
+  of work on this page; games would need a 3D driver on top, and games written for Solon.
+  A second monitor may still work without a driver if the PC's firmware switches it on: the
+  log says how many screens it set up (`display: the firmware set up N screen(s)`), and
+  Settings > Display shows it.
+
 ## What's needed from you
 
 Run Solon on each PC and look at Settings > About (or the `gpu:` lines in the diagnostics
