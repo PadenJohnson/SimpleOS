@@ -543,26 +543,8 @@ fn poll_ms(r: &Bar0, tries: u32, ms: u64, mut f: impl FnMut(&Bar0) -> bool) -> b
 /// Busy-wait about `us` microseconds, timed by the processor's time-stamp counter (calibrated
 /// once against the 100 Hz timer).
 pub fn udelay(us: u64) {
-    use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
-    static PER_US: AtomicU64 = AtomicU64::new(0);
     let tsc = || unsafe { core::arch::x86_64::_rdtsc() };
-    let mut per_us = PER_US.load(Relaxed);
-    if per_us == 0 {
-        // Measure over 10 timer ticks (100 ms).
-        let ticks = &crate::interrupts::TICKS;
-        let t0 = ticks.load(Relaxed);
-        while ticks.load(Relaxed) == t0 {
-            core::hint::spin_loop();
-        }
-        let (start, c0) = (ticks.load(Relaxed), tsc());
-        while ticks.load(Relaxed) < start + 10 {
-            core::hint::spin_loop();
-        }
-        per_us = ((tsc() - c0) / 100_000).max(1);
-        PER_US.store(per_us, Relaxed);
-        kprintln!("nvidia: {} time-stamp counts per microsecond", per_us);
-    }
-    let end = tsc() + us * per_us;
+    let end = tsc() + us * crate::cpu::tsc_per_us();
     while tsc() < end {
         core::hint::spin_loop();
     }

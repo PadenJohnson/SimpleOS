@@ -252,7 +252,35 @@ extern "x86-interrupt" fn double_fault(frame: InterruptStackFrame, _code: u64) -
     panic!("DOUBLE FAULT\n{:#?}", frame);
 }
 
-extern "x86-interrupt" fn general_protection(frame: InterruptStackFrame, code: u64) {
+/// A model-specific register is being probed: a #GP on its RDMSR means "not here".
+static MSR_PROBE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static MSR_FAULTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Read a model-specific register that this processor may not have (another make or
+/// generation, or an emulator): None instead of a crash.
+pub fn rdmsr_safe(msr: u32) -> Option<u64> {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        MSR_FAULTED.store(false, Ordering::SeqCst);
+        MSR_PROBE.store(true, Ordering::SeqCst);
+        let (lo, hi): (u32, u32);
+        unsafe { core::arch::asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi, options(nostack)) };
+        MSR_PROBE.store(false, Ordering::SeqCst);
+        if MSR_FAULTED.swap(false, Ordering::SeqCst) {
+            None
+        } else {
+            Some((hi as u64) << 32 | lo as u64)
+        }
+    })
+}
+
+extern "x86-interrupt" fn general_protection(mut frame: InterruptStackFrame, code: u64) {
+    // A probed RDMSR (0F 32) faulted: skip it and say so.
+    let ip = frame.instruction_pointer.as_u64();
+    if MSR_PROBE.load(Ordering::SeqCst) && unsafe { core::ptr::read_volatile(ip as *const [u8; 2]) } == [0x0f, 0x32] {
+        MSR_FAULTED.store(true, Ordering::SeqCst);
+        unsafe { frame.as_mut().update(|f| f.instruction_pointer += 2u64) };
+        return;
+    }
     panic!("GENERAL PROTECTION FAULT (code {:#x})\n{:#?}", code, frame);
 }
 

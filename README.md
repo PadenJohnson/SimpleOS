@@ -117,7 +117,8 @@ nothing to download.
   as a monitor does; only one bigger than the screen's start-up mode needs a restart, after
   which Solon asks "Keep this resolution?" and goes back by itself after 15 seconds; the
   monitor's name and refresh rate; the screensaver), Mouse (speed),
-  Spelling (language, and the words you added, with Remove) and About. Saved in the library.
+  Spelling (language, and the words you added, with Remove), This PC and About. Saved in the
+  library.
   Right-click the desktop for quick ways to the background, display, screensaver, date and
   time, text size and spelling settings.
 - Graphics: works on every Intel, AMD and NVIDIA card through the firmware's screen; Solon
@@ -125,6 +126,10 @@ nothing to download.
   the screen to the card. Native drivers come a step at a time: see
   [docs/graphics.md](docs/graphics.md). The NVIDIA driver (GeForce RTX 20 series and newer)
   is at stage 1: it reads the card, its display engine and which connectors have monitors.
+- This PC (Settings): the processor (name, cores and threads; on AMD Ryzen its clock,
+  temperature and package power, live), the motherboard and BIOS and each memory module (from
+  the firmware's SMBIOS tables), and the board's sensors on Nuvoton NCT6798D/NCT6799D chips
+  (fans, temperatures, voltages). See [docs/hardware.md](docs/hardware.md).
 - Diagnostics (F12): the log; S saves it (and what the NVIDIA driver read) to the Solon stick.
 - Power button (top right): turn off screen, restart, shut down (ACPI, with confirmation)
 - Boots from a USB stick on UEFI and older BIOS PCs; on-screen diagnostics (F12) and a crash

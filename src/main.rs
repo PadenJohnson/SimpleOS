@@ -45,6 +45,8 @@ mod memory;
 mod movieui;
 mod movie;
 mod msc;
+mod cpu;
+mod hwmon;
 mod nvme;
 mod nvidia;
 mod pci;
@@ -65,6 +67,7 @@ mod screen;
 mod scrollbar;
 mod settings;
 mod settingsui;
+mod smbios;
 mod spell;
 mod sheetui;
 mod textedit;
@@ -84,7 +87,7 @@ use core::sync::atomic::Ordering::Relaxed;
 use alloc::string::String;
 use limine::request::{
     ExecutableCmdlineRequest, ExecutableFileRequest, FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, RequestsEndMarker, RequestsStartMarker, RsdpRequest,
-    StackSizeRequest,
+    SmbiosRequest, StackSizeRequest,
 };
 use limine::BaseRevision;
 use x86_64::instructions::{hlt, interrupts as cpu_irq};
@@ -137,6 +140,11 @@ static EXECUTABLE_CMDLINE_REQUEST: ExecutableCmdlineRequest = ExecutableCmdlineR
 #[used]
 #[link_section = ".requests"]
 static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
+
+/// The SMBIOS tables (what the motherboard, BIOS and memory are).
+#[used]
+#[link_section = ".requests"]
+static SMBIOS_REQUEST: SmbiosRequest = SmbiosRequest::new();
 
 /// The kernel file itself, which tells us which disk we booted from.
 #[used]
@@ -258,6 +266,26 @@ extern "C" fn kmain() -> ! {
         core::hint::spin_loop();
     }
 
+    // The processor, the motherboard and its sensors (Settings, This PC, and the log).
+    kprintln!("cpu: {}", cpu::describe());
+    // Boot option "msrtest": a register no processor has must read as "not there", not crash.
+    if EXECUTABLE_CMDLINE_REQUEST.get_response().and_then(|r| r.cmdline().to_str().ok()).is_some_and(|c| c.split_whitespace().any(|w| w == "msrtest")) {
+        let apic = unsafe { x86_64::registers::model_specific::Msr::new(0x1b).read() };
+        kprintln!(
+            "cpu: probes: missing {:?}, APIC base {:x?} (direct {:#x}), x2APIC ID {:x?}, MPERF {:x?}, P-state 0 {:x?}",
+            interrupts::rdmsr_safe(0x0bad_c0de), interrupts::rdmsr_safe(0x1b), apic, interrupts::rdmsr_safe(0x802), interrupts::rdmsr_safe(0xe7), interrupts::rdmsr_safe(0xc001_0064)
+        );
+    }
+    if let Some(e) = SMBIOS_REQUEST.get_response().and_then(|r| r.entry_64().or(r.entry_32())) {
+        let a = e.get() as u64;
+        smbios::init(if a >= hhdm { a - hhdm } else { a });
+    }
+    kprintln!("hwmon: {}", hwmon::init());
+    cpu::sample(); // starts the clock and power counters
+    if let Some(r) = hwmon::read() {
+        kprintln!("hwmon: {}", hwmon::describe(&r));
+    }
+
     // USB: controllers, keyboards/mice, and drives already plugged in.
     let t0 = TICKS.load(Relaxed);
     // Internal disks first: if Solon started from one, it isn't waiting for a USB stick.
@@ -348,6 +376,7 @@ extern "C" fn kmain() -> ! {
     cursor.show_at(&screen, cx, cy);
     kprintln!("solon: display {}x{}, desktop {}x{} (scale {}%)", view.res.0, view.res.1, lw, lh, scale * 50);
     kprintln!("solon: desktop ready");
+    kprintln!("cpu: {}", cpu::describe_sample(&cpu::sample()));
     let crash_test = EXECUTABLE_CMDLINE_REQUEST
         .get_response()
         .map(|r| r.cmdline().to_bytes().windows(9).any(|w| w == b"crashtest"))

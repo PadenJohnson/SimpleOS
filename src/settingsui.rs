@@ -1,6 +1,6 @@
 //! The Settings window: a sidebar of sections (Appearance, Date & time, Display, Mouse,
-//! Spelling, About), each a page of cards with switches, segmented buttons and drop-down
-//! lists. The desktop can open it at a given page (its right-click menu does).
+//! Spelling, This PC, About), each a page of cards with switches, segmented buttons and
+//! drop-down lists. This PC shows the processor, motherboard, memory and sensors, live. The desktop can open it at a given page (its right-click menu does).
 //!
 //! Each page is laid out once per draw or click as a list of items (where, and what a click
 //! does), so drawing and clicking always agree.
@@ -42,11 +42,12 @@ pub enum Page {
     Display,
     Mouse,
     Spelling,
+    ThisPc,
     About,
 }
 
 impl Page {
-    pub const ALL: [Page; 6] = [Page::Appearance, Page::DateTime, Page::Display, Page::Mouse, Page::Spelling, Page::About];
+    pub const ALL: [Page; 7] = [Page::Appearance, Page::DateTime, Page::Display, Page::Mouse, Page::Spelling, Page::ThisPc, Page::About];
     pub fn name(self) -> &'static str {
         match self {
             Page::Appearance => "Appearance",
@@ -54,6 +55,7 @@ impl Page {
             Page::Display => "Display",
             Page::Mouse => "Mouse",
             Page::Spelling => "Spelling",
+            Page::ThisPc => "This PC",
             Page::About => "About",
         }
     }
@@ -64,7 +66,8 @@ impl Page {
             Page::Display => "Resolution, screensaver",
             Page::Mouse => "Pointer speed",
             Page::Spelling => "Language, your words",
-            Page::About => "Version, this computer",
+            Page::ThisPc => "CPU, memory, sensors",
+            Page::About => "Version, screen, graphics",
         }
     }
 }
@@ -170,6 +173,13 @@ impl Ui {
         }
         self.y += h;
         Rect::new(self.x + 20, y, self.w - 40, h)
+    }
+    /// A row with a label on the left and a value on the right.
+    fn info(&mut self, label: &str, value: &str) {
+        let row = self.row(label, "", ROW - 8);
+        let room = row.w - text_width(label, Size::Small, true) - 40;
+        let v = crate::photos::ellipsize(value, room.max(80), Size::Small, false);
+        self.text(row.x + row.w - text_width(&v, Size::Small, false), row.y + (row.h - 20) / 2, &v, Size::Small, false, INK);
     }
     /// A row whose value is long: label, then the value, then a line of help under it.
     fn stacked(&mut self, label: &str, value: &str, help: &str) {
@@ -311,6 +321,7 @@ impl SettingsApp {
                 ui.end_card();
             }
             Page::Spelling => self.spelling(&mut ui, s),
+            Page::ThisPc => self.this_pc(&mut ui),
             Page::About => {
                 ui.card("Solon");
                 let row = ui.row("Version", "", ROW);
@@ -332,6 +343,93 @@ impl SettingsApp {
             }
         }
         ui.items
+    }
+
+    /// The page shows readings that change (the desktop redraws it every second).
+    pub fn live(&self) -> bool {
+        self.page == Page::ThisPc && !self.bg_picker
+    }
+
+    fn this_pc(&self, ui: &mut Ui) {
+        let ghz = |mhz: u32| format!("{}.{:02} GHz", mhz / 1000, (mhz % 1000 + 5) / 10 % 100);
+        let cpu = crate::cpu::info();
+        let now = crate::cpu::latest();
+        ui.card("Processor");
+        ui.info("Name", if cpu.brand.is_empty() { "Not named by the processor" } else { &cpu.brand });
+        let n = |k: u32, one: &str, many: &str| format!("{} {}", k, if k == 1 { one } else { many });
+        ui.info("Cores", &format!("{}, {} (Solon uses one for now)", n(cpu.cores, "core", "cores"), n(cpu.threads, "thread", "threads")));
+        let base = cpu.pstates.first().copied().unwrap_or(cpu.tsc_mhz);
+        let speed = match now.mhz {
+            Some(m) => format!("{} while busy (base {})", ghz(m), ghz(base)),
+            None => format!("Base {}", ghz(base)),
+        };
+        ui.info("Speed", &speed);
+        if let Some(t) = now.temp {
+            let mut v = crate::cpu::celsius(t);
+            for &(c, t) in &now.ccd {
+                v.push_str(&format!(", chiplet {}: {}", c + 1, crate::cpu::celsius(t)));
+            }
+            ui.info("Temperature", &v);
+        }
+        if let Some(mw) = now.mw {
+            ui.info("Power", &format!("{}.{} W for the whole package", mw / 1000, mw % 1000 / 100));
+        }
+        ui.end_card();
+        if let Some(b) = crate::smbios::get() {
+            let join = |parts: &[&str]| parts.iter().filter(|p| !p.is_empty()).copied().collect::<Vec<_>>().join(" ");
+            ui.card("Motherboard");
+            let model = join(&[&b.board_maker, &b.board_product]);
+            let model = if model.is_empty() { join(&[&b.system_maker, &b.system_product]) } else { model };
+            ui.info("Model", if model.is_empty() { "Not named by the firmware" } else { &model });
+            let bios = join(&[&b.bios_vendor, &b.bios_version]);
+            ui.info("BIOS", &if b.bios_date.is_empty() { bios } else { format!("{}, {}", bios, b.bios_date) });
+            if !b.socket.is_empty() {
+                ui.info("Processor socket", &b.socket);
+            }
+            ui.end_card();
+            let fitted: Vec<&crate::smbios::Dimm> = b.dimms.iter().filter(|d| d.mib > 0).collect();
+            if !fitted.is_empty() {
+                ui.card("Memory");
+                let total: u64 = fitted.iter().map(|d| d.mib).sum();
+                let slots = b.dimms.len();
+                ui.info("Installed", &format!("{} GB in {} of {} {}", total / 1024, fitted.len(), slots, if slots == 1 { "slot" } else { "slots" }));
+                for d in fitted {
+                    let mut v = format!("{} GB", d.mib / 1024);
+                    if !d.kind.is_empty() {
+                        v.push_str(&format!(" {}", d.kind));
+                    }
+                    if d.configured > 0 || d.speed > 0 {
+                        v.push_str(&format!(", {} MT/s", if d.configured > 0 { d.configured } else { d.speed }));
+                    }
+                    let who = join(&[&d.maker, &d.part]);
+                    if !who.is_empty() {
+                        v.push_str(&format!(", {}", who));
+                    }
+                    ui.info(if d.slot.is_empty() { "Module" } else { &d.slot }, &v);
+                }
+                ui.end_card();
+            }
+        }
+        match crate::hwmon::latest() {
+            Some(r) => {
+                ui.card(&format!("Sensors ({})", r.chip));
+                for (name, t) in &r.temps {
+                    ui.info(name, &crate::cpu::celsius(*t));
+                }
+                for &(n, rpm) in &r.fans {
+                    ui.info(&format!("Fan header {}", n), &if rpm == 0 { String::from("Not turning (or nothing connected)") } else { format!("{} RPM", rpm) });
+                }
+                for &(name, mv) in &r.volts {
+                    ui.info(name, &format!("{}.{:03} V", mv / 1000, mv % 1000));
+                }
+                ui.end_card();
+            }
+            None => {
+                ui.card("Sensors");
+                ui.row("No sensor chip Solon can read", "Fans, board temperatures and voltages show for Nuvoton NCT6798D and NCT6799D chips", ROW + 8);
+                ui.end_card();
+            }
+        }
     }
 
     fn appearance(&self, ui: &mut Ui, s: &Settings, screen: (usize, usize)) {

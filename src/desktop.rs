@@ -305,6 +305,8 @@ pub struct Desktop {
     pending_print: Option<(Vec<Source>, Layout, PrinterInfo)>,
     settings: Settings,
     settings_app: SettingsApp,
+    /// When Settings > This PC next redraws its live readings.
+    next_live: u64,
     /// Physical screen size (the desktop itself may be drawn smaller and enlarged).
     screen: (usize, usize),
     date: (u16, u8, u8),
@@ -460,6 +462,7 @@ impl Desktop {
             pending_print: None,
             settings,
             settings_app: SettingsApp::new(),
+            next_live: 0,
             screen,
             date: crate::rtc::date(),
             power_menu: false,
@@ -882,6 +885,11 @@ impl Desktop {
         }
         if matches!(&self.toast, Some((_, end)) if now >= *end) {
             self.toast = None;
+            redraw = true;
+        }
+        // Settings > This PC shows live readings: once a second while it's on screen.
+        if now >= self.next_live && self.is_open(App::Settings) && !self.minimized(App::Settings) && self.settings_app.live() {
+            self.next_live = now + HZ;
             redraw = true;
         }
         // Video editor: playback, previews, thumbnails, saving, exporting.
