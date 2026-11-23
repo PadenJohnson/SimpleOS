@@ -14,6 +14,7 @@ use zune_png::PngDecoder;
 const MAX_DIM: usize = 12_000;
 const MAX_PIXELS: usize = 100_000_000;
 
+#[derive(Clone)]
 pub struct Image {
     pub w: usize,
     pub h: usize,

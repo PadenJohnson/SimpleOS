@@ -75,7 +75,7 @@ impl App {
             App::Solitaire => "Solitaire",
             App::FreeCell => "FreeCell",
             App::Sudoku => "Sudoku",
-            App::Pinball => "Star Pinball",
+            App::Pinball => "Neon Grill",
             App::Shooter => "Starbase Breach",
         }
     }
@@ -1983,6 +1983,9 @@ impl Desktop {
             self.set_maximized(app, true);
         }
         kprintln!("solon: open {}", app.name());
+        if app == App::Pinball {
+            self.games.pinball.opened(Self::now());
+        }
         if app == App::Calendar {
             if !self.calendar.loaded() {
                 let t = self.storage.read_root_file(&mut self.usb, "Calendar.txt");

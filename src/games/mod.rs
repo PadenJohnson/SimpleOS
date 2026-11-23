@@ -1,8 +1,9 @@
-//! Games: Mines, Solitaire, FreeCell, Sudoku and Star Pinball (an original table).
+//! Games: Mines, Solitaire, FreeCell, Sudoku and Neon Grill pinball (an original table).
 //! Shared bits: random numbers, smooth lines, little sound effects, best scores.
 
 pub mod cards;
 pub mod mines;
+pub mod pinart;
 pub mod pinball;
 pub mod shooter;
 pub mod sudoku;
@@ -144,6 +145,10 @@ pub enum Sound {
     Boom,
     Win,
     Lost,
+    /// A counter bell: "order up".
+    Bell,
+    /// A spinner turning.
+    Spin,
 }
 
 struct Voice {
@@ -188,6 +193,11 @@ impl Sfx {
                 self.voices.push(Voice { freq: 784, end_freq: 784, t: 0, len: 450 * ms, vol: 3000, noise: false });
             }
             Sound::Lost => add(400, 120, 500, 4000, false),
+            Sound::Bell => {
+                add(1760, 1740, 420, 3000, false);
+                self.voices.push(Voice { freq: 2637, end_freq: 2600, t: 0, len: 300 * ms, vol: 1500, noise: false });
+            }
+            Sound::Spin => add(2400, 2000, 12, 1500, false),
         }
         if self.voices.len() > 12 {
             self.voices.remove(0);

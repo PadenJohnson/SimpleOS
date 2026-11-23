@@ -79,10 +79,14 @@ nothing to download.
   the Warden; easy/normal/hard; automap; decks unlock as you clear them), Solitaire (draw 1 or 3),
   FreeCell, Mines (easy,
   medium, hard; right-click or "Flag" for flags), Sudoku (puzzles made on the spot, always
-  with one answer; notes) and Star Pinball (an original space table with planet bumpers,
-  rollover lanes, star targets, a wormhole and a ball saver; flippers on Shift or by clicking
-  either half of the table). Cards move by dragging or with a single click. Best times, wins
-  and the pinball high score are saved; little sound effects play through the sound card.
+  with one answer; notes) and Neon Grill Pinball (an original 1980s-diner table: a 3D opening of
+  the whole machine lighting up in a dark arcade before the camera swoops down onto the
+  playfield; shaded burger, donut and pie bumpers, E-A-T lanes, M-E-N-U drop targets, a fries
+  spinner, a see-through milkshake ramp, the kitchen window, glowing lamps, food orders to fill
+  and serve, a two-ball lunch rush, a dot-matrix score display and a ball saver; flippers on
+  Shift or by clicking either half of the table). Cards move by dragging or with a single
+  click. Best times, wins and the pinball high score are saved; little sound effects play
+  through the sound card.
 - Sound: Intel High Definition Audio (the sound chip in nearly every PC since about 2005),
   through the speakers, headphones and line out. Checked in QEMU; not yet on a real PC.
 - Phones over USB: Android phones (MTP, "File transfer") and iPhones and cameras (PTP) show up

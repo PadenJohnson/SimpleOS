@@ -22,7 +22,7 @@ pub fn tile_color(app: App) -> u32 {
         App::Solitaire => rgb(30, 130, 80),
         App::FreeCell => rgb(20, 110, 120),
         App::Sudoku => rgb(200, 140, 40),
-        App::Pinball => rgb(70, 40, 130),
+        App::Pinball => rgb(200, 44, 60),
         App::Shooter => rgb(150, 50, 30),
         App::Writer => rgb(43, 87, 184),
         App::Pdf => rgb(214, 48, 49),
@@ -190,12 +190,16 @@ pub fn draw(c: &mut Canvas, app: App, x: i32, y: i32) {
             c.circle(x + 40, y + 24, 3, rgb(60, 60, 70));
         }
         App::Pinball => {
-            // A ball, a flipper and a star.
-            c.circle(x + 24, y + 22, 9, WHITE);
-            c.circle(x + 21, y + 19, 3, rgb(200, 200, 230));
-            c.triangle([(x + 14, y + 46), (x + 50, y + 52), (x + 14, y + 54)], rgb(255, 210, 90));
-            c.triangle([(x + 46, y + 14), (x + 42, y + 26), (x + 50, y + 26)], rgb(255, 230, 120));
-            c.triangle([(x + 46, y + 30), (x + 38, y + 20), (x + 54, y + 20)], rgb(255, 230, 120));
+            // A burger and a pinball: the diner table.
+            c.round_rect(x + 12, y + 28, 36, 13, 6, rgb(226, 160, 80));
+            for (dx, dy) in [(20, 32), (28, 31), (36, 33), (42, 31)] {
+                c.fill_rect(x + dx, y + dy, 3, 2, rgb(255, 245, 210));
+            }
+            c.fill_rect(x + 11, y + 40, 38, 3, rgb(110, 200, 80));
+            c.round_rect(x + 10, y + 43, 40, 6, 3, rgb(110, 60, 30));
+            c.round_rect(x + 12, y + 49, 36, 6, 3, rgb(226, 160, 80));
+            c.circle(x + 47, y + 17, 8, WHITE);
+            c.circle(x + 44, y + 14, 3, rgb(200, 200, 230));
         }
         App::Movie => {
             // A film strip with a timeline under it.
