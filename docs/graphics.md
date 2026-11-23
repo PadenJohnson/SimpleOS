@@ -66,8 +66,13 @@ without NVIDIA's signed firmware, so screen modes and several monitors are possi
    - 3a (done): find the firmware's picture in video memory (its context DMA in the display
      engine's object table) and save the memory around BAR1's page tables, to place a second
      picture.
-   - 3b (done, on request: F12, then T): start the core channel with a command buffer in
-     system memory, run one command that changes nothing, stop it.
+   - 3b (on request: F12, then T): start the core channel with a command buffer in system
+     memory, run one command that changes nothing, stop it, and put every register back.
+     First try on the RTX 3080: the channel started (state 0xb) but never fetched the
+     command (state 0xc, GET 0): the firmware leaves PCI bus mastering off, so the card
+     couldn't read system memory; the test now turns it on for the duration. It also checks
+     BAR1's mode (0xb80f40) and compares the picture read through PRAMIN with the CPU's view
+     through BAR1, to tell whether BAR1 maps video memory directly.
    - 3c: light head 1 on DisplayPort 3: core and window commands, the supervisor steps
      (pixel clock, output routing, DisplayPort link training), a picture of its own.
 4. **Stage 4: more monitors.** Light the other heads and outputs (DisplayPort link training,

@@ -79,6 +79,11 @@ impl Screen {
         self.base as u64
     }
 
+    /// Bytes per row.
+    pub fn pitch(&self) -> usize {
+        self.pitch
+    }
+
     /// Something else drew on the screen: the next `present` sends everything.
     pub fn invalidate(&self) {
         *self.last.borrow_mut() = None;

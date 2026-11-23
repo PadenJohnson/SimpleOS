@@ -190,9 +190,9 @@ extern "C" fn kmain() -> ! {
     gpu::init(screen.base_addr().wrapping_sub(hhdm));
     // NVIDIA driver, stage 1 (only reads). Boot option "nonvidia" skips it.
     if !EXECUTABLE_CMDLINE_REQUEST.get_response().and_then(|r| r.cmdline().to_str().ok()).is_some_and(|c| c.split_whitespace().any(|w| w == "nonvidia")) {
-        let nv = gpu::GPUS.lock().iter().find(|g| g.vendor == gpu::Vendor::Nvidia).map(|g| (g.bars.first().copied(), g.bars.get(1).copied()));
-        if let Some((Some(bar0), bar1)) = nv {
-            nvidia::probe(bar0, bar1, screen.base_addr().wrapping_sub(hhdm));
+        let nv = gpu::GPUS.lock().iter().find(|g| g.vendor == gpu::Vendor::Nvidia).map(|g| (g.bars.first().copied(), g.bars.get(1).copied(), g.at));
+        if let Some((Some(bar0), bar1, at)) = nv {
+            nvidia::probe(bar0, bar1, screen.base_addr().wrapping_sub(hhdm), at, screen.base_addr(), screen.pitch());
         }
     }
     // Monitors the firmware switched on: each gets its own picture. (With one, a second

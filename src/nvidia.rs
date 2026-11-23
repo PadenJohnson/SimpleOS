@@ -63,6 +63,11 @@ pub struct Report {
 /// The card, kept for stage 3b (run later, from the diagnostics screen).
 struct Card {
     bar0: u64,
+    /// PCI location (bus, device, function).
+    at: (u8, u8, u8),
+    /// The firmware's picture as the CPU sees it (virtual address), and its row length.
+    fb: u64,
+    pitch: usize,
 }
 
 static CARD: Mutex<Option<Card>> = Mutex::new(None);
@@ -116,8 +121,9 @@ fn chip_name(chipset: u32) -> &'static str {
 }
 
 /// Display register ranges saved to the stick: (start, number of 32-bit registers).
-const SNAPSHOT: [(u32, u32); 16] = [
+const SNAPSHOT: [(u32, u32); 17] = [
     (0x000000, 0x40),   // PMC: chip identification
+    (0xb80f00, 0x40),   // BAR1/BAR2 instance blocks and modes (Turing and newer)
     (0x001700, 0x10),   // PRAMIN window and BAR1/BAR2 setup
     (0x00d900, 0x200),  // AUX channels and I2C pads
     (0x00e900, 0x40),   // VPLL enables
@@ -137,13 +143,13 @@ const SNAPSHOT: [(u32, u32); 16] = [
 
 /// Run stages 1, 2 and 3a on an NVIDIA card. `bar0`: its register window; `bar1`: its video
 /// memory window; `fb`: where the firmware's picture is (physical).
-pub fn probe(bar0: (u64, u64), bar1: Option<(u64, u64)>, fb: u64) {
+pub fn probe(bar0: (u64, u64), bar1: Option<(u64, u64)>, fb: u64, at: (u8, u8, u8), fb_virt: u64, pitch: usize) {
     if bar0.1 < 0x0100_0000 {
         kprintln!("nvidia: register window too small ({:#x})", bar0.1);
         return;
     }
     let r = Bar0 { base: crate::memory::map_mmio(bar0.0, 0x0100_0000) };
-    *CARD.lock() = Some(Card { bar0: r.base });
+    *CARD.lock() = Some(Card { bar0: r.base, at, fb: fb_virt, pitch });
     let boot0 = r.rd(0x000000);
     let chipset = (boot0 & 0x1ff0_0000) >> 20;
     let name = chip_name(chipset);
@@ -666,7 +672,8 @@ fn talk_to_monitor(r: &Bar0, ch: u8, c: &mut Conn) {
     // Pad in AUX mode (nouveau gm200_i2c_pad_mode): only written if it isn't already.
     let pad = ch as u32 * 0x50;
     let (mode, off) = (r.rd(0x00d970 + pad), r.rd(0x00d97c + pad));
-    if mode & 0xc003 != 0x0002 || off & 1 != 0 {
+    let switched = mode & 0xc003 != 0x0002 || off & 1 != 0;
+    if switched {
         kprintln!("nvidia:   {}: pins to AUX mode (were {:#x}, {:#x})", c.label, mode, off);
         r.wr(0x00d970 + pad, (mode & !0xc003) | 0x0002);
         r.wr(0x00d97c + pad, off & !1);
@@ -701,6 +708,11 @@ fn talk_to_monitor(r: &Bar0, ch: u8, c: &mut Conn) {
             c.edid = e;
         }
         Err(e) => kprintln!("nvidia:   {}: EDID: {}", c.label, e),
+    }
+    // Leave the pins as the firmware had them, so nothing looks different to it next start.
+    if switched {
+        r.wr(0x00d970 + pad, mode);
+        r.wr(0x00d97c + pad, off);
     }
 }
 
@@ -784,35 +796,67 @@ fn find_picture(r: &Bar0, bar1: Option<(u64, u64)>, fb: u64) -> Vec<(&'static st
 
 // ---- stage 3b: the core channel ----------------------------------------------------------------
 
-/// F12, then T: start the core channel, send one command that changes nothing, check the
-/// engine read it, stop the channel. Returns what happened, for the screen and the log.
+/// F12, then T: checks for stage 3, all put back afterwards:
+/// 1. BAR1's mode, and whether the PRAMIN window and BAR1 see the same video memory (the
+///    firmware's picture read both ways), which tells where a second picture can go;
+/// 2. the core channel: with bus mastering on (the firmware turns it off), start it with a
+///    command buffer in system memory, send one command that changes nothing, check the
+///    engine read it, stop it (nouveau gv100_disp_core_init/fini).
+/// Returns what happened, for the screen and the log.
 pub fn channel_test() -> String {
     let card = CARD.lock();
     let Some(c) = card.as_ref() else { return String::from("No NVIDIA card (or the driver is off)") };
     let r = Bar0 { base: c.bar0 };
-    let state = r.rd(0x610630);
-    kprintln!("nvidia: core channel test: control {:#x}, state {:#x}", r.rd(0x6104e0), state);
-    if (state & 0x001f_0000) == 0x000b_0000 {
-        return String::from("The core channel is already running (left alone)");
+    // 1. BAR1 and PRAMIN.
+    kprintln!("nvidia: BAR1 mode {:#010x}, BAR2 {:#010x}, status {:#010x} (bit 31 = page tables in use)", r.rd(0xb80f40), r.rd(0xb80f48), r.rd(0xb80f50));
+    let rows = 8usize;
+    let via_pramin = vram_read(&r, 0, rows * c.pitch);
+    let mut same = 0usize;
+    let mut first_diff = None;
+    for k in 0..via_pramin.len() / 4 {
+        let cpu = unsafe { core::ptr::read_volatile((c.fb + k as u64 * 4) as *const u32) };
+        if cpu == le32(&via_pramin, k * 4) {
+            same += 1;
+        } else if first_diff.is_none() {
+            first_diff = Some((k * 4, cpu, le32(&via_pramin, k * 4)));
+        }
     }
+    let words = via_pramin.len() / 4;
+    let identity = same == words && via_pramin.iter().any(|&b| b != 0);
+    kprintln!(
+        "nvidia: the picture's first {} rows read through PRAMIN at video memory 0: {} of {} words match what the CPU sees{}",
+        rows, same, words,
+        first_diff.map(|(o, a, b)| format!(" (first difference at {:#x}: CPU {:#010x}, PRAMIN {:#010x})", o, a, b)).unwrap_or_default()
+    );
+    let mut summary = String::from(if identity { "BAR1 maps video memory directly. " } else { "BAR1 and PRAMIN differ. " });
+
+    // 2. The core channel.
+    let (orig_ctl, orig_state) = (r.rd(0x6104e0), r.rd(0x610630));
+    let orig_push = [r.rd(0x610b20), r.rd(0x610b24), r.rd(0x610b28), r.rd(0x610b2c)];
+    kprintln!("nvidia: core channel test: control {:#x}, state {:#x}, push {:08x?}", orig_ctl, orig_state, orig_push);
+    if (orig_state & 0x001f_0000) == 0x000b_0000 {
+        return summary + "The core channel is already running (left alone)";
+    }
+    // Bus mastering lets the card read system memory (PCI command register bit 2).
+    let (bus, dev, func) = c.at;
+    let orig_cmd = crate::pci::read32(bus, dev, func, 0x04);
+    if orig_cmd & 4 == 0 {
+        crate::pci::write32(bus, dev, func, 0x04, (orig_cmd & 0xffff) | 4);
+    }
+    kprintln!("nvidia: PCI command {:#06x} -> {:#06x}", orig_cmd & 0xffff, crate::pci::read32(bus, dev, func, 0x04) & 0xffff);
     // A command buffer in system memory: target 3 (coherent), address >> 8.
     let push = crate::memory::Dma::new(0x1000, 0x1000);
     let phys = push.phys();
-    if phys >> 40 != 0 {
-        return format!("The command buffer is above 1 TiB ({:#x}); the display engine can't reach it", phys);
-    }
     let value = 3 | (phys >> 8);
     r.wr(0x610b24, value as u32);
     r.wr(0x610b20, (value >> 32) as u32);
     r.wr(0x610b28, 1);
     r.wr(0x610b2c, 0x40);
-    let ctl = r.rd(0x6104e0);
-    r.wr(0x6104e0, ctl | 0x10);
+    r.wr(0x6104e0, orig_ctl | 0x10);
     r.wr(0x680000, 0); // PUT
     r.wr(0x6104e0, 0x13);
     let up = poll_ms(&r, 2_000_000, 2000, |r| r.rd(0x610630) & 0x001f_0000 == 0x000b_0000);
-    kprintln!("nvidia: core channel {} (state {:#x}, GET {:#x})", if up { "running" } else { "didn't start" }, r.rd(0x610630), r.rd(0x680004));
-    let mut result = String::new();
+    kprintln!("nvidia: core channel {} (state {:#x}, GET {:#x}, buffer at {:#x})", if up { "running" } else { "didn't start" }, r.rd(0x610630), r.rd(0x680004), phys);
     if up {
         // One method, rewriting the value the engine already has (method 0x0218, its state at
         // 0x680218), so nothing changes; no UPDATE, so nothing is applied anyway.
@@ -825,23 +869,31 @@ pub fn channel_test() -> String {
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         r.wr(0x680000, 8);
-        let read = poll_ms(&r, 2_000_000, 2000, |r| r.rd(0x680004) == 8);
+        let read = poll_ms(&r, 2_000_000, 1000, |r| r.rd(0x680004) == 8);
         kprintln!("nvidia: core channel {} the command (GET {:#x}, state {:#x})", if read { "read" } else { "didn't read" }, r.rd(0x680004), r.rd(0x610630));
-        result = if read {
-            String::from("The display engine ran a command from Solon: the command path works")
-        } else {
-            String::from("The core channel started but didn't read Solon's command")
-        };
+        if !read {
+            kprintln!(
+                "nvidia:   interrupts {:#x}, exceptions {:#x}, supervisor {:#x}, core exception {:#x} {:#x}, push readback {:#x} {:#x}",
+                r.rd(0x611ec0), r.rd(0x611854), r.rd(0x611c30), r.rd(0x611020), r.rd(0x611024), r.rd(0x610b20), r.rd(0x610b24)
+            );
+        }
+        summary += if read { "The display engine ran a command from Solon: the command path works" } else { "The core channel started but didn't read Solon's command" };
     } else {
-        result.push_str("The core channel didn't start");
+        summary += "The core channel didn't start";
     }
-    // Stop it again (nouveau gv100_disp_core_fini).
+    // Stop it (nouveau gv100_disp_core_fini) and put everything back as it was.
     let ctl = r.rd(0x6104e0);
     r.wr(0x6104e0, ctl & !0x10);
-    poll_ms(&r, 2_000_000, 2000, |r| r.rd(0x610630) & 0x001f_0000 == 0x000b_0000);
+    poll_ms(&r, 2_000_000, 1000, |r| r.rd(0x610630) & 0x001f_0000 == 0x000b_0000);
     let ctl = r.rd(0x6104e0);
     r.wr(0x6104e0, ctl & !0x2);
-    kprintln!("nvidia: core channel stopped (control {:#x}, state {:#x})", r.rd(0x6104e0), r.rd(0x610630));
+    r.wr(0x610b20, orig_push[0]);
+    r.wr(0x610b24, orig_push[1]);
+    r.wr(0x610b28, orig_push[2]);
+    r.wr(0x610b2c, orig_push[3]);
+    r.wr(0x6104e0, orig_ctl);
+    crate::pci::write32(bus, dev, func, 0x04, orig_cmd & 0xffff);
+    kprintln!("nvidia: core channel stopped and put back (control {:#x}, state {:#x}, PCI command {:#06x})", r.rd(0x6104e0), r.rd(0x610630), crate::pci::read32(bus, dev, func, 0x04) & 0xffff);
     drop(push);
-    result
+    summary
 }
