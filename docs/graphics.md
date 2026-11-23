@@ -57,8 +57,9 @@ without NVIDIA's signed firmware, so screen modes and several monitors are possi
    connector and whether a monitor is plugged in. Logged as `nvidia: ...`; F12 then S saves
    the log, the VBIOS (NVVBIOS.ROM) and a display register snapshot (NVREGS.BIN) to the stick.
    Boot option `nonvidia` turns it off.
-2. **Stage 2: talk to monitors.** DisplayPort AUX and HDMI DDC: read each monitor's EDID (its
-   name and modes) without changing the picture.
+2. **Stage 2: talk to monitors (done, untested on hardware).** DisplayPort AUX: each
+   monitor's DisplayPort capabilities (DPCD) and EDID (its name and modes), without changing
+   the picture. HDMI (DDC over I2C) comes later.
 3. **Stage 3: take over the display.** Claim it from the firmware, set up the display
    engine's memory, core and window channels, and set a mode on the first monitor.
 4. **Stage 4: more monitors.** Light the other heads and outputs (DisplayPort link training,
@@ -69,8 +70,11 @@ Each stage is tried on a real card before it's switched on by default.
 ## Tested PCs
 
 - **GeForce RTX 3080 Founders Edition 10 GB (GA102, Ampere, 2020)**, 1920x1080: recognised
-  correctly, works through the firmware's screen. The NVIDIA driver above is being built for
-  it. Games (3D) would need NVIDIA's GSP firmware and a full 3D driver: not planned.
+  correctly, works through the firmware's screen. Stage 1 read it correctly: 10 GiB, 4 heads,
+  4 outputs, 8 windows; head 0 1920x1080 at 60 Hz on output 2 (DisplayPort); connectors
+  DisplayPort 1-3 and HDMI, with monitors detected on DisplayPort 2 (the one shown) and
+  DisplayPort 3. The NVIDIA driver is being built on it. Games (3D) would need NVIDIA's GSP
+  firmware and a full 3D driver: not planned.
   A second monitor may still work without a driver if the PC's firmware switches it on: the
   log says how many screens it set up (`display: the firmware set up N screen(s)`), and
   Settings > Display shows it.

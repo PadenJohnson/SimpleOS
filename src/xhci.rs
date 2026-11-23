@@ -225,6 +225,9 @@ pub struct Xhci {
     pub switched_ports: bool,
     /// Which ports are USB 3 (from the controller's Supported Protocol tables; index = port).
     usb3: Vec<bool>,
+    /// When the ports were powered (ticks): USB 3 links get a second from then to come up,
+    /// shared by all ports rather than a second each.
+    started: u64,
 }
 
 #[inline]
@@ -342,6 +345,7 @@ impl Xhci {
             pci: *dev,
             switched_ports,
             usb3: Self::usb3_ports(cap, hcc1, max_ports),
+            started: ticks(),
         };
         // Power all ports; connected ones are picked up through port changes.
         for p in 1..=max_ports {
@@ -458,12 +462,14 @@ impl Xhci {
         if v & PORT_PED == 0 && usb3 {
             // USB 3 ports enable themselves once link training is done (the link state reads
             // "Polling" meanwhile); give it time, then try a warm reset.
-            if !wait_until(1000, || self.portsc(port) & PORT_PED != 0) {
+            let deadline = self.started + HZ; // one second after power-up, for all ports together
+            let left_ms = deadline.saturating_sub(ticks()) * 1000 / HZ;
+            if !wait_until(left_ms, || self.portsc(port) & PORT_PED != 0) {
                 kprintln!("xhci: port {} still training (portsc {:#x}), warm reset", port, self.portsc(port));
                 let v = self.portsc(port);
                 self.write_portsc(port, v | PORT_WPR);
-                wait_until(1000, || self.portsc(port) & (PORT_PRC | 1 << 19) != 0 || self.portsc(port) & PORT_PED != 0);
-                wait_until(500, || self.portsc(port) & PORT_PED != 0);
+                wait_until(300, || self.portsc(port) & (PORT_PRC | 1 << 19) != 0 || self.portsc(port) & PORT_PED != 0);
+                wait_until(100, || self.portsc(port) & PORT_PED != 0);
             }
             self.clear_port_changes(port);
         } else if v & PORT_PED == 0 {

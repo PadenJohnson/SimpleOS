@@ -171,6 +171,16 @@ impl Ui {
         self.y += h;
         Rect::new(self.x + 20, y, self.w - 40, h)
     }
+    /// A row whose value is long: label, then the value, then a line of help under it.
+    fn stacked(&mut self, label: &str, value: &str, help: &str) {
+        let row = self.row("", "", ROW + 30);
+        self.text(row.x, row.y + 12, label, Size::Small, true, INK);
+        let v = crate::photos::ellipsize(value, row.w, Size::Small, false);
+        self.text(row.x, row.y + 36, &v, Size::Small, false, INK);
+        let h = crate::photos::ellipsize(help, row.w, Size::Small, false);
+        self.text(row.x, row.y + 60, &h, Size::Small, false, DIM);
+    }
+
     fn button(&mut self, r: Rect, label: &str, primary: bool, act: Act) {
         self.items.push((r, It::Button { label: String::from(label), primary, act }));
     }
@@ -414,26 +424,38 @@ impl SettingsApp {
             label += " (best)";
         }
         ui.drop_right(row, 210, &label, if modes.len() > 1 { Act::Open(Drop::Resolution) } else { Act::None });
+        // Graphics and monitors: the value has a line of its own (it can be long).
         let mut graphics = crate::gpu::main_name().unwrap_or_else(|| String::from("Unknown"));
         if let Some(r) = crate::nvidia::REPORT.lock().as_ref() {
             graphics = format!("{}: {}", graphics, r.summary);
         }
-        let row = ui.row("Graphics", crate::gpu::support(), ROW + 8);
-        let g = crate::photos::ellipsize(&graphics, row.w / 2, Size::Small, false);
-        ui.text(row.x + row.w - text_width(&g, Size::Small, false), row.y + 22, &g, Size::Small, false, INK);
+        ui.stacked("Graphics", &graphics, crate::gpu::support());
         let n = crate::display::screens();
-        let nv: Option<(usize, usize, String)> = crate::nvidia::REPORT.lock().as_ref().filter(|r| !r.connectors.is_empty()).map(|r| {
-            let on: Vec<&str> = r.connectors.iter().filter(|c| c.1 == Some(true)).map(|c| c.0.as_str()).collect();
-            (r.connectors.len(), on.len(), on.join(", "))
+        let monitors: Option<String> = crate::nvidia::REPORT.lock().as_ref().filter(|r| !r.connectors.is_empty()).map(|r| {
+            let on: Vec<String> = r
+                .connectors
+                .iter()
+                .filter(|c| c.plugged == Some(true) || c.monitor.is_some())
+                .map(|c| match (&c.monitor, c.mode) {
+                    (Some(m), Some((w, h, hz))) => format!("{} on {} ({}x{}, {} Hz)", m, c.label, w, h, (hz + 50) / 100),
+                    (Some(m), None) => format!("{} on {}", m, c.label),
+                    _ => format!("A monitor on {}", c.label),
+                })
+                .collect();
+            if on.is_empty() {
+                format!("None found on the card's {} connectors", r.connectors.len())
+            } else {
+                on.join(", ")
+            }
         });
-        let help = if n > 1 { "Solon uses the first; using more is being worked on" } else { "A second monitor needs a driver for this graphics card" };
-        let row = ui.row("Monitors", help, ROW + 8);
-        let t = match &nv {
-            Some((_, on, names)) if *on > 0 => format!("{} plugged in ({}); {} shown", on, names, n),
-            Some((all, _, _)) => format!("None found on the {} connectors; {} shown", all, n),
-            None => format!("{} switched on by the PC", n),
+        let help = if n > 1 {
+            String::from("Solon uses the first; using more is being worked on")
+        } else if monitors.is_some() {
+            format!("Solon shows {} of them for now; lighting the others is the driver's next stage", n)
+        } else {
+            String::from("A second monitor needs a driver for this graphics card")
         };
-        ui.text(row.x + row.w - text_width(&t, Size::Small, false), row.y + 22, &t, Size::Small, false, INK);
+        ui.stacked("Monitors", &monitors.unwrap_or_else(|| format!("{} switched on by the PC", n)), &help);
         let row = ui.row("Monitor", "", ROW);
         let mut m = info.monitor.clone().unwrap_or_else(|| String::from("Unknown"));
         if let Some(hz) = info.refresh {

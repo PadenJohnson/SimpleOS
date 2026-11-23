@@ -6,25 +6,45 @@
 //! driver drove these cards' screens. Register offsets here follow nouveau (MIT licence,
 //! drivers/gpu/drm/nouveau/nvkm in Linux), credited with each.
 //!
-//! Stage 1 only reads: the chip and video memory, the display engine's size, what each head
-//! shows and through which output, and from the card's VBIOS tables every connector and
-//! whether a monitor is plugged into it. Reading the VBIOS moves the BAR0 "PRAMIN" window over
-//! its copy in video memory and back (as nouveau does), which doesn't affect the picture.
-//! Everything goes to the log, and the VBIOS and a snapshot of the display registers can be
-//! saved to the Solon stick (F12, then S) to build the next stage from. Boot option
-//! "nonvidia" skips it.
+//! Stage 1 reads: the chip and video memory, the display engine's size, what each head shows
+//! and through which output, and from the card's VBIOS tables every connector and whether a
+//! monitor is plugged into it. Reading the VBIOS moves the BAR0 "PRAMIN" window over its copy
+//! in video memory and back (as nouveau does), which doesn't affect the picture.
+//!
+//! Stage 2 talks to the monitors over DisplayPort AUX (nouveau i2c/auxgm200.c, padgm200.c):
+//! their DisplayPort capabilities (DPCD) and EDID (name and modes). That only switches the
+//! connector's pins to AUX mode if they aren't already; the picture isn't touched.
+//!
+//! Everything goes to the log, and the VBIOS, the monitors' EDIDs and a snapshot of the
+//! display registers can be saved to the Solon stick (F12, then S) to build the next stage
+//! from. Boot option "nonvidia" skips it all.
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-/// What stage 1 found, kept for Settings and for saving to the stick.
+/// A connector on the card, from the VBIOS, and what's plugged into it.
+pub struct Conn {
+    /// "DisplayPort 2", "HDMI 1".
+    pub label: String,
+    /// A monitor on its hot-plug pin (None = can't tell).
+    pub plugged: Option<bool>,
+    /// Its DisplayPort AUX channel.
+    pub aux: Option<u8>,
+    /// From the monitor's EDID: its name and best mode (width, height, refresh in 1/100 Hz).
+    pub monitor: Option<String>,
+    pub mode: Option<(u32, u32, u32)>,
+    /// From its DPCD: "DisplayPort 1.4, 4 lanes at 8.1 Gbit/s".
+    pub link: Option<String>,
+    pub edid: Vec<u8>,
+}
+
+/// What the driver found, kept for Settings and for saving to the stick.
 pub struct Report {
     /// One line for Settings ("GA102, 10 GiB, 4 heads").
     pub summary: String,
-    /// Connectors from the VBIOS: name and whether a monitor is plugged in (None = unknown).
-    pub connectors: Vec<(String, Option<bool>)>,
+    pub connectors: Vec<Conn>,
     pub vbios: Vec<u8>,
     /// Display registers: for each range, start and count (u32 each), then the values.
     pub regs: Vec<u8>,
@@ -74,16 +94,23 @@ fn chip_name(chipset: u32) -> &'static str {
 }
 
 /// Display register ranges saved to the stick: (start, number of 32-bit registers).
-const SNAPSHOT: [(u32, u32); 9] = [
+const SNAPSHOT: [(u32, u32); 16] = [
     (0x000000, 0x40),   // PMC: chip identification
+    (0x001700, 0x10),   // PRAMIN window and BAR1/BAR2 setup
+    (0x00d900, 0x200),  // AUX channels and I2C pads
+    (0x00e900, 0x40),   // VPLL enables
+    (0x00ec00, 0x40),   // SOR clocks
+    (0x00ef00, 0x100),  // VPLLs (pixel clocks)
     (0x021200, 0x40),   // GPIO lines (bit 14: the pin's level)
-    (0x610000, 0x100),  // display: capabilities, counts
-    (0x6254e0, 0x10),   // display ownership
-    (0x625f00, 0x10),   // VBIOS image location
+    (0x088000, 0x40),   // PCI configuration (mirror)
+    (0x610000, 0x800),  // display: capabilities, channels, interrupts
+    (0x612000, 0x100),  // SOR clocks and routing (padlinks)
     (0x616000, 0x800),  // heads: capabilities, raster generator
     (0x61c000, 0x800),  // SORs (outputs): capabilities, links
+    (0x625000, 0x400),  // display: ownership, VBIOS image location
     (0x640000, 0x400),  // capabilities the driver publishes to the engine
     (0x680000, 0x4000), // core channel state: assembly and armed (what's on screen)
+    (0x690000, 0x2000), // window channels 0-7: state (assembly, armed at +0x800)
 ];
 
 /// Run stage 1 on an NVIDIA card (BAR0 = its register window).
@@ -164,10 +191,16 @@ pub fn probe(bar0: (u64, u64)) {
     }
 
     let vbios = read_vbios(&r, chipset);
-    let connectors = if vbios.is_empty() { Vec::new() } else { connectors(&r, &vbios) };
-    let plugged = connectors.iter().filter(|c| c.1 == Some(true)).count();
+    let mut connectors = if vbios.is_empty() { Vec::new() } else { connectors(&r, &vbios) };
+    let plugged = connectors.iter().filter(|c| c.plugged == Some(true)).count();
     if !connectors.is_empty() {
         kprintln!("nvidia: {} connectors, monitors plugged into {}", connectors.len(), plugged);
+    }
+    // Stage 2: ask each DisplayPort monitor about itself.
+    for c in connectors.iter_mut().filter(|c| c.plugged != Some(false)) {
+        if let Some(ch) = c.aux {
+            talk_to_monitor(&r, ch, c);
+        }
     }
 
     // The register snapshot.
@@ -274,7 +307,7 @@ fn trim_rom(mut b: Vec<u8>) -> Vec<u8> {
 
 /// The connectors from the VBIOS's DCB, connector and GPIO tables (nouveau bios/dcb.c, conn.c,
 /// gpio.c; engine/disp/conn.c), each with whether its hot-plug pin says a monitor is there.
-fn connectors(r: &Bar0, b: &[u8]) -> Vec<(String, Option<bool>)> {
+fn connectors(r: &Bar0, b: &[u8]) -> Vec<Conn> {
     let rd8 = |o: usize| b.get(o).copied().unwrap_or(0);
     let rd16 = |o: usize| u16::from_le_bytes([rd8(o), rd8(o + 1)]) as usize;
     let rd32 = |o: usize| u32::from_le_bytes([rd8(o), rd8(o + 1), rd8(o + 2), rd8(o + 3)]);
@@ -286,6 +319,19 @@ fn connectors(r: &Bar0, b: &[u8]) -> Vec<(String, Option<bool>)> {
     }
     let (hdr, cnt, len) = (rd8(dcb + 1) as usize, rd8(dcb + 2) as usize, rd8(dcb + 3) as usize);
     kprintln!("nvidia: DCB {}.{} at {:#x}: {} entries", ver >> 4, ver & 15, dcb, cnt);
+    // I2C/AUX table (nouveau bios/i2c.c, version 4.1: drive in bits 0-4, AUX channel 5-9).
+    let mut aux_of_bus: Vec<Option<u8>> = Vec::new();
+    let it = rd16(dcb + 4);
+    if it != 0 && rd8(it) >= 0x41 {
+        let (ih, ic, il) = (rd8(it + 1) as usize, rd8(it + 2) as usize, rd8(it + 3) as usize);
+        for k in 0..ic {
+            let e = rd16(it + ih + k * il);
+            let auxch = ((e >> 5) & 0x1f) as u8;
+            aux_of_bus.push(if auxch == 0x1f { None } else { Some(auxch) });
+        }
+    }
+    // Each connector's AUX channel: from its DisplayPort output entry's bus.
+    let mut aux_of_conn: [Option<u8>; 16] = [None; 16];
     // Outputs (just logged: which output resource and connector each uses).
     for i in 0..cnt {
         let e = dcb + hdr + i * len;
@@ -305,7 +351,13 @@ fn connectors(r: &Bar0, b: &[u8]) -> Vec<(String, Option<bool>)> {
             6 => "DisplayPort",
             _ => "other",
         };
-        kprintln!("nvidia:   output entry {}: {} on connector {}, output resources {:#x}, heads {:#x}", i, kind, (d >> 12) & 0xf, (d >> 24) & 0xf, (d >> 8) & 0xf);
+        kprintln!("nvidia:   output entry {}: {} on connector {}, output resources {:#x}, heads {:#x}, bus {}", i, kind, (d >> 12) & 0xf, (d >> 24) & 0xf, (d >> 8) & 0xf, (d >> 4) & 0xf);
+        if ty == 6 {
+            let conn = ((d >> 12) & 0xf) as usize;
+            if aux_of_conn[conn].is_none() {
+                aux_of_conn[conn] = aux_of_bus.get(((d >> 4) & 0xf) as usize).copied().flatten();
+            }
+        }
     }
     // GPIO table: hot-plug functions and their lines.
     let mut gpios: Vec<(u8, u8, u8)> = Vec::new(); // (func, line, logical level of "on")
@@ -383,16 +435,238 @@ fn connectors(r: &Bar0, b: &[u8]) -> Vec<(String, Option<bool>)> {
         } else {
             None
         };
+        let aux = aux_of_conn.get(k).copied().flatten();
         kprintln!(
-            "nvidia:   {} (type {:#04x}, entry {}): {}",
+            "nvidia:   {} (type {:#04x}, entry {}{}): {}",
             label, ty, k,
+            aux.map(|a| format!(", AUX {}", a)).unwrap_or_default(),
             match state {
                 Some(true) => "monitor plugged in",
                 Some(false) => "nothing plugged in",
                 None => "can't tell",
             }
         );
-        out.push((label, state));
+        out.push(Conn { label, plugged: state, aux, monitor: None, mode: None, link: None, edid: Vec::new() });
     }
     out
+}
+
+// ---- stage 2: DisplayPort AUX ------------------------------------------------------------
+
+/// Spend about `n` microseconds (each register read over PCIe takes roughly one).
+fn spin(r: &Bar0, n: u32) {
+    for _ in 0..n {
+        let _ = r.rd(0x000000);
+    }
+}
+
+/// Wait (polling, about 1 microsecond per try) until `f` says yes, at most `tries` times.
+fn poll(r: &Bar0, tries: u32, mut f: impl FnMut(&Bar0) -> bool) -> bool {
+    let start = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
+    for _ in 0..tries {
+        if f(r) {
+            return true;
+        }
+        // Never more than ~50 ms, however slow the reads are.
+        if crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed) > start + 5 {
+            break;
+        }
+    }
+    f(r)
+}
+
+/// One AUX transaction on channel `ch` (nouveau gm200_i2c_aux_xfer): `ty` 8 = native write,
+/// 9 = native read, 0/1 = I2C write/read (+4 = more to follow), up to 16 bytes at `addr`.
+/// Returns the sink's reply code (0 = done) and the bytes read.
+fn aux(r: &Bar0, ch: u8, ty: u8, addr: u32, data: &[u8], size: usize) -> Result<(u32, Vec<u8>), &'static str> {
+    let base = ch as u32 * 0x50;
+    let ctl = 0x00d954 + base;
+    let mask = |a: u32, m: u32, v: u32| {
+        let old = r.rd(a);
+        r.wr(a, (old & !m) | v);
+    };
+    let fini = || mask(ctl, 0x0071_0000, 0);
+    // Wait for any earlier transaction, then claim the channel.
+    if !poll(r, 1000, |r| r.rd(ctl) & 0x0701_0000 == 0) {
+        return Err("the AUX channel stays busy");
+    }
+    mask(ctl, 0x0070_0000, 0x0010_0000);
+    if !poll(r, 1000, |r| r.rd(ctl) & 0x0700_0000 == 0x0100_0000) {
+        fini();
+        return Err("the AUX channel didn't answer");
+    }
+    if r.rd(0x00d958 + base) & 0x1000_0000 == 0 {
+        fini();
+        return Err("no monitor on the AUX channel");
+    }
+    mask(0x00d968 + base, 0x0001_0000, 0); // automatic DPCD reads off meanwhile
+    if ty & 1 == 0 {
+        let mut x = [0u8; 16];
+        x[..data.len().min(16)].copy_from_slice(&data[..data.len().min(16)]);
+        for i in 0..4 {
+            r.wr(0x00d930 + base + i * 4, u32::from_le_bytes([x[i as usize * 4], x[i as usize * 4 + 1], x[i as usize * 4 + 2], x[i as usize * 4 + 3]]));
+        }
+    }
+    let mut c = r.rd(ctl) & !0x0001_f1ff;
+    c |= (ty as u32) << 12;
+    c |= if size > 0 { (size as u32 - 1) & 0xf } else { 0x100 };
+    r.wr(0x00d950 + base, addr);
+    let mut stat = 0;
+    let mut result: Result<(), &'static str> = Ok(());
+    // Like nouveau: try again (up to 32 times) after a deferral, no reply or an error.
+    for attempt in 0..32 {
+        r.wr(ctl, 0x8000_0000 | c);
+        r.wr(ctl, c);
+        if attempt > 0 {
+            spin(r, 400);
+        }
+        r.wr(ctl, 0x0001_0000 | c);
+        if !poll(r, 2000, |r| r.rd(ctl) & 0x0001_0000 == 0) {
+            result = Err("the AUX transaction timed out");
+            break;
+        }
+        stat = r.rd(0x00d958 + base);
+        r.wr(0x00d958 + base, stat);
+        result = if stat & 0x100 != 0 {
+            Err("the monitor didn't reply")
+        } else if stat & 0xe00 != 0 {
+            Err("AUX error")
+        } else if matches!(stat & 0x000f_0000, 0x0008_0000 | 0x0002_0000) {
+            Err("the monitor kept deferring")
+        } else {
+            Ok(())
+        };
+        if result.is_ok() {
+            break;
+        }
+    }
+    let mut out = Vec::new();
+    if result.is_ok() && ty & 1 == 1 {
+        for i in 0..4 {
+            out.extend_from_slice(&r.rd(0x00d940 + base + i * 4).to_le_bytes());
+        }
+        out.truncate(((stat & 0x1f) as usize).min(size));
+    }
+    mask(0x00d968 + base, 0x0001_0000, 0x0001_0000);
+    fini();
+    result.map(|_| ((stat >> 16) & 0xf, out))
+}
+
+/// Read `n` bytes of the monitor's DisplayPort configuration (DPCD) at `addr`.
+fn dpcd(r: &Bar0, ch: u8, addr: u32, n: usize) -> Result<Vec<u8>, &'static str> {
+    let mut out = Vec::new();
+    while out.len() < n {
+        let k = (n - out.len()).min(16);
+        let (reply, got) = aux(r, ch, 9, addr + out.len() as u32, &[], k)?;
+        if reply != 0 || got.is_empty() {
+            return Err("the monitor refused the DPCD read");
+        }
+        out.extend_from_slice(&got);
+    }
+    Ok(out)
+}
+
+/// The monitor's EDID (128 bytes, and the first extension if there is one), over I2C-over-AUX
+/// at address 0x50, as one I2C session per block (nouveau aux.c, the DisplayPort standard):
+/// address-only start, the offset, then 16-byte reads with "more to follow" (MOT, +4) set on
+/// all but the last.
+fn edid(r: &Bar0, ch: u8) -> Result<Vec<u8>, &'static str> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut want = 128;
+    while out.len() < want && out.len() < 256 {
+        let _ = aux(r, ch, 0x4, 0x50, &[], 0); // start
+        let (reply, _) = aux(r, ch, 0x4, 0x50, &[out.len() as u8], 1)?;
+        if reply != 0 {
+            let _ = aux(r, ch, 0x1, 0x50, &[], 0);
+            return Err("the monitor refused the EDID offset");
+        }
+        let block_end = out.len() + 128;
+        while out.len() < block_end {
+            let last = out.len() + 16 >= block_end;
+            let (reply, got) = aux(r, ch, if last { 0x1 } else { 0x5 }, 0x50, &[], 16)?;
+            if reply != 0 || got.is_empty() {
+                let _ = aux(r, ch, 0x1, 0x50, &[], 0);
+                return Err("the monitor refused the EDID read");
+            }
+            out.extend_from_slice(&got);
+        }
+        if out.len() == 128 && out.get(126).copied().unwrap_or(0) > 0 {
+            want = 256;
+        }
+    }
+    if out.len() < 128 || out[..8] != [0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0] {
+        return Err("the EDID isn't valid");
+    }
+    Ok(out)
+}
+
+/// The monitor's name and best mode from its EDID (descriptor 0xFC; first detailed timing).
+fn parse_edid(e: &[u8]) -> (Option<String>, Option<(u32, u32, u32)>) {
+    let mut name = None;
+    let mut mode = None;
+    for k in 0..4 {
+        let d = &e[54 + k * 18..54 + k * 18 + 18];
+        let clock = u16::from_le_bytes([d[0], d[1]]) as u64 * 10_000;
+        if clock != 0 {
+            if mode.is_none() {
+                let ha = d[2] as u64 | ((d[4] as u64 >> 4) << 8);
+                let hb = d[3] as u64 | ((d[4] as u64 & 15) << 8);
+                let va = d[5] as u64 | ((d[7] as u64 >> 4) << 8);
+                let vb = d[6] as u64 | ((d[7] as u64 & 15) << 8);
+                if (ha + hb) * (va + vb) > 0 {
+                    mode = Some((ha as u32, va as u32, (clock * 100 / ((ha + hb) * (va + vb))) as u32));
+                }
+            }
+        } else if d[3] == 0xFC {
+            let n: String = d[5..18].iter().take_while(|&&b| b != 0x0A).map(|&b| b as char).collect();
+            if !n.trim().is_empty() {
+                name = Some(String::from(n.trim()));
+            }
+        }
+    }
+    (name, mode)
+}
+
+/// Stage 2 for one connector: switch its pins to AUX if needed, then read the monitor's
+/// DisplayPort capabilities and EDID.
+fn talk_to_monitor(r: &Bar0, ch: u8, c: &mut Conn) {
+    // Pad in AUX mode (nouveau gm200_i2c_pad_mode): only written if it isn't already.
+    let pad = ch as u32 * 0x50;
+    let (mode, off) = (r.rd(0x00d970 + pad), r.rd(0x00d97c + pad));
+    if mode & 0xc003 != 0x0002 || off & 1 != 0 {
+        kprintln!("nvidia:   {}: pins to AUX mode (were {:#x}, {:#x})", c.label, mode, off);
+        r.wr(0x00d970 + pad, (mode & !0xc003) | 0x0002);
+        r.wr(0x00d97c + pad, off & !1);
+        spin(r, 1000);
+    }
+    match dpcd(r, ch, 0, 16) {
+        Ok(caps) => {
+            let rate = match caps[1] {
+                0x06 => "1.62",
+                0x0a => "2.7",
+                0x14 => "5.4",
+                0x1e => "8.1",
+                _ => "?",
+            };
+            let link = format!("DisplayPort {}.{}, {} lanes at {} Gbit/s", caps[0] >> 4, caps[0] & 15, caps[2] & 0x1f, rate);
+            kprintln!("nvidia:   {}: {} (DPCD {:02x?})", c.label, link, &caps[..]);
+            c.link = Some(link);
+        }
+        Err(e) => kprintln!("nvidia:   {}: DPCD: {}", c.label, e),
+    }
+    match edid(r, ch) {
+        Ok(e) => {
+            let (name, mode) = parse_edid(&e);
+            kprintln!(
+                "nvidia:   {}: monitor \"{}\", best {}",
+                c.label,
+                name.as_deref().unwrap_or("?"),
+                mode.map(|(w, h, hz)| format!("{}x{} at {}.{:02} Hz", w, h, hz / 100, hz % 100)).unwrap_or_else(|| String::from("?"))
+            );
+            c.monitor = name;
+            c.mode = mode;
+            c.edid = e;
+        }
+        Err(e) => kprintln!("nvidia:   {}: EDID: {}", c.label, e),
+    }
 }

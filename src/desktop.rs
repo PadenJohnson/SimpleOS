@@ -1040,13 +1040,23 @@ impl Desktop {
             text.push_str(&String::from_utf8_lossy(&line));
             text.push_str("\r\n");
         }
+        let fw_edid = crate::display::INFO.lock().as_ref().map(|i| i.edid.clone()).unwrap_or_default();
         let report = crate::nvidia::REPORT.lock();
+        let edid_names: Vec<String> = (0..16).map(|k| format!("NVEDID{:X}.BIN", k)).collect();
         let mut files: Vec<(&str, &[u8])> = Vec::from([("SOLONLOG.TXT", text.as_bytes())]);
+        if !fw_edid.is_empty() {
+            files.push(("FWEDID.BIN", &fw_edid));
+        }
         if let Some(r) = report.as_ref() {
             if !r.vbios.is_empty() {
                 files.push(("NVVBIOS.ROM", &r.vbios));
             }
             files.push(("NVREGS.BIN", &r.regs));
+            for (k, c) in r.connectors.iter().enumerate().take(16) {
+                if !c.edid.is_empty() {
+                    files.push((&edid_names[k], &c.edid));
+                }
+            }
         }
         let names: Vec<&str> = files.iter().map(|f| f.0).collect();
         // USB sticks sometimes fail one transfer; a second try usually works.

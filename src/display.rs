@@ -35,6 +35,8 @@ pub struct DisplayInfo {
     /// the resolution the desktop is drawn at, when that's scaled up).
     pub boot: (u32, u32),
     pub framebuffer: (u32, u32),
+    /// The main monitor's EDID as the firmware passed it on.
+    pub edid: Vec<u8>,
 }
 
 /// Solon can draw a desktop no smaller than this (scaled pixels), so smaller resolutions
@@ -172,6 +174,7 @@ pub fn init(modes: &[(u32, u32, u16)], current: (u32, u32), edid: Option<&[u8]>)
     let mut info = DisplayInfo { modes: m, current, boot: current, framebuffer: current, ..DisplayInfo::default() };
     if let Some(e) = edid {
         parse_edid(e, &mut info);
+        info.edid = e.to_vec();
     }
     kprintln!(
         "display: {}x{}, {} modes, monitor {:?} best {:?} at {}",
