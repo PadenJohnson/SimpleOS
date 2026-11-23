@@ -7,7 +7,7 @@ use x86_64::instructions::interrupts::without_interrupts;
 use x86_64::instructions::port::Port;
 
 const COM1: u16 = 0x3F8;
-const LOG_SIZE: usize = 32 * 1024;
+const LOG_SIZE: usize = 128 * 1024;
 
 pub struct LogBuf {
     buf: [u8; LOG_SIZE],

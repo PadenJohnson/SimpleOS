@@ -268,6 +268,20 @@ pub fn write_config(storage: &mut Storage, usb: &mut Usb, text: &str) -> Result<
     })
 }
 
+/// Write files to the top of the boot partition (the Solon stick or the installed disk's),
+/// replacing ones with the same names: the diagnostics saved with F12, S.
+pub fn write_boot_files(storage: &mut Storage, usb: &mut Usb, files: &[(&str, &[u8])]) -> Result<(), String> {
+    with_boot_esp(storage, usb, |vol, dev| {
+        vol.enable_writes(dev).map_err(|e| String::from(e.message()))?;
+        let root = vol.root();
+        for (name, data) in files {
+            let _ = vol.fat_delete(dev, &root, name);
+            vol.create_file(dev, &root, name, data).map_err(|e| format!("writing {}: {}", name, e.message()))?;
+        }
+        Ok(())
+    })
+}
+
 /// The resolution limine.conf asks for (None = the firmware's choice).
 pub fn configured(text: &str) -> Option<(u32, u32)> {
     text.lines().find_map(|l| l.trim().strip_prefix("resolution:")).and_then(parse_res)

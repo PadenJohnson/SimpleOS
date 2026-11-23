@@ -119,7 +119,9 @@ nothing to download.
 - Graphics: works on every Intel, AMD and NVIDIA card through the firmware's screen; Solon
   names the card (Settings > About), uses write-combining and sends only the changed parts of
   the screen to the card. Native drivers come a step at a time: see
-  [docs/graphics.md](docs/graphics.md).
+  [docs/graphics.md](docs/graphics.md). The NVIDIA driver (GeForce RTX 20 series and newer)
+  is at stage 1: it reads the card, its display engine and which connectors have monitors.
+- Diagnostics (F12): the log; S saves it (and what the NVIDIA driver read) to the Solon stick.
 - Power button (top right): turn off screen, restart, shut down (ACPI, with confirmation)
 - Boots from a USB stick on UEFI and older BIOS PCs; on-screen diagnostics (F12) and a crash
   screen for reporting problems

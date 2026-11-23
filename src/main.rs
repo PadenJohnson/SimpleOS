@@ -46,6 +46,7 @@ mod movieui;
 mod movie;
 mod msc;
 mod nvme;
+mod nvidia;
 mod pci;
 mod paint;
 mod pdf;
@@ -187,6 +188,13 @@ extern "C" fn kmain() -> ! {
         display::init(&modes, (w as u32, h as u32), fb.edid());
     }
     gpu::init(screen.base_addr().wrapping_sub(hhdm));
+    // NVIDIA driver, stage 1 (only reads). Boot option "nonvidia" skips it.
+    if !EXECUTABLE_CMDLINE_REQUEST.get_response().and_then(|r| r.cmdline().to_str().ok()).is_some_and(|c| c.split_whitespace().any(|w| w == "nonvidia")) {
+        let nv = gpu::GPUS.lock().iter().find(|g| g.vendor == gpu::Vendor::Nvidia).and_then(|g| g.bars.first().copied());
+        if let Some(bar0) = nv {
+            nvidia::probe(bar0);
+        }
+    }
     // Monitors the firmware switched on: each gets its own picture. (With one, a second
     // monitor needs a native driver for the card; see docs/graphics.md.)
     if let Some(resp) = FRAMEBUFFER_REQUEST.get_response() {

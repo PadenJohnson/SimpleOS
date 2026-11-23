@@ -37,7 +37,7 @@ So Solon grows support a feature and a card family at a time, starting with what
 | Step | Intel built-in | AMD Radeon | NVIDIA GeForce |
 |---|---|---|---|
 | Recognise the card, efficient framebuffer use | Done | Done | Done |
-| **Screen modes** (any resolution and refresh rate, instantly, native, no scaling) | Display engine driver for Skylake (2015) to current, from Intel's public manuals | AtomBIOS mode setting (the card's own scripts), GCN to Vega (2012-2019); RDNA later and harder | Kepler to Pascal (2012-2018) only; Turing and newer need NVIDIA's firmware |
+| **Screen modes** (any resolution and refresh rate, instantly, native, no scaling) | Display engine driver for Skylake (2015) to current, from Intel's public manuals | AtomBIOS mode setting (the card's own scripts), GCN to Vega (2012-2019); RDNA later and harder | Volta/Turing/Ampere/Ada display engine without firmware, as nouveau did: **started** (see below) |
 | **Multiple monitors** | Same driver: more pipes and ports | Same, per card | Same, older cards |
 | **Faster drawing** (the card copies and fills) | Blitter / render engine commands | SDMA engine | Older cards' 2D engine |
 | **3D** | Very large (shader compiler, command streams); not planned soon | Same | Same, and firmware-limited |
@@ -46,12 +46,31 @@ Each driver step starts read-only: the driver reads the card's current state and
 a report from your PC shows what Solon sees, without risk), then takes over mode setting,
 with the firmware's picture kept as the fallback if anything fails.
 
+## NVIDIA driver (src/nvidia.rs)
+
+For GeForce cards from the RTX 20 series on (Volta/Turing/Ampere/Ada "nvdisplay" engine),
+following the open nouveau driver's display code (MIT licence). The display engine works
+without NVIDIA's signed firmware, so screen modes and several monitors are possible; 3D isn't.
+
+1. **Stage 1: read only (done).** Chip, video memory, the display engine's heads, outputs and
+   windows, what each head shows and through which output, and from the VBIOS tables every
+   connector and whether a monitor is plugged in. Logged as `nvidia: ...`; F12 then S saves
+   the log, the VBIOS (NVVBIOS.ROM) and a display register snapshot (NVREGS.BIN) to the stick.
+   Boot option `nonvidia` turns it off.
+2. **Stage 2: talk to monitors.** DisplayPort AUX and HDMI DDC: read each monitor's EDID (its
+   name and modes) without changing the picture.
+3. **Stage 3: take over the display.** Claim it from the firmware, set up the display
+   engine's memory, core and window channels, and set a mode on the first monitor.
+4. **Stage 4: more monitors.** Light the other heads and outputs (DisplayPort link training,
+   HDMI); the desktop spans them.
+
+Each stage is tried on a real card before it's switched on by default.
+
 ## Tested PCs
 
-- **GeForce RTX 3080 (Ampere, 2020)**, 1920x1080: recognised correctly, works through the
-  firmware's screen. A native driver (more resolutions, a second monitor) would need NVIDIA's
-  GSP firmware to be loaded and driven through its interface first, the biggest single piece
-  of work on this page; games would need a 3D driver on top, and games written for Solon.
+- **GeForce RTX 3080 Founders Edition 10 GB (GA102, Ampere, 2020)**, 1920x1080: recognised
+  correctly, works through the firmware's screen. The NVIDIA driver above is being built for
+  it. Games (3D) would need NVIDIA's GSP firmware and a full 3D driver: not planned.
   A second monitor may still work without a driver if the PC's firmware switches it on: the
   log says how many screens it set up (`display: the firmware set up N screen(s)`), and
   Settings > Display shows it.

@@ -414,14 +414,25 @@ impl SettingsApp {
             label += " (best)";
         }
         ui.drop_right(row, 210, &label, if modes.len() > 1 { Act::Open(Drop::Resolution) } else { Act::None });
-        let graphics = crate::gpu::main_name().unwrap_or_else(|| String::from("Unknown"));
+        let mut graphics = crate::gpu::main_name().unwrap_or_else(|| String::from("Unknown"));
+        if let Some(r) = crate::nvidia::REPORT.lock().as_ref() {
+            graphics = format!("{}: {}", graphics, r.summary);
+        }
         let row = ui.row("Graphics", crate::gpu::support(), ROW + 8);
         let g = crate::photos::ellipsize(&graphics, row.w / 2, Size::Small, false);
         ui.text(row.x + row.w - text_width(&g, Size::Small, false), row.y + 22, &g, Size::Small, false, INK);
         let n = crate::display::screens();
+        let nv: Option<(usize, usize, String)> = crate::nvidia::REPORT.lock().as_ref().filter(|r| !r.connectors.is_empty()).map(|r| {
+            let on: Vec<&str> = r.connectors.iter().filter(|c| c.1 == Some(true)).map(|c| c.0.as_str()).collect();
+            (r.connectors.len(), on.len(), on.join(", "))
+        });
         let help = if n > 1 { "Solon uses the first; using more is being worked on" } else { "A second monitor needs a driver for this graphics card" };
         let row = ui.row("Monitors", help, ROW + 8);
-        let t = format!("{} switched on by the PC", n);
+        let t = match &nv {
+            Some((_, on, names)) if *on > 0 => format!("{} plugged in ({}); {} shown", on, names, n),
+            Some((all, _, _)) => format!("None found on the {} connectors; {} shown", all, n),
+            None => format!("{} switched on by the PC", n),
+        };
         ui.text(row.x + row.w - text_width(&t, Size::Small, false), row.y + 22, &t, Size::Small, false, INK);
         let row = ui.row("Monitor", "", ROW);
         let mut m = info.monitor.clone().unwrap_or_else(|| String::from("Unknown"));

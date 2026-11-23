@@ -1032,6 +1032,37 @@ impl Desktop {
     }
 
     /// F12 diagnostics: the kernel log, for reporting problems on real PCs.
+    /// F12, then S: the log (and what the NVIDIA driver read: VBIOS, registers) to the Solon
+    /// stick's boot partition, to read on another computer.
+    fn save_diagnostics(&mut self) {
+        let mut text = String::new();
+        for line in crate::serial::LOG.lock().lines() {
+            text.push_str(&String::from_utf8_lossy(&line));
+            text.push_str("\r\n");
+        }
+        let report = crate::nvidia::REPORT.lock();
+        let mut files: Vec<(&str, &[u8])> = Vec::from([("SOLONLOG.TXT", text.as_bytes())]);
+        if let Some(r) = report.as_ref() {
+            if !r.vbios.is_empty() {
+                files.push(("NVVBIOS.ROM", &r.vbios));
+            }
+            files.push(("NVREGS.BIN", &r.regs));
+        }
+        let names: Vec<&str> = files.iter().map(|f| f.0).collect();
+        // USB sticks sometimes fail one transfer; a second try usually works.
+        let saved = crate::display::write_boot_files(&mut self.storage, &mut self.usb, &files).or_else(|e| {
+            kprintln!("diagnostics: {} (trying again)", e);
+            crate::display::write_boot_files(&mut self.storage, &mut self.usb, &files)
+        });
+        let msg = match saved {
+            Ok(()) => format!("Saved {} on the Solon stick", names.join(", ")),
+            Err(e) => format!("Couldn't save to the Solon stick: {}", e),
+        };
+        drop(report);
+        kprintln!("diagnostics: {}", msg);
+        self.toast = Some((msg, Self::now() + 8 * HZ));
+    }
+
     fn draw_log(&self, c: &mut Canvas) {
         let (w, h) = (self.w, self.h);
         c.fill_rect_alpha(0, 0, w, h, rgb(10, 12, 16), 235);
@@ -1041,7 +1072,7 @@ impl Desktop {
         let end = lines.len() - self.log_scroll.min(lines.len().saturating_sub(max.min(lines.len())));
         let start = end.saturating_sub(max);
         let info = format!(
-            "Screen {}x{}   |   Build {}   |   Lines {}-{} of {}   |   Up/Down, Page Up/Down, Home/End to scroll   |   F12 or Esc to close",
+            "Screen {}x{}   |   Build {}   |   Lines {}-{} of {}   |   Up/Down, Page Up/Down, Home/End to scroll   |   S: save to the stick   |   F12 or Esc to close",
             w, h, env!("SOLON_BUILD"), start + 1, end, lines.len()
         );
         c.text(24, 44, &info, Size::Small, false, rgb(160, 170, 180));
@@ -2909,6 +2940,7 @@ impl Desktop {
                 0x51 => self.log_scroll = self.log_scroll.saturating_sub(page - 1),
                 0x47 => self.log_scroll = usize::MAX / 2,
                 0x4F => self.log_scroll = 0,
+                0x1F => self.save_diagnostics(),
                 _ => return false,
             }
             return true;

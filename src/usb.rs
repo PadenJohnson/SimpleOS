@@ -116,7 +116,10 @@ impl BlockDev for BootDisk<'_> {
         self.ms.block_size as usize
     }
     fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), FsError> {
-        self.ms.read(self.hc, lba, buf).map_err(|_| FsError::Io)
+        self.ms.read(self.hc, lba, buf).map_err(|e| {
+            kprintln!("usb: boot stick read error at block {} ({} bytes): {:?}", lba, buf.len(), e);
+            FsError::Io
+        })
     }
     fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), FsError> {
         if lba + (buf.len() / self.ms.block_size as usize) as u64 > self.ms.blocks {
