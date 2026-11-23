@@ -57,11 +57,19 @@ without NVIDIA's signed firmware, so screen modes and several monitors are possi
    connector and whether a monitor is plugged in. Logged as `nvidia: ...`; F12 then S saves
    the log, the VBIOS (NVVBIOS.ROM) and a display register snapshot (NVREGS.BIN) to the stick.
    Boot option `nonvidia` turns it off.
-2. **Stage 2: talk to monitors (done, untested on hardware).** DisplayPort AUX: each
+2. **Stage 2: talk to monitors (done).** DisplayPort AUX: each
    monitor's DisplayPort capabilities (DPCD) and EDID (its name and modes), without changing
    the picture. HDMI (DDC over I2C) comes later.
-3. **Stage 3: take over the display.** Claim it from the firmware, set up the display
-   engine's memory, core and window channels, and set a mode on the first monitor.
+3. **Stage 3: take over the display.** Set up the display engine's memory, core and
+   window channels, and light another head and output, while the firmware's picture keeps
+   running.
+   - 3a (done): find the firmware's picture in video memory (its context DMA in the display
+     engine's object table) and save the memory around BAR1's page tables, to place a second
+     picture.
+   - 3b (done, on request: F12, then T): start the core channel with a command buffer in
+     system memory, run one command that changes nothing, stop it.
+   - 3c: light head 1 on DisplayPort 3: core and window commands, the supervisor steps
+     (pixel clock, output routing, DisplayPort link training), a picture of its own.
 4. **Stage 4: more monitors.** Light the other heads and outputs (DisplayPort link training,
    HDMI); the desktop spans them.
 
@@ -73,7 +81,12 @@ Each stage is tried on a real card before it's switched on by default.
   correctly, works through the firmware's screen. Stage 1 read it correctly: 10 GiB, 4 heads,
   4 outputs, 8 windows; head 0 1920x1080 at 60 Hz on output 2 (DisplayPort); connectors
   DisplayPort 1-3 and HDMI, with monitors detected on DisplayPort 2 (the one shown) and
-  DisplayPort 3. The NVIDIA driver is being built on it. Games (3D) would need NVIDIA's GSP
+  DisplayPort 3. Stage 2 read both monitors over AUX: an ASUS VG249 on DisplayPort 2
+  (DisplayPort 1.1, 4 lanes at 2.7 Gbit/s, 1920x1080 at 60 Hz; its EDID matched the
+  firmware's copy byte for byte) and an LG ULTRAGEAR on DisplayPort 3 (DisplayPort 1.2,
+  4 lanes at 5.4 Gbit/s, 2560x1440 at 144 Hz). The firmware's display channels are found shut
+  down, with head 0 and window 0 still showing its picture from their armed state. The NVIDIA
+  driver is being built on it. Games (3D) would need NVIDIA's GSP
   firmware and a full 3D driver: not planned.
   A second monitor may still work without a driver if the PC's firmware switches it on: the
   log says how many screens it set up (`display: the firmware set up N screen(s)`), and

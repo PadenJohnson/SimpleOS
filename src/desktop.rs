@@ -1057,6 +1057,9 @@ impl Desktop {
                     files.push((&edid_names[k], &c.edid));
                 }
             }
+            for (name, _, data) in &r.vram {
+                files.push((name, data));
+            }
         }
         let names: Vec<&str> = files.iter().map(|f| f.0).collect();
         // USB sticks sometimes fail one transfer; a second try usually works.
@@ -1082,8 +1085,9 @@ impl Desktop {
         let end = lines.len() - self.log_scroll.min(lines.len().saturating_sub(max.min(lines.len())));
         let start = end.saturating_sub(max);
         let info = format!(
-            "Screen {}x{}   |   Build {}   |   Lines {}-{} of {}   |   Up/Down, Page Up/Down, Home/End to scroll   |   S: save to the stick   |   F12 or Esc to close",
-            w, h, env!("SOLON_BUILD"), start + 1, end, lines.len()
+            "Screen {}x{}   |   Build {}   |   Lines {}-{} of {}   |   Up/Down, Page Up/Down, Home/End to scroll   |   S: save to the stick{}   |   F12 or Esc to close",
+            w, h, env!("SOLON_BUILD"), start + 1, end, lines.len(),
+            if crate::nvidia::present() { "   |   T: test the NVIDIA driver" } else { "" }
         );
         c.text(24, 44, &info, Size::Small, false, rgb(160, 170, 180));
         let mut y = 76;
@@ -2951,6 +2955,12 @@ impl Desktop {
                 0x47 => self.log_scroll = usize::MAX / 2,
                 0x4F => self.log_scroll = 0,
                 0x1F => self.save_diagnostics(),
+                0x14 => {
+                    // T: the NVIDIA driver's channel test (stage 3b).
+                    let msg = crate::nvidia::channel_test();
+                    kprintln!("diagnostics: {}", msg);
+                    self.toast = Some((msg, Self::now() + 10 * HZ));
+                }
                 _ => return false,
             }
             return true;

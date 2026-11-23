@@ -15,9 +15,17 @@
 //! their DisplayPort capabilities (DPCD) and EDID (name and modes). That only switches the
 //! connector's pins to AUX mode if they aren't already; the picture isn't touched.
 //!
-//! Everything goes to the log, and the VBIOS, the monitors' EDIDs and a snapshot of the
-//! display registers can be saved to the Solon stick (F12, then S) to build the next stage
-//! from. Boot option "nonvidia" skips it all.
+//! Stage 3a reads video memory through the PRAMIN window (moved and put back): the display
+//! engine's object table, to find where the firmware's picture is (its "DAVE" context DMA),
+//! and the area with BAR1's page tables, to work out where a second picture can go.
+//!
+//! Stage 3b, only when asked (F12, then T), starts the display engine's core channel with a
+//! command buffer in system memory, sends one command that leaves everything as it is, checks
+//! the engine read it, and stops the channel (nouveau gv100_disp_core_init/fini).
+//!
+//! Everything goes to the log, and the VBIOS, the monitors' EDIDs, the register snapshot and
+//! the video memory read in stage 3a can be saved to the Solon stick (F12, then S) to build the
+//! next stage from. Boot option "nonvidia" skips it all.
 
 use alloc::format;
 use alloc::string::String;
@@ -48,6 +56,20 @@ pub struct Report {
     pub vbios: Vec<u8>,
     /// Display registers: for each range, start and count (u32 each), then the values.
     pub regs: Vec<u8>,
+    /// Video memory read in stage 3a: (name for the file, VRAM address, bytes).
+    pub vram: Vec<(&'static str, u64, Vec<u8>)>,
+}
+
+/// The card, kept for stage 3b (run later, from the diagnostics screen).
+struct Card {
+    bar0: u64,
+}
+
+static CARD: Mutex<Option<Card>> = Mutex::new(None);
+
+/// The driver found an NVIDIA card it works with (for the diagnostics screen's key list).
+pub fn present() -> bool {
+    CARD.lock().is_some()
 }
 
 pub static REPORT: Mutex<Option<Report>> = Mutex::new(None);
@@ -113,13 +135,15 @@ const SNAPSHOT: [(u32, u32); 16] = [
     (0x690000, 0x2000), // window channels 0-7: state (assembly, armed at +0x800)
 ];
 
-/// Run stage 1 on an NVIDIA card (BAR0 = its register window).
-pub fn probe(bar0: (u64, u64)) {
+/// Run stages 1, 2 and 3a on an NVIDIA card. `bar0`: its register window; `bar1`: its video
+/// memory window; `fb`: where the firmware's picture is (physical).
+pub fn probe(bar0: (u64, u64), bar1: Option<(u64, u64)>, fb: u64) {
     if bar0.1 < 0x0100_0000 {
         kprintln!("nvidia: register window too small ({:#x})", bar0.1);
         return;
     }
     let r = Bar0 { base: crate::memory::map_mmio(bar0.0, 0x0100_0000) };
+    *CARD.lock() = Some(Card { bar0: r.base });
     let boot0 = r.rd(0x000000);
     let chipset = (boot0 & 0x1ff0_0000) >> 20;
     let name = chip_name(chipset);
@@ -203,6 +227,8 @@ pub fn probe(bar0: (u64, u64)) {
         }
     }
 
+    let vram = if chipset >= 0x170 { find_picture(&r, bar1, fb) } else { Vec::new() };
+
     // The register snapshot.
     let mut regs = Vec::new();
     for &(start, count) in SNAPSHOT.iter() {
@@ -213,7 +239,7 @@ pub fn probe(bar0: (u64, u64)) {
         }
     }
     let summary = format!("{}{}, {} heads, {} lit", name, if vram_mb != 0 { format!(", {} GiB", vram_mb / 1024) } else { String::new() }, heads, lit);
-    *REPORT.lock() = Some(Report { summary, connectors, vbios, regs });
+    *REPORT.lock() = Some(Report { summary, connectors, vbios, regs, vram });
 }
 
 /// The VBIOS: the copy the card keeps in video memory (through the PRAMIN window, nouveau
@@ -461,14 +487,21 @@ fn spin(r: &Bar0, n: u32) {
 }
 
 /// Wait (polling, about 1 microsecond per try) until `f` says yes, at most `tries` times.
-fn poll(r: &Bar0, tries: u32, mut f: impl FnMut(&Bar0) -> bool) -> bool {
+/// AUX waits are short; see `poll_ms` for longer ones.
+fn poll(r: &Bar0, tries: u32, f: impl FnMut(&Bar0) -> bool) -> bool {
+    poll_ms(r, tries, 50, f)
+}
+
+/// Like `poll`, giving up after about `ms` milliseconds however slow the reads are (once the
+/// timer runs; before that, after `tries` reads).
+fn poll_ms(r: &Bar0, tries: u32, ms: u64, mut f: impl FnMut(&Bar0) -> bool) -> bool {
+    let hz = crate::interrupts::HZ;
     let start = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
     for _ in 0..tries {
         if f(r) {
             return true;
         }
-        // Never more than ~50 ms, however slow the reads are.
-        if crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed) > start + 5 {
+        if crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed) > start + ms * hz / 1000 {
             break;
         }
     }
@@ -669,4 +702,146 @@ fn talk_to_monitor(r: &Bar0, ch: u8, c: &mut Conn) {
         }
         Err(e) => kprintln!("nvidia:   {}: EDID: {}", c.label, e),
     }
+}
+
+// ---- stage 3a: video memory ----------------------------------------------------------------
+
+/// Read video memory through the BAR0 PRAMIN window (1 MiB at 0x700000, positioned in 64 KiB
+/// steps by 0x001700), putting the window back afterwards.
+fn vram_read(r: &Bar0, addr: u64, len: usize) -> Vec<u8> {
+    let saved = r.rd(0x001700);
+    let mut out = Vec::with_capacity(len);
+    let mut at = addr;
+    while out.len() < len {
+        let base = at & !0xffff;
+        r.wr(0x001700, (base >> 16) as u32);
+        let mut off = (at - base) as u32;
+        while off < 0x10_0000 && out.len() < len {
+            out.extend_from_slice(&r.rd(0x700000 + off).to_le_bytes());
+            off += 4;
+        }
+        at = base + 0x10_0000;
+    }
+    r.wr(0x001700, saved);
+    out.truncate(len);
+    out
+}
+
+fn le32(b: &[u8], o: usize) -> u32 {
+    b.get(o..o + 4).map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]])).unwrap_or(0)
+}
+
+/// Where the firmware's picture is: the window's context DMA ("DAVE") in the display engine's
+/// object table (RAMHT: 1024 entries of handle and context at the start of its instance
+/// memory, nouveau core/ramht.c; the object is flags, start >> 8, limit >> 8, nouveau
+/// dma/usergv100.c). Returns the video memory read, for saving.
+fn find_picture(r: &Bar0, bar1: Option<(u64, u64)>, fb: u64) -> Vec<(&'static str, u64, Vec<u8>)> {
+    let mut out = Vec::new();
+    if let Some((b, size)) = bar1 {
+        kprintln!("nvidia: BAR1 at {:#x}, {} MiB; the firmware's picture is {:#x} into it", b, size >> 20, fb.wrapping_sub(b));
+    }
+    // The window's context DMA handle for the picture (core window 0, SET_CONTEXT_DMA_ISO).
+    let handle = r.rd(0x690240);
+    let (target, inst) = (r.rd(0x610010), (r.rd(0x610014) as u64) << 16);
+    kprintln!("nvidia: display instance memory at {:#x} (target {:#x}); picture handle {:#010x}", inst, target, handle);
+    let table = vram_read(r, inst, 0x10000);
+    let mut found = None;
+    let mut entries = 0;
+    for k in 0..1024 {
+        let (h, ctx) = (le32(&table, k * 8), le32(&table, k * 8 + 4));
+        if h == 0 && ctx == 0 {
+            continue;
+        }
+        entries += 1;
+        let obj = ((ctx >> 9) & 0xffff) as usize;
+        kprintln!("nvidia:   object table entry {}: handle {:#010x}, channel {}, object at {:#x}", k, h, ctx >> 25, obj);
+        if h == handle && found.is_none() {
+            found = Some(obj);
+        }
+    }
+    kprintln!("nvidia: {} objects in the display engine's table", entries);
+    if let Some(obj) = found {
+        let flags = le32(&table, obj);
+        let start = ((le32(&table, obj + 8) as u64) << 32 | le32(&table, obj + 4) as u64) << 8;
+        let limit = ((le32(&table, obj + 16) as u64) << 32 | le32(&table, obj + 12) as u64) << 8 | 0xff;
+        kprintln!(
+            "nvidia: the firmware's picture: video memory {:#x} to {:#x} ({} KiB), flags {:#x} (target {})",
+            start, limit, (limit - start + 1) >> 10, flags,
+            match flags & 3 { 1 => "video memory", 2 => "system memory", 3 => "system memory, no snoop", _ => "?" }
+        );
+    }
+    out.push(("NVVRAM0.BIN", inst, table));
+    // BAR1's instance block and the area around it (its page tables, at the top of video memory).
+    let b1 = r.rd(0x001704);
+    let block = ((b1 & 0x0fff_ffff) as u64) << 12;
+    kprintln!("nvidia: BAR1 instance block at {:#x} ({:#010x})", block, b1);
+    if block != 0 {
+        let area = block & !0xf_ffff;
+        out.push(("NVVRAM1.BIN", area, vram_read(r, area, 0x10_0000)));
+    }
+    out
+}
+
+// ---- stage 3b: the core channel ----------------------------------------------------------------
+
+/// F12, then T: start the core channel, send one command that changes nothing, check the
+/// engine read it, stop the channel. Returns what happened, for the screen and the log.
+pub fn channel_test() -> String {
+    let card = CARD.lock();
+    let Some(c) = card.as_ref() else { return String::from("No NVIDIA card (or the driver is off)") };
+    let r = Bar0 { base: c.bar0 };
+    let state = r.rd(0x610630);
+    kprintln!("nvidia: core channel test: control {:#x}, state {:#x}", r.rd(0x6104e0), state);
+    if (state & 0x001f_0000) == 0x000b_0000 {
+        return String::from("The core channel is already running (left alone)");
+    }
+    // A command buffer in system memory: target 3 (coherent), address >> 8.
+    let push = crate::memory::Dma::new(0x1000, 0x1000);
+    let phys = push.phys();
+    if phys >> 40 != 0 {
+        return format!("The command buffer is above 1 TiB ({:#x}); the display engine can't reach it", phys);
+    }
+    let value = 3 | (phys >> 8);
+    r.wr(0x610b24, value as u32);
+    r.wr(0x610b20, (value >> 32) as u32);
+    r.wr(0x610b28, 1);
+    r.wr(0x610b2c, 0x40);
+    let ctl = r.rd(0x6104e0);
+    r.wr(0x6104e0, ctl | 0x10);
+    r.wr(0x680000, 0); // PUT
+    r.wr(0x6104e0, 0x13);
+    let up = poll_ms(&r, 2_000_000, 2000, |r| r.rd(0x610630) & 0x001f_0000 == 0x000b_0000);
+    kprintln!("nvidia: core channel {} (state {:#x}, GET {:#x})", if up { "running" } else { "didn't start" }, r.rd(0x610630), r.rd(0x680004));
+    let mut result = String::new();
+    if up {
+        // One method, rewriting the value the engine already has (method 0x0218, its state at
+        // 0x680218), so nothing changes; no UPDATE, so nothing is applied anyway.
+        let m = 0x0218u32;
+        let v = r.rd(0x680000 + m);
+        unsafe {
+            let p = push.ptr::<u32>();
+            core::ptr::write_volatile(p, (1 << 18) | m);
+            core::ptr::write_volatile(p.add(1), v);
+        }
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        r.wr(0x680000, 8);
+        let read = poll_ms(&r, 2_000_000, 2000, |r| r.rd(0x680004) == 8);
+        kprintln!("nvidia: core channel {} the command (GET {:#x}, state {:#x})", if read { "read" } else { "didn't read" }, r.rd(0x680004), r.rd(0x610630));
+        result = if read {
+            String::from("The display engine ran a command from Solon: the command path works")
+        } else {
+            String::from("The core channel started but didn't read Solon's command")
+        };
+    } else {
+        result.push_str("The core channel didn't start");
+    }
+    // Stop it again (nouveau gv100_disp_core_fini).
+    let ctl = r.rd(0x6104e0);
+    r.wr(0x6104e0, ctl & !0x10);
+    poll_ms(&r, 2_000_000, 2000, |r| r.rd(0x610630) & 0x001f_0000 == 0x000b_0000);
+    let ctl = r.rd(0x6104e0);
+    r.wr(0x6104e0, ctl & !0x2);
+    kprintln!("nvidia: core channel stopped (control {:#x}, state {:#x})", r.rd(0x6104e0), r.rd(0x610630));
+    drop(push);
+    result
 }

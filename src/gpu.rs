@@ -153,7 +153,7 @@ pub fn support() -> &'static str {
     let g = GPUS.lock();
     match g.iter().find(|x| x.shows_screen).or(g.first()).map(|x| x.vendor) {
         Some(Vendor::Virtual) if crate::display::vbe_present() => "Solon's own driver: changes resolution directly",
-        Some(Vendor::Nvidia) if crate::nvidia::REPORT.lock().is_some() => "Solon's NVIDIA driver, stage 1: reads the card (no changes yet)",
+        Some(Vendor::Nvidia) if crate::nvidia::REPORT.lock().is_some() => "Solon's NVIDIA driver: reads the card and talks to its monitors (lighting more comes next)",
         Some(_) => "Through the firmware's screen (a native driver is planned)",
         None => "Through the firmware's screen",
     }
