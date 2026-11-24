@@ -68,7 +68,7 @@ extends the desktop), with the choices in Settings for anyone who wants them.
 - **Something to play.** Neon Grill Pinball and Starbase Breach (both original), Solitaire,
   FreeCell, Mines and Sudoku.
 - **Today's hardware, used fully.** Every processor core, Solon's own NVIDIA RTX display driver,
-  and HD Audio for speakers, headphones and monitor speakers.
+  and sound through speakers, headphones, monitor speakers and USB headsets.
 - **Offline by design.** No network, no accounts, no ads, nothing collected, nothing to update
   from the internet. Updates come on a USB stick.
 
@@ -99,7 +99,7 @@ walk-through, with what to do if a PC won't start from the stick, is in
 | Disks | NVMe and SATA drives, USB drives and SD card readers (FAT and exFAT) |
 | USB | USB 3 and USB 2 controllers, hubs, keyboards and mice, Android phones, iPhones and cameras |
 | Printers | USB printers that speak IPP (AirPrint), PCL, PCL 6 or PostScript |
-| Sound | HD Audio: speakers, headphones and optical out, and monitor speakers on NVIDIA RTX cards |
+| Sound | HD Audio: speakers, headphones and optical out, and monitor speakers on NVIDIA RTX cards; USB headsets, speakers and headphones (USB Audio Class 1 and 2) |
 | Sensors | Nuvoton NCT6798D and NCT6799D motherboard sensors: fans, temperatures and voltages |
 | Network | None, on purpose |
 
