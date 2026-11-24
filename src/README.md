@@ -1,0 +1,71 @@
+# src: the Solon kernel
+
+All of SimpleOS is one Rust program running on the bare machine (`no_std`, target
+`x86_64-unknown-none`). [Limine](https://github.com/limine-bootloader/limine) loads it;
+`main.rs` sets the PC up and then runs the desktop's main loop, which polls the drivers between
+frames. There are no processes, no system calls and no network. Every file starts with a short
+summary of what it does.
+
+## Start-up and the machine
+
+| File | What it is |
+|---|---|
+| `main.rs` | The entry point: memory, interrupts, screens, drivers and settings, then the desktop's main loop |
+| `memory.rs` | The kernel heap, DMA buffers, and mapping device registers |
+| `interrupts.rs` | GDT, IDT, the interrupt controller and the 100 Hz timer |
+| `smp.rs` | The other processor cores, which share decoding and drawing work |
+| `cpu.rs`, `smbios.rs`, `hwmon.rs` | The processor, the motherboard's description, and its sensor chip (Settings > This PC) |
+| `pci.rs`, `power.rs`, `rtc.rs` | The PCI bus, ACPI power off and restart, the real-time clock |
+| `serial.rs`, `crash.rs` | The log (serial port and on screen with F12) and the crash screen |
+
+## Screens and drawing
+
+| File | What it is |
+|---|---|
+| `screen.rs`, `display.rs` | Putting the desktop on each screen (only what changed), resolutions and monitors |
+| `gpu.rs`, `nvidia/` | Graphics cards; the NVIDIA driver that lights a second monitor and sends sound to monitors |
+| `gfx.rs`, `font.rs`, `raster.rs` | The drawing surface, Noto text and anti-aliased outlines |
+| `icons.rs`, `cursor.rs`, `wallpaper.rs`, `scrollbar.rs` | App icons, the pointer, desktop pictures, scroll bars |
+
+## Input, USB and disks
+
+| File | What it is |
+|---|---|
+| `ps2.rs`, `keys.rs`, `textfield.rs` | Keyboard and mouse, keys for the editors, one-line text boxes |
+| `hc.rs`, `xhci.rs`, `ehci.rs`, `usb.rs` | USB 3 and USB 2 controllers, devices, hubs, keyboards and mice |
+| `msc.rs`, `phone.rs`, `usbprint.rs` | USB drives, phones and cameras (MTP/PTP), printers |
+| `ahci.rs`, `nvme.rs`, `disk.rs`, `fs/` | SATA and NVMe disks, partition tables, FAT and exFAT |
+| `library.rs`, `install.rs`, `update.rs`, `backup.rs` | Solon storage, installing, updating from USB, backups |
+| `hda.rs` | Sound: HD Audio controllers, the computer's jacks and the monitors |
+
+## The desktop and its apps
+
+| File | What it is |
+|---|---|
+| `desktop.rs` | Windows, the taskbar on every screen, menus, the clock and wallpaper |
+| `settings.rs`, `settingsui.rs` | Saved settings and the Settings window |
+| `photos.rs`, `editor.rs`, `edit.rs`, `frame.rs`, `import.rs` | Photos, the photo editor, Photo Frame and the screensaver, Import |
+| `files.rs`, `diskmgr.rs` | Files and Disks |
+| `videos.rs`, `movie.rs`, `movieui.rs` | Videos and the Video Editor |
+| `paint.rs`, `calendar.rs`, `calculator.rs` | Paint, Calendar, Calculator |
+| `printers.rs`, `printui.rs`, `print.rs`, `printlang.rs` | The Printers app, the Print dialog, page layout and printer languages |
+| `games/` | Neon Grill Pinball, Starbase Breach, Solitaire, FreeCell, Mines and Sudoku |
+
+## Documents
+
+| File | What it is |
+|---|---|
+| `docshell.rs`, `docapps.rs` | What Writer, PDF and the Text Editor share |
+| `writer/` | Writer and Word (.docx) files |
+| `pdf/`, `pdfui.rs` | Reading, drawing, editing and writing PDFs; the PDF app |
+| `textedit.rs` | The Text Editor |
+| `documents.rs`, `sheetui.rs`, `doc/` | Spreadsheets: the list, the editor, .xlsx/.csv files and formulas |
+| `spell.rs` | Spelling for every app that edits text |
+
+## Photos, videos and sound files
+
+| File | What it is |
+|---|---|
+| `image.rs`, `imgfmt/` | Decoding every photo format (JPEG, PNG, HEIC, WebP, GIF, TIFF, RAW previews, PSD...) |
+| `video/` | H.264 encoding and decoding, AAC, FLAC, MP4 and AVI/WAV, for the Video Editor |
+| `media/` | The video player's engine: containers and decoders (HEVC, VP8, VP9, MPEG-2/4, MP3, AC-3, DTS, Opus...) |

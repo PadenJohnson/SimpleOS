@@ -1,6 +1,8 @@
-//! The Settings window: a sidebar of sections (Appearance, Date & time, Display, Mouse,
+//! The Settings window: a sidebar of sections (Appearance, Date & time, Display, Sound, Mouse,
 //! Spelling, This PC, About), each a page of cards with switches, segmented buttons and
-//! drop-down lists. This PC shows the processor, motherboard, memory and sensors, live. The desktop can open it at a given page (its right-click menu does).
+//! drop-down lists. Display has the two-screen arrangement, Sound where sound plays, and This
+//! PC the processor, motherboard, memory and sensors, live. The desktop can open it at a
+//! given page (its right-click menus do).
 //!
 //! Each page is laid out once per draw or click as a list of items (where, and what a click
 //! does), so drawing and clicking always agree.

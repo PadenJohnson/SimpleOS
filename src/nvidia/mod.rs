@@ -1,4 +1,6 @@
-//! NVIDIA GeForce driver, stage 1: look, don't touch.
+//! NVIDIA GeForce driver: reads the card and its monitors (stages 1 and 2), tests its memory
+//! and display channels (stage 3), lights a second monitor (`light.rs`) and sends sound to the
+//! monitors (`audio.rs`). The firmware's own screen is never touched.
 //!
 //! The plan (docs/graphics.md) is a display driver for NVIDIA's "nvdisplay" engine (Volta and
 //! newer: RTX 20, 30 and 40 series): any screen mode and several monitors. Unlike 3D, the

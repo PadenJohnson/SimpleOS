@@ -1,3 +1,9 @@
+//! Solon, the SimpleOS kernel: the entry point. Limine starts `kmain`, which sets up memory,
+//! interrupts, the screens and every driver (graphics, USB, disks, sound), reads the settings,
+//! lights a second monitor if there is one, and then runs the desktop's main loop: sleep until
+//! an interrupt, handle input, let the apps and drivers do their work, and put what changed on
+//! the screens. See README.md in this folder for a map of the source.
+
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]

@@ -1,4 +1,5 @@
-//! Games: Mines, Solitaire, FreeCell, Sudoku and Neon Grill pinball (an original table).
+//! Games: Neon Grill Pinball (an original table), Starbase Breach (an original first-person
+//! shooter), Solitaire, FreeCell, Mines and Sudoku.
 //! Shared bits: random numbers, smooth lines, little sound effects, best scores.
 
 pub mod cards;
