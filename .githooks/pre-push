@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Before main is pushed: rebuild the USB image, boot-test it (UEFI and old BIOS) and publish it
-# as the GitHub release "latest". Turned on per clone with:  git config core.hooksPath .githooks
+# Pre-push hook: before main is pushed, rebuild the USB image, boot-test it (UEFI and old BIOS)
+# and publish it as the GitHub release "latest", so the download always matches the code. Turned on per clone with:  git config core.hooksPath .githooks
 # Skip once with:  SKIP_USB_IMAGE=1 git push
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
