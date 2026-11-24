@@ -1,3 +1,7 @@
+/* Linker script: where the kernel sits in memory. Limine maps it in the top 2 GiB of the
+   address space; Limine's requests come first, then code, read-only data and data, each in
+   its own loadable segment. */
+
 OUTPUT_FORMAT(elf64-x86-64)
 OUTPUT_ARCH(i386:x86-64)
 
