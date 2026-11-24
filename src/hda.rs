@@ -1,10 +1,20 @@
 //! Sound: Intel High Definition Audio controllers (every PC since about 2005) and their
-//! codecs. Plays 48 kHz 16-bit stereo through every output the codec has (speakers,
-//! headphones, line out). Polled: the player tops the ring buffer up a few times a second.
+//! codecs: the motherboard's jacks (speakers, headphones, optical) and the monitors on an
+//! NVIDIA graphics card (DisplayPort sound, switched on by nvidia::audio). Plays 48 kHz 16-bit
+//! stereo through the output chosen in Settings > Sound, or automatically: a jack with
+//! something plugged in (headphones first), else built-in speakers, else a monitor's speakers,
+//! else every jack at once. Polled: the player tops the ring buffer up a few times a second.
+//!
+//! Every controller found is set up. AMD and NVIDIA controllers only read the processor's
+//! latest writes when told to snoop (Linux hda_intel: AMD's PCI register 0x42, NVIDIA's
+//! 0x4c-0x4e); the sound ring is also flushed from the caches after each write, so stale
+//! (silent) memory can't play either way.
 
 use crate::interrupts::sleep_ms;
 use crate::memory::{map_mmio, Dma};
 use crate::pci;
+use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::ptr::{read_volatile, write_volatile};
 use spin::Mutex;
@@ -18,8 +28,66 @@ const TAG: u32 = 1;
 /// 48 kHz, 16 bits, 2 channels.
 const FORMAT: u16 = 0x0011;
 
-pub struct Hda {
+/// Settings > Sound: chosen automatically.
+pub const AUTO: u32 = 0;
+/// Every jack on the computer at once.
+pub const ALL_JACKS: u32 = 1;
+/// Keys of monitors' outputs have this bit.
+const MONITOR: u32 = 1 << 31;
+
+/// An output, as Settings shows it.
+#[derive(Clone)]
+pub struct OutputInfo {
+    pub key: u32,
+    pub name: String,
+    /// Where it is.
+    pub place: String,
+    /// Something plugged in (None: the jack can't tell, or it's a monitor).
+    pub plugged: Option<bool>,
+    pub monitor: bool,
+}
+
+/// One analog or optical output of a codec: a jack or built-in speakers.
+#[derive(Clone)]
+struct Out {
+    key: u32,
+    codec: u32,
+    pin: u32,
+    name: String,
+    place: &'static str,
+    /// Pin, ..., converter: each widget and the connection it takes (the converter: None).
+    path: Vec<(u32, Option<u32>)>,
+    hp: bool,
+    eapd: bool,
+    /// The jack tells whether something is plugged in.
+    detect: bool,
+    /// Built into the computer (a laptop's or all-in-one's speakers).
+    builtin: bool,
+    /// An S/PDIF output (its converter needs "digital on").
+    digital: bool,
+    /// Order among jacks with something plugged in, for the automatic choice (lower first).
+    rank: u32,
+}
+
+/// A digital pin of a graphics card's codec (HDMI or DisplayPort), for its monitors.
+struct DigiPin {
+    codec: u32,
+    pin: u32,
+    convs: Vec<u32>,
+}
+
+struct Codec {
+    addr: u32,
+    afg_caps: (u32, u32),
+    types: Vec<(u32, u32)>,
+}
+
+/// One controller.
+struct Ctl {
     base: u64,
+    vendor: u16,
+    /// PCI location: bus << 8 | device << 3 | function.
+    bdf: u32,
     corb: Dma,
     rirb: Dma,
     corb_wp: u16,
@@ -34,14 +102,42 @@ pub struct Hda {
     written: u64,
     played: u64,
     last_lpib: u32,
-    /// Software volume, 0..=256.
-    pub volume: u32,
-    pub outputs: Vec<&'static str>,
+    codecs: Vec<Codec>,
+    outs: Vec<Out>,
+    digi: Vec<DigiPin>,
 }
 
-pub static SOUND: Mutex<Option<Hda>> = Mutex::new(None);
+/// Every controller, and what plays where.
+pub struct Sound {
+    ctls: Vec<Ctl>,
+    /// The controller playing.
+    active: usize,
+    /// What Settings ask for, and what's set up now (a key, or ALL_JACKS).
+    chosen: u32,
+    using: Option<u32>,
+    /// Software volume, 0..=256.
+    volume: u32,
+    /// A test sound plays until this frame; then the chosen output comes back.
+    test_end: Option<u64>,
+    last_look: u64,
+}
 
-impl Hda {
+pub static SOUND: Mutex<Option<Sound>> = Mutex::new(None);
+
+fn key_of(bdf: u32, codec: u32, pin: u32) -> u32 {
+    bdf << 11 | codec << 7 | pin
+}
+
+/// Write a cache line back to memory (the controller may not see the caches).
+fn flush_line(addr: usize) {
+    unsafe { core::arch::asm!("clflush [{0}]", in(reg) addr, options(nostack, preserves_flags)) };
+}
+
+fn fence() {
+    unsafe { core::arch::asm!("mfence", options(nostack, preserves_flags)) };
+}
+
+impl Ctl {
     fn r8(&self, off: u64) -> u8 {
         unsafe { read_volatile((self.base + off) as *const u8) }
     }
@@ -62,7 +158,7 @@ impl Hda {
     }
 
     /// Wait (up to `ms`) for `f` to be true.
-    fn wait(&self, ms: u32, f: impl Fn(&Hda) -> bool) -> bool {
+    fn wait(&self, ms: u32, f: impl Fn(&Ctl) -> bool) -> bool {
         for _ in 0..ms * 100 {
             if f(self) {
                 return true;
@@ -74,17 +170,27 @@ impl Hda {
         f(self)
     }
 
-    fn init(dev: &pci::Device) -> Option<Hda> {
+    fn init(dev: &pci::Device) -> Option<Ctl> {
         let (phys, size) = dev.bar(0)?;
         dev.enable();
-        // Intel: clear TCSEL (traffic class) so sound isn't starved on some chipsets.
-        if dev.vendor == 0x8086 {
-            let v = dev.read(0x44);
-            dev.write(0x44, v & !0x07);
+        match dev.vendor {
+            // Intel: clear TCSEL (traffic class) so sound isn't starved on some chipsets.
+            0x8086 => dev.mask8(0x44, 0x07, 0),
+            // AMD and ATI: snoop the processor's caches (Linux: ATI_SB450_HDAUDIO_MISC_CNTR2).
+            0x1022 | 0x1002 => dev.mask8(0x42, 0x07, 0x02),
+            // NVIDIA: coherent transfers (Linux: NVIDIA_HDA_TRANSREG, _OSTRM_COH, _ISTRM_COH).
+            0x10de => {
+                dev.mask8(0x4e, 0x0f, 0x0f);
+                dev.mask8(0x4d, 0x01, 0x01);
+                dev.mask8(0x4c, 0x01, 0x01);
+            }
+            _ => {}
         }
         let base = map_mmio(phys, size.max(0x4000));
-        let mut h = Hda {
+        let mut h = Ctl {
             base,
+            vendor: dev.vendor,
+            bdf: (dev.bus as u32) << 8 | (dev.dev as u32) << 3 | dev.func as u32,
             corb: Dma::new(1024, 1024),
             rirb: Dma::new(2048, 2048),
             corb_wp: 0,
@@ -96,8 +202,9 @@ impl Hda {
             written: 0,
             played: 0,
             last_lpib: 0,
-            volume: 256,
-            outputs: Vec::new(),
+            codecs: Vec::new(),
+            outs: Vec::new(),
+            digi: Vec::new(),
         };
         let gcap = h.r16(0x00);
         let iss = ((gcap >> 8) & 0xF) as u64;
@@ -124,7 +231,7 @@ impl Hda {
         let codecs = h.r16(0x0E);
         h.w16(0x0E, codecs); // clear
         if codecs & 0x7FFF == 0 {
-            kprintln!("hda: no codecs");
+            kprintln!("hda: {:04x}:{:04x}: no codecs", dev.vendor, dev.device);
             return None;
         }
         h.setup_rings();
@@ -135,12 +242,13 @@ impl Hda {
                 h.setup_codec(addr);
             }
         }
-        if h.outputs.is_empty() {
-            kprintln!("hda: no usable outputs");
+        if h.outs.is_empty() && h.digi.is_empty() {
+            kprintln!("hda: {:04x}:{:04x}: no outputs", dev.vendor, dev.device);
             return None;
         }
         h.setup_stream();
-        kprintln!("hda: {:04x}:{:04x} ready, outputs: {:?}", dev.vendor, dev.device, h.outputs);
+        let names: Vec<String> = h.outs.iter().map(|o| format!("{} (pin {})", o.name, o.pin)).collect();
+        kprintln!("hda: {:04x}:{:04x} ready: {} jack(s) {:?}, {} monitor pin(s)", dev.vendor, dev.device, h.outs.len(), names, h.digi.len());
         Some(h)
     }
 
@@ -153,6 +261,7 @@ impl Hda {
         let p = self.corb.phys();
         self.w32(0x40, p as u32);
         self.w32(0x44, (p >> 32) as u32);
+        // (AMD and NVIDIA clear the reset bit by themselves.)
         self.w16(0x4A, 0x8000);
         self.wait(10, |h| h.r16(0x4A) & 0x8000 != 0);
         self.w16(0x4A, 0);
@@ -186,7 +295,10 @@ impl Hda {
     fn cmd(&mut self, codec: u32, nid: u32, verb: u32) -> Option<u32> {
         let n = Self::ring_entries(self.r8(0x4E));
         let wp = (self.corb_wp + 1) % n;
-        unsafe { write_volatile(self.corb.ptr::<u32>().add(wp as usize), codec << 28 | nid << 20 | verb) };
+        let slot = unsafe { self.corb.ptr::<u32>().add(wp as usize) };
+        unsafe { write_volatile(slot, codec << 28 | nid << 20 | verb) };
+        flush_line(slot as usize);
+        fence();
         self.corb_wp = wp;
         self.w16(0x48, wp);
         let rn = Self::ring_entries(self.r8(0x5E));
@@ -258,6 +370,7 @@ impl Hda {
         self.cmd(codec, nid, 0x3 << 16 | payload);
     }
 
+    /// Find the codec's outputs (nothing is switched on yet).
     fn setup_codec(&mut self, codec: u32) {
         let vendor = self.param(codec, 0, 0x00);
         let sub = self.param(codec, 0, 0x04);
@@ -268,6 +381,9 @@ impl Hda {
             }
             self.cmd(codec, fg, 0x705 << 8); // power on (D0)
             sleep_ms(10);
+            if vendor >> 16 == 0x10ec {
+                self.realtek_init(codec, vendor);
+            }
             let afg_caps = (self.param(codec, fg, 0x0D), self.param(codec, fg, 0x12));
             let ws = self.param(codec, fg, 0x04);
             let first = (ws >> 16) & 0xFF;
@@ -290,52 +406,63 @@ impl Hda {
                 if connectivity == 1 {
                     continue; // nothing connected to this pin
                 }
-                let name = match device {
-                    0 => "line out",
-                    1 => "speaker",
-                    2 => "headphones",
-                    4 | 5 => "digital out",
-                    _ => continue,
-                };
-                if device == 4 || device == 5 {
-                    continue; // S/PDIF / HDMI need more setup; skip
-                }
-                // Find a path to a DAC (depth-first, a few hops).
-                let mut path = Vec::new();
-                if !self.find_dac(codec, nid, &types, &mut path, 0) {
-                    kprintln!("hda: no route from pin {} ({}) to a DAC", nid, name);
+                // HDMI / DisplayPort pins (a graphics card's): set up per monitor when chosen.
+                if pincap & (1 << 7 | 1 << 24) != 0 && device == 5 {
+                    let convs = self.connections(codec, nid);
+                    self.digi.push(DigiPin { codec, pin: nid, convs });
                     continue;
                 }
-                kprintln!("hda: {} on pin {} via {:?}", name, nid, path);
-                // Configure every widget on the path.
-                for (i, &(w, sel)) in path.iter().enumerate() {
-                    self.cmd(codec, w, 0x705 << 8);
-                    let kind = types.iter().find(|t| t.0 == w).map(|t| t.1).unwrap_or(0);
-                    if let Some(idx) = sel {
-                        if kind != 2 {
-                            self.cmd(codec, w, 0x701 << 8 | idx); // selector / pin input choice
-                        }
-                        self.unmute(codec, w, false, idx, afg_caps);
-                    }
-                    self.unmute(codec, w, true, 0, afg_caps);
-                    if i == path.len() - 1 {
-                        // The DAC.
-                        self.cmd(codec, w, 0x706 << 8 | TAG << 4);
-                        self.cmd(codec, w, 0x2 << 16 | FORMAT as u32);
-                    }
+                let Some((name, place, rank)) = describe(config) else { continue };
+                // Find a path to a converter (depth-first, a few hops).
+                let mut path = Vec::new();
+                if !self.find_dac(codec, nid, &types, &mut path, 0) {
+                    kprintln!("hda: no route from pin {} ({}) to a converter", nid, name);
+                    continue;
                 }
-                let hp = if device == 2 { 0x80 } else { 0 };
-                self.cmd(codec, nid, 0x707 << 8 | 0x40 | hp);
-                if pincap & (1 << 16) != 0 {
-                    self.cmd(codec, nid, 0x70C << 8 | 0x02); // external amplifier on
-                }
-                self.outputs.push(name);
+                let detect = pincap & (1 << 2) != 0 && (config >> 8) & 1 == 0;
+                kprintln!("hda:   {} ({}) on pin {} via {:?}{}", name, place, nid, path, if detect { ", tells when plugged in" } else { "" });
+                self.outs.push(Out {
+                    key: key_of(self.bdf, codec, nid),
+                    codec,
+                    pin: nid,
+                    name,
+                    place,
+                    path,
+                    hp: device == 2,
+                    eapd: pincap & (1 << 16) != 0,
+                    detect,
+                    builtin: connectivity == 2,
+                    digital: device == 4,
+                    rank,
+                });
             }
+            self.codecs.push(Codec { addr: codec, afg_caps, types });
         }
     }
 
-    /// Path from widget `nid` to a DAC: (widget, connection index used) pairs, ending at
-    /// the DAC (whose index is None).
+    /// What Linux's Realtek driver does after a reset (realtek.c alc_fill_eapd_coef, alc882.c
+    /// alc_fix_pll_init) on these codecs, through their coefficient widget 0x20: amplifier
+    /// control off coefficient 7 bit 1 (ALC1220 and kin), and the PLL fix, coefficient 0x0a
+    /// bit 10 (ALC883 and its variants, which include the 10ec:1168 "ALC1220").
+    fn realtek_init(&mut self, codec: u32, vendor: u32) {
+        let clear = |h: &mut Ctl, idx: u32, bit: u32| {
+            h.cmd(codec, 0x20, 0x500 << 8 | idx);
+            if let Some(v) = h.cmd(codec, 0x20, 0xC00 << 8) {
+                h.cmd(codec, 0x20, 0x500 << 8 | idx);
+                h.cmd(codec, 0x20, 0x400 << 8 | (v & !bit & 0xffff));
+                kprintln!("hda: Realtek coefficient {:#x}: {:#06x} -> {:#06x}", idx, v & 0xffff, v & !bit & 0xffff);
+            }
+        };
+        if matches!(vendor, 0x10ec0899 | 0x10ec0900 | 0x10ec0b00 | 0x10ec1168 | 0x10ec1220) {
+            clear(self, 0x07, 1 << 1);
+        }
+        if matches!(vendor, 0x10ec0883 | 0x10ec0887 | 0x10ec0888 | 0x10ec0889 | 0x10ec0899 | 0x10ec1168) {
+            clear(self, 0x0a, 1 << 10);
+        }
+    }
+
+    /// Path from widget `nid` to a converter: (widget, connection index used) pairs, ending at
+    /// the converter (whose index is None).
     fn find_dac(&mut self, codec: u32, nid: u32, types: &[(u32, u32)], path: &mut Vec<(u32, Option<u32>)>, depth: u32) -> bool {
         let kind = types.iter().find(|t| t.0 == nid).map(|t| t.1);
         if kind == Some(0) {
@@ -346,7 +473,7 @@ impl Hda {
             return false;
         }
         let conns = self.connections(codec, nid);
-        // Prefer a DAC directly connected.
+        // Prefer a converter directly connected.
         let mut order: Vec<(usize, u32)> = conns.iter().copied().enumerate().collect();
         order.sort_by_key(|&(_, c)| if types.iter().any(|t| t.0 == c && t.1 == 0) { 0 } else { 1 });
         for (i, c) in order {
@@ -357,6 +484,117 @@ impl Hda {
             path.pop();
         }
         false
+    }
+
+    /// Something plugged into this jack (None: it can't tell).
+    fn plugged(&mut self, o: usize) -> Option<bool> {
+        let (codec, pin, detect) = (self.outs[o].codec, self.outs[o].pin, self.outs[o].detect);
+        if !detect {
+            return None;
+        }
+        self.cmd(codec, pin, 0xF09 << 8).map(|v| v & 0x8000_0000 != 0)
+    }
+
+    /// Switch one jack on: every widget on its path, the converter on our stream.
+    fn jack_on(&mut self, o: usize) {
+        let out = self.outs[o].clone();
+        let Some(c) = self.codecs.iter().find(|c| c.addr == out.codec) else { return };
+        let (afg_caps, types) = (c.afg_caps, c.types.clone());
+        let codec = out.codec;
+        for (i, &(w, sel)) in out.path.iter().enumerate() {
+            self.cmd(codec, w, 0x705 << 8);
+            let kind = types.iter().find(|t| t.0 == w).map(|t| t.1).unwrap_or(0);
+            if let Some(idx) = sel {
+                if kind != 2 {
+                    self.cmd(codec, w, 0x701 << 8 | idx); // selector / pin input choice
+                }
+                self.unmute(codec, w, false, idx, afg_caps);
+            }
+            self.unmute(codec, w, true, 0, afg_caps);
+            if i == out.path.len() - 1 {
+                // The converter.
+                self.cmd(codec, w, 0x706 << 8 | TAG << 4);
+                self.cmd(codec, w, 0x2 << 16 | FORMAT as u32);
+                if out.digital {
+                    self.cmd(codec, w, 0x70D << 8 | 0x01); // digital on
+                }
+            }
+        }
+        self.cmd(codec, out.pin, 0x707 << 8 | 0x40 | if out.hp { 0x80 } else { 0 });
+        if out.eapd {
+            self.cmd(codec, out.pin, 0x70C << 8 | 0x02); // external amplifier on
+        }
+    }
+
+    /// Everything quiet: every pin's output off, every converter off our stream.
+    fn all_off(&mut self) {
+        let outs: Vec<(u32, u32, Option<u32>)> = self.outs.iter().map(|o| (o.codec, o.pin, o.path.last().map(|p| p.0))).collect();
+        for (codec, pin, conv) in outs {
+            self.cmd(codec, pin, 0x707 << 8);
+            if let Some(cv) = conv {
+                self.cmd(codec, cv, 0x706 << 8);
+            }
+        }
+        let digi: Vec<(u32, u32, Vec<u32>)> = self.digi.iter().map(|d| (d.codec, d.pin, d.convs.clone())).collect();
+        for (codec, pin, convs) in digi {
+            self.cmd(codec, pin, 0x707 << 8);
+            for cv in convs {
+                self.cmd(codec, cv, 0x706 << 8);
+            }
+        }
+    }
+
+    /// Play to a monitor on digital pin `d`, device entry `dev` (its head): the converter, the
+    /// channel slots, the audio infoframe and the pin (Linux hdmi.c, nvhdmi.c).
+    fn monitor_on(&mut self, d: usize, dev: u32) {
+        let (codec, pin) = (self.digi[d].codec, self.digi[d].pin);
+        let Some(&conv) = self.digi[d].convs.first() else { return };
+        // No other pin may take this converter's stream (nvhdmi_not_share_assigned_cvt).
+        let others: Vec<(u32, Vec<u32>)> = self.digi.iter().filter(|o| o.pin != pin).map(|o| (o.pin, o.convs.clone())).collect();
+        for (p, convs) in others {
+            let devices = (self.param(codec, p, 0x15) & 0x3f) + 1;
+            for e in 0..devices.min(8) {
+                self.cmd(codec, p, 0x735 << 8 | e);
+                let cur = self.cmd(codec, p, 0xF01 << 8).unwrap_or(0) as usize;
+                if convs.get(cur) == Some(&conv) {
+                    if let Some(i) = convs.iter().position(|&c| c != conv) {
+                        self.cmd(codec, p, 0x701 << 8 | i as u32);
+                    }
+                }
+            }
+        }
+        self.cmd(codec, pin, 0x735 << 8 | dev);
+        self.cmd(codec, pin, 0x701 << 8);
+        let afg_caps = self.codecs.iter().find(|c| c.addr == codec).map(|c| c.afg_caps).unwrap_or((0, 0));
+        self.unmute(codec, pin, true, 0, afg_caps);
+        // Converter channel 0 to the front left slot, 1 to front right, the others unused.
+        for v in [0x00u32, 0x11, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7] {
+            self.cmd(codec, pin, 0x734 << 8 | v);
+        }
+        // The audio infoframe for 2 channels, laid out as NVIDIA's hardware expects for
+        // DisplayPort (like HDMI's, version 0x1b).
+        let mut ai = [0x84u8, 0x1b, 0x44, 0, 0x01, 0, 0, 0, 0];
+        ai[3] = 0u8.wrapping_sub(ai.iter().fold(0u8, |s, &b| s.wrapping_add(b)));
+        self.cmd(codec, pin, 0x730 << 8);
+        self.cmd(codec, pin, 0x732 << 8); // stop sending it
+        self.cmd(codec, pin, 0x730 << 8);
+        for b in ai {
+            self.cmd(codec, pin, 0x731 << 8 | b as u32);
+        }
+        self.cmd(codec, pin, 0x730 << 8);
+        self.cmd(codec, pin, 0x732 << 8 | 0xC0); // send it, best effort
+        self.cmd(codec, pin, 0x707 << 8 | 0x40);
+        // The converter: two channels, digital on, our stream and format.
+        self.cmd(codec, conv, 0x705 << 8);
+        self.cmd(codec, conv, 0x72D << 8 | 1);
+        self.cmd(codec, conv, 0x70D << 8 | 0x01);
+        self.cmd(codec, conv, 0x706 << 8 | TAG << 4);
+        self.cmd(codec, conv, 0x2 << 16 | FORMAT as u32);
+        let sense = self.cmd(codec, pin, 0xF09 << 8).unwrap_or(0);
+        kprintln!(
+            "hda: monitor pin {} device {} via converter {}: {}, {}",
+            pin, dev, conv, if sense & 0x8000_0000 != 0 { "monitor present" } else { "no monitor present" }, if sense & 0x4000_0000 != 0 { "description (ELD) valid" } else { "no description (ELD)" }
+        );
     }
 
     fn setup_stream(&mut self) {
@@ -379,6 +617,8 @@ impl Hda {
                 write_volatile(bdl.add(i as usize * 4 + 3), 0);
             }
         }
+        flush_line(bdl as usize);
+        fence();
         let b = self.bdl.phys();
         self.w32(sd + 0x18, b as u32);
         self.w32(sd + 0x1C, (b >> 32) as u32);
@@ -403,12 +643,17 @@ impl Hda {
         self.played += d as u64 / 4;
     }
 
-    fn start(&mut self) {
-        let ring = self.ring.bytes_mut();
-        ring.fill(0);
-        self.written = 0;
-        self.played = 0;
-        self.last_lpib = 0;
+    /// Start the stream with the clock at `played` frames and `written` frames queued (to
+    /// carry on after a change of output).
+    fn start_at(&mut self, played: u64, written: u64) {
+        self.ring.bytes_mut().fill(0);
+        let base = self.ring.ptr::<u8>() as usize;
+        for off in (0..RING_BYTES).step_by(64) {
+            flush_line(base + off);
+        }
+        fence();
+        self.written = written.max(played);
+        self.played = played;
         self.w8(self.sd + 3, 0x1C); // clear status
         self.w8(self.sd, self.r8(self.sd) | 2);
         self.running = true;
@@ -420,31 +665,315 @@ impl Hda {
         self.running = false;
     }
 
-    /// Copy frames into the ring at absolute frame position `at`.
-    fn put(&mut self, at: u64, pcm: &[i16]) {
-        let vol = self.volume as i32;
+    /// Copy frames into the ring at absolute frame position `at`, and write them back from
+    /// the caches.
+    fn put(&mut self, at: u64, pcm: &[i16], vol: u32) {
         let ring = self.ring.ptr::<i16>();
         for (i, s) in pcm.iter().enumerate() {
             let f = (at as usize * 2 + i) % (RING_FRAMES * 2);
-            let v = if vol >= 256 { *s } else { ((*s as i32 * vol) >> 8) as i16 };
+            let v = if vol >= 256 { *s } else { ((*s as i32 * vol as i32) >> 8) as i16 };
             unsafe { write_volatile(ring.add(f), v) };
         }
+        let base = self.ring.ptr::<u8>() as usize;
+        let (start, len) = ((at as usize % RING_FRAMES) * 4, (pcm.len() * 2).min(RING_BYTES));
+        let mut a = start & !63;
+        while a < start + len {
+            flush_line(base + a % RING_BYTES);
+            a += 64;
+        }
+        fence();
+    }
+}
+
+/// What a jack is, from its pin's configuration: a name, where it is, and its order for the
+/// automatic choice. None for jacks Solon doesn't play to.
+fn describe(config: u32) -> Option<(String, &'static str, u32)> {
+    let device = (config >> 20) & 0xF;
+    let connectivity = config >> 30;
+    let (gross, geo) = ((config >> 28) & 3, (config >> 24) & 0xF);
+    let place = if connectivity == 2 || gross == 1 {
+        "Inside the computer"
+    } else {
+        match geo {
+            1 => "Back of the computer",
+            2 => "Front of the computer",
+            5 => "Top of the computer",
+            _ => "On the computer",
+        }
+    };
+    let colour = match (config >> 12) & 0xF {
+        1 => "black",
+        2 => "grey",
+        3 => "blue",
+        4 => "green",
+        5 => "red",
+        6 => "orange",
+        7 => "yellow",
+        8 => "purple",
+        9 => "pink",
+        0xE => "white",
+        _ => "",
+    };
+    let (name, rank) = match device {
+        2 => (String::from("Headphones"), 0),
+        1 if connectivity == 2 => (String::from("Built-in speakers"), 2),
+        1 => (String::from("Speakers"), 2),
+        0 => match colour {
+            "green" => (String::from("Speakers (green jack)"), 1),
+            "black" => (String::from("Rear speakers (black jack)"), 3),
+            "orange" => (String::from("Centre and subwoofer (orange jack)"), 4),
+            "grey" => (String::from("Side speakers (grey jack)"), 4),
+            "" => (String::from("Line out"), 3),
+            c => (format!("Line out ({} jack)", c), 3),
+        },
+        4 => (String::from(if (config >> 16) & 0xF == 5 { "Optical (S/PDIF)" } else { "Digital (S/PDIF)" }), 5),
+        _ => return None,
+    };
+    Some((name, place, rank))
+}
+
+impl Sound {
+    /// Every monitor that takes sound and the controller and pin that play to it.
+    fn monitors(&self) -> Vec<(u32, usize, usize, crate::nvidia::audio::AudioMonitor)> {
+        let mut v = Vec::new();
+        for m in crate::nvidia::audio::monitors() {
+            for (ci, c) in self.ctls.iter().enumerate() {
+                if c.vendor != 0x10de {
+                    continue;
+                }
+                if let Some(di) = c.digi.iter().position(|d| d.pin == m.sor + 4) {
+                    let key = MONITOR | m.head << 27 | key_of(c.bdf, c.digi[di].codec, c.digi[di].pin);
+                    v.push((key, ci, di, m.clone()));
+                    break;
+                }
+            }
+        }
+        v
+    }
+
+    /// The jack with `key`: (controller, output).
+    fn jack(&self, key: u32) -> Option<(usize, usize)> {
+        self.ctls.iter().enumerate().find_map(|(ci, c)| c.outs.iter().position(|o| o.key == key).map(|oi| (ci, oi)))
+    }
+
+    /// What to play through for `want` (AUTO, ALL_JACKS or a key): a key or ALL_JACKS.
+    fn target(&mut self, want: u32) -> Option<u32> {
+        let any_jack = self.ctls.iter().any(|c| !c.outs.is_empty());
+        if want == ALL_JACKS && any_jack {
+            return Some(ALL_JACKS);
+        }
+        if want & MONITOR != 0 && self.monitors().iter().any(|m| m.0 == want) {
+            return Some(want);
+        }
+        if want > ALL_JACKS && want & MONITOR == 0 && self.jack(want).is_some() {
+            return Some(want);
+        }
+        // Automatic: a jack with something plugged in, headphones first.
+        let mut best: Option<(u32, u32)> = None;
+        for ci in 0..self.ctls.len() {
+            for oi in 0..self.ctls[ci].outs.len() {
+                let (rank, key, builtin) = (self.ctls[ci].outs[oi].rank, self.ctls[ci].outs[oi].key, self.ctls[ci].outs[oi].builtin);
+                let plugged = self.ctls[ci].plugged(oi) == Some(true);
+                if plugged && !builtin && best.is_none_or(|b| rank < b.0) {
+                    best = Some((rank, key));
+                }
+            }
+        }
+        if let Some((_, key)) = best {
+            return Some(key);
+        }
+        // Built-in speakers, then a monitor's speakers, then every jack.
+        if let Some(o) = self.ctls.iter().flat_map(|c| c.outs.iter()).find(|o| o.builtin) {
+            return Some(o.key);
+        }
+        let monitors = self.monitors();
+        if let Some(m) = monitors.iter().find(|m| m.3.speakers) {
+            return Some(m.0);
+        }
+        if any_jack {
+            return Some(ALL_JACKS);
+        }
+        monitors.first().map(|m| m.0)
+    }
+
+    /// Play through `target` (from `target()`), carrying on whatever is playing.
+    fn route(&mut self, target: u32) {
+        if self.using == Some(target) {
+            return;
+        }
+        let (running, played, written) = {
+            let c = &mut self.ctls[self.active];
+            c.update_played();
+            (c.running, c.played, c.written)
+        };
+        if running {
+            self.ctls[self.active].stop();
+        }
+        for c in self.ctls.iter_mut() {
+            c.all_off();
+        }
+        let mut name = String::new();
+        if target == ALL_JACKS {
+            if let Some(ci) = self.ctls.iter().position(|c| !c.outs.is_empty()) {
+                for oi in 0..self.ctls[ci].outs.len() {
+                    self.ctls[ci].jack_on(oi);
+                }
+                self.active = ci;
+                name = String::from("every jack");
+            }
+        } else if target & MONITOR != 0 {
+            if let Some((_, ci, di, m)) = self.monitors().into_iter().find(|m| m.0 == target) {
+                match crate::nvidia::audio::switch_on(&m) {
+                    Ok(msg) => kprintln!("hda: monitor sound on: {}", msg),
+                    Err(e) => kprintln!("hda: monitor sound: {}", e),
+                }
+                self.ctls[ci].monitor_on(di, m.head);
+                self.active = ci;
+                name = m.name.clone();
+            }
+        } else if let Some((ci, oi)) = self.jack(target) {
+            self.ctls[ci].jack_on(oi);
+            self.active = ci;
+            name = format!("{} ({})", self.ctls[ci].outs[oi].name, self.ctls[ci].outs[oi].place);
+        }
+        self.using = Some(target);
+        kprintln!("hda: playing through {}", name);
+        if running {
+            self.ctls[self.active].start_at(played, written);
+        }
+    }
+
+    fn name_of(&self, key: u32) -> String {
+        if key == ALL_JACKS {
+            return String::from("Every jack at once");
+        }
+        if let Some((ci, oi)) = self.jack(key) {
+            return self.ctls[ci].outs[oi].name.clone();
+        }
+        self.monitors().into_iter().find(|m| m.0 == key).map(|m| m.3.name).unwrap_or_default()
     }
 }
 
 // ---- the interface the apps use ------------------------------------------------------
 
 pub fn init(devices: &[pci::Device]) {
-    for d in devices.iter().filter(|d| d.class == 0x04 && d.subclass == 0x03) {
-        if let Some(h) = Hda::init(d) {
-            *SOUND.lock() = Some(h);
-            return;
+    let ctls: Vec<Ctl> = devices.iter().filter(|d| d.class == 0x04 && d.subclass == 0x03).filter_map(Ctl::init).collect();
+    if ctls.is_empty() {
+        return;
+    }
+    let mut s = Sound { ctls, active: 0, chosen: AUTO, using: None, volume: 256, test_end: None, last_look: 0 };
+    if let Some(t) = s.target(AUTO) {
+        s.route(t);
+    }
+    *SOUND.lock() = Some(s);
+}
+
+pub fn available() -> bool {
+    SOUND.lock().as_ref().is_some_and(|s| s.using.is_some())
+}
+
+/// Every output, for Settings: jacks (with whether something is plugged in), then monitors.
+pub fn outputs() -> Vec<OutputInfo> {
+    let mut g = SOUND.lock();
+    let Some(s) = g.as_mut() else { return Vec::new() };
+    let mut v = Vec::new();
+    for ci in 0..s.ctls.len() {
+        let mut order: Vec<usize> = (0..s.ctls[ci].outs.len()).collect();
+        order.sort_by_key(|&oi| s.ctls[ci].outs[oi].rank);
+        for oi in order {
+            let plugged = s.ctls[ci].plugged(oi);
+            let o = &s.ctls[ci].outs[oi];
+            v.push(OutputInfo { key: o.key, name: o.name.clone(), place: String::from(o.place), plugged, monitor: false });
+        }
+    }
+    for (key, _, _, m) in s.monitors() {
+        let place = if m.speakers { "Its speakers, through the DisplayPort cable" } else { "Its headphone jack, through the DisplayPort cable" };
+        v.push(OutputInfo { key, name: m.name, place: String::from(place), plugged: None, monitor: true });
+    }
+    v
+}
+
+/// Play through `key` (AUTO, ALL_JACKS or an output's key) from now on.
+pub fn choose(key: u32) {
+    let mut g = SOUND.lock();
+    let Some(s) = g.as_mut() else { return };
+    s.chosen = key;
+    if s.test_end.is_none() {
+        if let Some(t) = s.target(key) {
+            s.route(t);
         }
     }
 }
 
-pub fn available() -> bool {
-    SOUND.lock().is_some()
+/// The output playing now (its name), and whether it was chosen automatically.
+pub fn using() -> Option<(String, bool)> {
+    let g = SOUND.lock();
+    let s = g.as_ref()?;
+    Some((s.name_of(s.using?), s.chosen == AUTO))
+}
+
+/// How loud everything is, in percent.
+pub fn set_volume(percent: u8) {
+    if let Some(s) = SOUND.lock().as_mut() {
+        s.volume = (percent.min(100) as u32 * 256).div_ceil(100);
+    }
+}
+
+/// A short chime through `key` (Settings' Test button), unless something is playing.
+pub fn test(key: u32) {
+    let mut g = SOUND.lock();
+    let Some(s) = g.as_mut() else { return };
+    if s.ctls[s.active].running && s.test_end.is_none() {
+        return;
+    }
+    let Some(t) = s.target(key) else { return };
+    if s.ctls[s.active].running {
+        s.ctls[s.active].stop();
+    }
+    s.route(t);
+    // Two notes, a fifth apart, fading out.
+    let mut pcm = Vec::new();
+    let total = RATE as u64 * 45 / 100;
+    for k in 0..total {
+        let f = if k < RATE as u64 * 15 / 100 { 660.0 } else { 990.0 };
+        let fade = 1.0 - k as f64 / total as f64;
+        let v = (libm::sin(k as f64 * f * 2.0 * core::f64::consts::PI / RATE as f64) * 9000.0 * fade) as i16;
+        pcm.push(v);
+        pcm.push(v);
+    }
+    let vol = s.volume;
+    let c = &mut s.ctls[s.active];
+    c.start_at(0, 0);
+    c.put(0, &pcm, vol);
+    c.written = total;
+    s.test_end = Some(total + RATE as u64 / 10);
+}
+
+/// Called often (the desktop's tick): ends a test sound, and every second, when chosen
+/// automatically, follows what's plugged in.
+pub fn poll(now: u64) {
+    let mut g = SOUND.lock();
+    let Some(s) = g.as_mut() else { return };
+    if let Some(end) = s.test_end {
+        let c = &mut s.ctls[s.active];
+        c.update_played();
+        if c.played >= end || !c.running {
+            c.stop();
+            s.test_end = None;
+            if let Some(t) = s.target(s.chosen) {
+                s.route(t);
+            }
+        }
+        return;
+    }
+    if s.chosen == AUTO && now >= s.last_look + crate::interrupts::HZ {
+        s.last_look = now;
+        if let Some(t) = s.target(AUTO) {
+            if s.using != Some(t) {
+                s.route(t);
+            }
+        }
+    }
 }
 
 /// How far ahead of the speakers the player should keep the buffer filled.
@@ -452,17 +981,27 @@ pub const LEAD: usize = RATE as usize * 3 / 10;
 
 /// Start playing (silence until sound is queued).
 pub fn start() {
-    if let Some(h) = SOUND.lock().as_mut() {
-        if !h.running {
-            h.start();
+    if let Some(s) = SOUND.lock().as_mut() {
+        if s.test_end.take().is_some() {
+            s.ctls[s.active].stop();
+            if let Some(t) = s.target(s.chosen) {
+                s.route(t);
+            }
+        }
+        let c = &mut s.ctls[s.active];
+        if !c.running {
+            c.start_at(0, 0);
         }
     }
 }
 
 pub fn stop() {
-    if let Some(h) = SOUND.lock().as_mut() {
-        if h.running {
-            h.stop();
+    if let Some(s) = SOUND.lock().as_mut() {
+        if s.test_end.is_none() {
+            let c = &mut s.ctls[s.active];
+            if c.running {
+                c.stop();
+            }
         }
     }
 }
@@ -470,9 +1009,10 @@ pub fn stop() {
 /// Frames the speakers have played since `start` (the clock for keeping pictures in step).
 pub fn played() -> u64 {
     match SOUND.lock().as_mut() {
-        Some(h) => {
-            h.update_played();
-            h.played
+        Some(s) => {
+            let c = &mut s.ctls[s.active];
+            c.update_played();
+            c.played
         }
         None => 0,
     }
@@ -481,13 +1021,14 @@ pub fn played() -> u64 {
 /// How many frames the player may queue now (to stay `LEAD` ahead).
 pub fn wanted() -> usize {
     match SOUND.lock().as_mut() {
-        Some(h) if h.running => {
-            h.update_played();
+        Some(s) if s.ctls[s.active].running && s.test_end.is_none() => {
+            let c = &mut s.ctls[s.active];
+            c.update_played();
             // Fell behind (e.g. a long pause): skip ahead.
-            if h.written < h.played {
-                h.written = h.played;
+            if c.written < c.played {
+                c.written = c.played;
             }
-            let ahead = (h.written - h.played) as usize;
+            let ahead = (c.written - c.played) as usize;
             LEAD.saturating_sub(ahead)
         }
         _ => 0,
@@ -497,20 +1038,25 @@ pub fn wanted() -> usize {
 /// Queue interleaved stereo frames after what's already queued, and clear a little
 /// beyond them so that running dry plays silence rather than old sound.
 pub fn queue(pcm: &[i16]) {
-    if let Some(h) = SOUND.lock().as_mut() {
-        if !h.running {
+    if let Some(s) = SOUND.lock().as_mut() {
+        let vol = s.volume;
+        if s.test_end.is_some() {
             return;
         }
-        let at = h.written;
-        h.put(at, pcm);
-        h.written += (pcm.len() / 2) as u64;
-        let w = h.written;
+        let c = &mut s.ctls[s.active];
+        if !c.running {
+            return;
+        }
+        let at = c.written;
+        c.put(at, pcm, vol);
+        c.written += (pcm.len() / 2) as u64;
+        let w = c.written;
         let silence = [0i16; 2048];
         let mut clear = (RATE as usize / 5) * 2;
         let mut pos = w;
         while clear > 0 {
             let n = clear.min(silence.len());
-            h.put(pos, &silence[..n]);
+            c.put(pos, &silence[..n], 256);
             pos += (n / 2) as u64;
             clear -= n;
         }

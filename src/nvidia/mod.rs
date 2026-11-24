@@ -36,6 +36,7 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 pub mod bios;
+pub mod audio;
 pub mod light;
 
 /// A connector on the card, from the VBIOS, and what's plugged into it.

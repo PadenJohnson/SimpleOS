@@ -10,7 +10,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::gfx::{mix, rgb, text_width, Canvas, Rect, Size};
-use crate::settings::{days_in_month, weekday, Settings, ALIGNS_SIDE, ALIGNS_STACKED, BACKGROUNDS, MOUSE, SAVERS, SAVER_WAIT, SCREENS, SIDES, SIZES, SLIDE_TIME};
+use crate::settings::{days_in_month, weekday, Settings, ALIGNS_SIDE, ALIGNS_STACKED, BACKGROUNDS, MOUSE, SAVERS, SAVER_WAIT, SCREENS, SIDES, SIZES, SLIDE_TIME, VOLUMES};
 use crate::wallpaper::{CUSTOM, FIRST_PHOTO, PHOTOS};
 
 const INK: u32 = rgb(32, 36, 44);
@@ -32,6 +32,8 @@ pub enum SettingsAction {
     Resolution(Option<(u32, u32)>),
     /// Open the Photo Frame app (more screensaver settings).
     Screensaver,
+    /// Play the test sound through this output.
+    TestSound(u32),
 }
 
 /// The sections in the sidebar.
@@ -40,6 +42,7 @@ pub enum Page {
     Appearance,
     DateTime,
     Display,
+    Sound,
     Mouse,
     Spelling,
     ThisPc,
@@ -47,12 +50,13 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 7] = [Page::Appearance, Page::DateTime, Page::Display, Page::Mouse, Page::Spelling, Page::ThisPc, Page::About];
+    pub const ALL: [Page; 8] = [Page::Appearance, Page::DateTime, Page::Display, Page::Sound, Page::Mouse, Page::Spelling, Page::ThisPc, Page::About];
     pub fn name(self) -> &'static str {
         match self {
             Page::Appearance => "Appearance",
             Page::DateTime => "Date & time",
             Page::Display => "Display",
+            Page::Sound => "Sound",
             Page::Mouse => "Mouse",
             Page::Spelling => "Spelling",
             Page::ThisPc => "This PC",
@@ -64,6 +68,7 @@ impl Page {
             Page::Appearance => "Background, text size",
             Page::DateTime => "Clock, date, time",
             Page::Display => "Screens, resolution",
+            Page::Sound => "Speakers, headphones",
             Page::Mouse => "Pointer speed",
             Page::Spelling => "Language, your words",
             Page::ThisPc => "CPU, memory, sensors",
@@ -108,6 +113,10 @@ enum Act {
     MainScreen(usize),
     Where(usize),
     Align(usize),
+    /// Sound: where it plays, a test sound, how loud.
+    SoundOut(u32),
+    TestSound(u32),
+    Volume(u8),
 }
 
 /// One thing on a page.
@@ -126,12 +135,16 @@ enum It {
     /// it's the main one, and what it shows (0: the desktop, 1: the same as the main one,
     /// 2: nothing).
     Monitor { name: String, res: String, main: bool, shows: u8, act: Act },
+    /// One of a set of choices (a round button).
+    Radio { on: bool, act: Act },
+    /// A row that can be clicked anywhere (not drawn).
+    Hit { act: Act },
 }
 
 impl It {
     fn act(&self) -> Act {
         match self {
-            It::Button { act, .. } | It::Toggle { act, .. } | It::Drop { act, .. } | It::Day { act, .. } | It::Monitor { act, .. } => *act,
+            It::Button { act, .. } | It::Toggle { act, .. } | It::Drop { act, .. } | It::Day { act, .. } | It::Monitor { act, .. } | It::Radio { act, .. } | It::Hit { act } => *act,
             It::Seg { act, ok: true, .. } => *act,
             It::Side { page, .. } => Act::Page(*page),
             It::BgPreview => Act::BgPicker,
@@ -318,6 +331,7 @@ impl SettingsApp {
             Page::Appearance => self.appearance(&mut ui, s, screen),
             Page::DateTime => self.date_time(&mut ui, s),
             Page::Display => self.display(&mut ui, s),
+            Page::Sound => self.sound(&mut ui, s),
             Page::Mouse => {
                 ui.card("Mouse");
                 let row = ui.row("Pointer speed", "How far the pointer moves for a move of the mouse", ROW + 8);
@@ -356,7 +370,49 @@ impl SettingsApp {
 
     /// The page shows readings that change (the desktop redraws it every second).
     pub fn live(&self) -> bool {
-        self.page == Page::ThisPc && !self.bg_picker
+        matches!(self.page, Page::ThisPc | Page::Sound) && !self.bg_picker
+    }
+
+    /// Where sound plays: Automatic, each jack and monitor (with a Test button), or every jack
+    /// at once; and how loud.
+    fn sound(&self, ui: &mut Ui, s: &Settings) {
+        use crate::hda::{ALL_JACKS, AUTO};
+        let outs = crate::hda::outputs();
+        ui.card("Play sound through");
+        if outs.is_empty() {
+            ui.row("No sound device found", "Solon plays through the computer's jacks and the monitors on an NVIDIA graphics card", ROW + 8);
+            ui.end_card();
+            return;
+        }
+        // A row: the whole of it chooses; a Test button and a round button on the right.
+        let choice = |ui: &mut Ui, label: &str, help: &str, key: u32| {
+            let row = ui.row(label, help, ROW + 8);
+            ui.items.push((row, It::Hit { act: Act::SoundOut(key) }));
+            ui.button(Rect::new(row.x + row.w - 44 - 100, row.y + (row.h - 36) / 2, 90, 36), "Test", false, Act::TestSound(key));
+            ui.items.push((Rect::new(row.x + row.w - 30, row.y + (row.h - 26) / 2, 26, 26), It::Radio { on: s.sound_out == key, act: Act::SoundOut(key) }));
+        };
+        let auto_help = match crate::hda::using() {
+            Some((name, true)) => format!("Now: {}", name),
+            _ => String::from("Headphones or speakers you plug in, else a monitor's speakers"),
+        };
+        choice(ui, "Automatic", &auto_help, AUTO);
+        for o in &outs {
+            let help = match o.plugged {
+                Some(true) => format!("{}, plugged in", o.place),
+                Some(false) => format!("{}, nothing plugged in", o.place),
+                None => o.place.clone(),
+            };
+            choice(ui, &o.name, &help, o.key);
+        }
+        if outs.iter().filter(|o| !o.monitor).count() > 1 {
+            choice(ui, "Every jack at once", "Speakers, headphones and the other jacks together", ALL_JACKS);
+        }
+        ui.end_card();
+        ui.card("Volume");
+        let row = ui.row("How loud", "For everything Solon plays", ROW + 8);
+        let opts: Vec<(&str, bool, bool, Act)> = VOLUMES.iter().map(|&(l, v)| (l, s.volume == v, true, Act::Volume(v))).collect();
+        ui.seg(row, &opts);
+        ui.end_card();
     }
 
     fn this_pc(&self, ui: &mut Ui) {
@@ -887,6 +943,15 @@ impl SettingsApp {
                 c.text_centered(b.x + b.w / 2, b.y + b.h / 2 - 9, label, Size::Small, *sel || *today, if *sel { rgb(255, 255, 255) } else { INK });
             }
             It::BgPreview => self.draw_bg_tile(c, b, s.background, false),
+            It::Radio { on, .. } => {
+                let (cx, cy, r) = (b.x + b.w / 2, b.y + b.h / 2, b.w / 2);
+                c.circle(cx, cy, r, if *on { ON } else { rgb(190, 196, 204) });
+                c.circle(cx, cy, r - 2, rgb(255, 255, 255));
+                if *on {
+                    c.circle(cx, cy, r - 6, ON);
+                }
+            }
+            It::Hit { .. } => {}
             It::Monitor { name, res, main, shows, .. } => {
                 c.round_rect(b.x, b.y, b.w, b.h, 8, if *main { ON } else { rgb(70, 76, 88) });
                 let glass = match (shows, main) {
@@ -1014,6 +1079,9 @@ impl SettingsApp {
                 }
                 return SettingsAction::Redraw;
             }
+            Act::SoundOut(k) => n.sound_out = k,
+            Act::TestSound(k) => return SettingsAction::TestSound(k),
+            Act::Volume(v) => n.volume = v,
             Act::Screens(i) => n.screens = i,
             Act::MainScreen(i) => n.main_screen = i,
             Act::Where(i) => n.side = i,

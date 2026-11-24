@@ -33,12 +33,35 @@ pub fn write32(bus: u8, dev: u8, func: u8, off: u8, v: u32) {
     }
 }
 
+/// One byte of configuration space (registers that must be changed a byte at a time).
+pub fn read8(bus: u8, dev: u8, func: u8, off: u8) -> u8 {
+    unsafe {
+        Port::<u32>::new(0xCF8).write(addr(bus, dev, func, off));
+        Port::<u8>::new(0xCFC + (off as u16 & 3)).read()
+    }
+}
+
+pub fn write8(bus: u8, dev: u8, func: u8, off: u8, v: u8) {
+    unsafe {
+        Port::<u32>::new(0xCF8).write(addr(bus, dev, func, off));
+        Port::<u8>::new(0xCFC + (off as u16 & 3)).write(v);
+    }
+}
+
 impl Device {
     pub fn read(&self, off: u8) -> u32 {
         read32(self.bus, self.dev, self.func, off)
     }
     pub fn write(&self, off: u8, v: u32) {
         write32(self.bus, self.dev, self.func, off, v)
+    }
+    pub fn read8(&self, off: u8) -> u8 {
+        read8(self.bus, self.dev, self.func, off)
+    }
+    /// Change the bits of byte `off` in `mask` to `v`.
+    pub fn mask8(&self, off: u8, mask: u8, v: u8) {
+        let old = self.read8(off);
+        write8(self.bus, self.dev, self.func, off, (old & !mask) | (v & mask));
     }
 
     /// Physical address and size of a memory BAR (handles 64-bit BARs).

@@ -23,7 +23,9 @@ nothing to download.
 - Desktop: a nature photo (five built in: autumn, sunset, forest, field, snow; free CC0
   photos, see assets/wallpapers/CREDITS.md), a soft colour, or one of your own photos ("Desktop
   picture" in Photos) behind a big clock whose colour adapts to the picture; a floating dock (Applications button, pinned
-  apps and folders, open apps, clock, power) and a centred Applications launcher; several
+  apps and folders, open apps, clock, power), on every screen with two monitors (right-click
+  it for its options: the taskbar on every screen, the date, the 24-hour clock, and the way to
+  the sound and screen settings), and a centred Applications launcher; several
   apps open at once in rounded windows that move, minimize and maximize. Smooth Noto Sans
   and Noto Serif fonts throughout
 - Photos: thumbnail grid, full-screen viewer, and a Lightroom-style editor: histogram, Auto,
@@ -102,8 +104,14 @@ nothing to download.
   Shift or by clicking either half of the table). Cards move by dragging or with a single
   click. Best times, wins and the pinball high score are saved; little sound effects play
   through the sound card.
-- Sound: Intel High Definition Audio (the sound chip in nearly every PC since about 2005),
-  through the speakers, headphones and line out. Checked in QEMU; not yet on a real PC.
+- Sound: Intel High Definition Audio (the sound chip in nearly every PC since about 2005):
+  the computer's jacks (speakers, headphones, optical; each named by its colour and place,
+  and whether something is plugged in), and the monitors on an NVIDIA RTX graphics card over
+  DisplayPort (their speakers or headphone jack). Settings > Sound chooses where it plays:
+  Automatic (headphones or speakers you plug in, else a monitor's speakers), one of them, or
+  every jack at once, each with a Test button; and how loud. AMD and NVIDIA sound controllers
+  are told to snoop the processor's caches as Linux does them (without that, the first try on
+  a Ryzen PC played nothing). Checked in QEMU; on a real PC, waiting for a try.
 - Phones over USB: Android phones (MTP, "File transfer") and iPhones and cameras (PTP) show up
   in Files and Import. Browse and copy anything off them; Import's "Import new photos &
   videos" copies everything not imported before (big videos are copied a piece at a time).
@@ -135,6 +143,7 @@ nothing to download.
   Extend (one desktop across both, the default), Mirror or Main screen only, which one is the
   main screen (the dock, the clock, messages and new windows), where the second one stands
   (left, right, above or below) and how they line up; the screensaver), Mouse (speed),
+  Sound (where sound plays, with a Test button for each, and how loud),
   Spelling (language, and the words you added, with Remove), This PC and About. Saved in the
   library.
   Right-click the desktop for quick ways to the background, display, screensaver, date and

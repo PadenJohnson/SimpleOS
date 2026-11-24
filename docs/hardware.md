@@ -4,8 +4,8 @@ Solon's drivers for the processor and the motherboard come a step at a time, sta
 the first PC Solon was tried on: an AMD Ryzen 7 5800X (Zen 3, 8 cores and 16 threads) on an
 ASUS ROG STRIX B550-F GAMING WIFI II.
 
-What that board had working already: USB (both of its xHCI controllers), SATA, NVMe, and
-sound (Realtek codec over Intel HD Audio).
+What that board had working already: USB (both of its xHCI controllers), SATA and NVMe. Its
+sound was found but silent on the first try (see stage 3).
 
 Solon has no network on purpose (no internet, nothing to download: see the README), so the
 board's Ethernet and Wi-Fi stay unused.
@@ -56,6 +56,18 @@ board's Ethernet and Wi-Fi stay unused.
    speed-up (QEMU with 4 cores: 80 ms on one core, 20 ms on four; the sample photos load in
    5.3 s instead of 7.2 s, the slowest single photo being the limit). Next: video decoding.
 
-3. **Smaller things.** Four of the chipset controller's USB 3 ports report a connection but
+3. **Sound (waiting for a try).** The board's Realtek codec (10ec:1168, the ALC1220 that
+   ASUS calls SupremeFX S1220A) behind AMD's HD Audio controller (1022:1487) was found and
+   set up, and Steamboat Willie's sound was sent to all four of its outputs, but nothing could
+   be heard. AMD's controller reads memory without snooping the processor's caches unless told
+   to (Linux's hda_intel sets bits 2:0 of PCI register 0x42 to 2 on these), so it most likely
+   played stale, silent memory while the picture ran. Solon now sets that, and writes the sound
+   ring back from the caches after each write (CLFLUSH) on any controller. Each jack is named by
+   its colour and place from the pin's configuration, pin sense says whether something is
+   plugged in, and Settings > Sound chooses where sound plays (Automatic follows the jacks
+   every second). The RTX 3080's sound function plays to the monitors over DisplayPort (see
+   docs/graphics.md, stage 4c).
+
+4. **Smaller things.** Four of the chipset controller's USB 3 ports report a connection but
    never finish link training (front-panel cabling, probably); Solon gives up on them after a
    warm reset each, which costs boot time. The board's RGB lights (an ASUS Aura USB device).

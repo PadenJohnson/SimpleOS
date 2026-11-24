@@ -202,6 +202,16 @@ impl MenuEntry {
     }
 }
 
+/// What the taskbar's right-click menu does: switches, and ways into Settings.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DockOpt {
+    Every,
+    Date,
+    Clock24,
+    Sound,
+    Screens,
+}
+
 /// What's in the dock.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum DockItem {
@@ -317,6 +327,11 @@ pub struct Desktop {
     screens: Vec<Rect>,
     screen_ids: Vec<usize>,
     main: usize,
+    /// The screen of the last click: new windows open there, and its taskbar (if it has one)
+    /// shows the Applications and power menus.
+    here: usize,
+    /// The taskbar's right-click menu: where it was opened, and the item under the pointer.
+    dock_menu: Option<(i32, i32, Option<usize>)>,
     date: (u16, u8, u8),
     power_menu: bool,
     /// One-time notice: Solon runs from its USB stick and could be installed.
@@ -478,6 +493,8 @@ impl Desktop {
             screens: Vec::from([Rect::new(0, 0, w as i32, h as i32)]),
             screen_ids: Vec::from([0]),
             main: 0,
+            here: 0,
+            dock_menu: None,
             date: crate::rtc::date(),
             power_menu: false,
             install_notice: false,
@@ -570,6 +587,8 @@ impl Desktop {
             }
         }
         self.desk_menu = None;
+        self.dock_menu = None;
+        self.here = self.main;
         self.wallpaper = None;
         self.fit_windows();
     }
@@ -589,9 +608,29 @@ impl Desktop {
         self.screens.iter().copied().min_by_key(dist).unwrap_or(self.main_screen())
     }
 
-    /// Where windows go on a screen: all of it, less the taskbar on the main one.
+    /// Screen `k` has a taskbar: the main one, and every screen when Settings say so.
+    fn has_dock(&self, k: usize) -> bool {
+        k == self.main || (self.settings.dock_all && k < self.screens.len())
+    }
+
+    /// The taskbar in use: the one on the screen of the last click, else the main screen's.
+    fn dock_screen(&self) -> Rect {
+        if self.here < self.screens.len() && self.has_dock(self.here) {
+            self.screens[self.here]
+        } else {
+            self.main_screen()
+        }
+    }
+
+    /// The screen whose taskbar strip (along its bottom) is at (x, y).
+    fn dock_strip_at(&self, x: i32, y: i32) -> Option<usize> {
+        (0..self.screens.len()).find(|&k| self.has_dock(k) && self.screens[k].contains(x, y) && y >= self.screens[k].y + self.screens[k].h - BAR_H)
+    }
+
+    /// Where windows go on a screen: all of it, less its taskbar if it has one.
     fn work_on(&self, s: Rect) -> Rect {
-        if s == self.main_screen() {
+        let docked = s == self.main_screen() || self.screens.iter().position(|&r| r == s).is_some_and(|k| self.has_dock(k));
+        if docked {
             Rect::new(s.x, s.y, s.w, s.h - BAR_H)
         } else {
             s
@@ -624,6 +663,15 @@ impl Desktop {
         self.settings = n;
         crate::ps2::set_speed(settings::MOUSE[n.mouse].1);
         crate::spell::set_mode(n.spelling);
+        if n.sound_out != old.sound_out {
+            crate::hda::choose(n.sound_out);
+        }
+        if n.dock_all != old.dock_all {
+            self.fit_windows();
+        }
+        if n.volume != old.volume {
+            crate::hda::set_volume(n.volume);
+        }
         let screens_changed = (n.screens, n.main_screen, n.side, n.align) != (old.screens, old.main_screen, old.side, old.align);
         if n.size != old.size || n.resolution != old.resolution || screens_changed {
             self.request = Some(PowerRequest::Rescale);
@@ -921,6 +969,7 @@ impl Desktop {
     /// Periodic work: USB plug/unplug and input, loading the next photo. Returns true to redraw.
     pub fn tick(&mut self, now: u64) -> bool {
         let mut redraw = false;
+        crate::hda::poll(now);
         if self.usb.poll() {
             let ids: Vec<u32> = self.usb.drives.iter().map(|d| d.id).chain(self.usb.phones.iter().map(|p| p.id)).collect();
             if let Some(p) = self.usb.phones.iter().find(|p| !self.drive_ids.contains(&p.id)) {
@@ -1926,9 +1975,10 @@ impl Desktop {
     // ---- the desktop's right-click menu ------------------------------------------------
 
     /// Its items: label, and the Settings page it opens (with the background chooser).
-    const DESK_MENU: [(&'static str, Page, bool); 7] = [
+    const DESK_MENU: [(&'static str, Page, bool); 8] = [
         ("Change background", Page::Appearance, true),
         ("Screens and resolution", Page::Display, false),
+        ("Sound", Page::Sound, false),
         ("Screensaver", Page::Display, false),
         ("Date and time", Page::DateTime, false),
         ("Text and icon size", Page::Appearance, false),
@@ -1966,6 +2016,88 @@ impl Desktop {
             }
             let col = if hover == Some(i) { rgb(255, 255, 255) } else { rgb(32, 36, 44) };
             c.text(r.x + 14, r.y + 10, label, Size::Small, i + 1 == Self::DESK_MENU.len(), col);
+        }
+    }
+
+    // ---- the taskbar's right-click menu ----------------------------------------------------
+
+    /// Its items: switches first (the taskbar on every screen, the date, the 24-hour clock),
+    /// then ways into Settings.
+    fn dock_menu_items(&self) -> Vec<(&'static str, DockOpt)> {
+        let mut v = Vec::new();
+        if self.screens.len() > 1 {
+            v.push(("Taskbar on every screen", DockOpt::Every));
+        }
+        v.push(("Show the date", DockOpt::Date));
+        v.push(("24-hour clock", DockOpt::Clock24));
+        v.push(("Sound settings", DockOpt::Sound));
+        v.push(("Screen settings", DockOpt::Screens));
+        v
+    }
+
+    /// Whether a switch in the menu is on (None: not a switch).
+    fn dock_opt_on(&self, o: DockOpt) -> Option<bool> {
+        match o {
+            DockOpt::Every => Some(self.settings.dock_all),
+            DockOpt::Date => Some(self.settings.show_date),
+            DockOpt::Clock24 => Some(self.settings.clock24),
+            _ => None,
+        }
+    }
+
+    /// Above the taskbar it was opened on.
+    fn dock_menu_box(&self) -> Option<Rect> {
+        let (x, _, _) = self.dock_menu?;
+        let n = self.dock_menu_items().len() as i32;
+        let (w, h) = (280, n * 38 + 12 + 9);
+        let s = self.dock_screen();
+        let (dock, _) = self.dock_layout_on(s);
+        Some(Rect::new(x.min(s.x + s.w - w - 4).max(s.x + 4), dock.y - 10 - h, w, h))
+    }
+
+    fn dock_menu_item(&self, i: usize) -> Rect {
+        let b = self.dock_menu_box().unwrap_or(Rect::new(0, 0, 0, 0));
+        let switches = self.dock_menu_items().iter().filter(|it| self.dock_opt_on(it.1).is_some()).count();
+        // A gap between the switches and the ways into Settings.
+        let gap = if i >= switches { 9 } else { 0 };
+        Rect::new(b.x + 6, b.y + 6 + i as i32 * 38 + gap, b.w - 12, 38)
+    }
+
+    fn draw_dock_menu(&self, c: &mut Canvas) {
+        let Some(b) = self.dock_menu_box() else { return };
+        let hover = self.dock_menu.and_then(|m| m.2);
+        c.shadow(b.x, b.y + 4, b.w, b.h, 12, 18, 80);
+        c.round_rect(b.x, b.y, b.w, b.h, 12, rgb(252, 252, 253));
+        c.outline_rect(b.x + 8, b.y, b.w - 16, 1, rgb(226, 229, 234));
+        let items = self.dock_menu_items();
+        let mut first_link = true;
+        for (i, &(label, opt)) in items.iter().enumerate() {
+            let r = self.dock_menu_item(i);
+            let on = self.dock_opt_on(opt);
+            if on.is_none() && first_link {
+                first_link = false;
+                c.fill_rect(b.x + 12, r.y - 5, b.w - 24, 1, rgb(226, 229, 234));
+            }
+            let lit = hover == Some(i);
+            if lit {
+                c.round_rect(r.x, r.y, r.w, r.h, 8, rgb(46, 134, 222));
+            }
+            let col = if lit { rgb(255, 255, 255) } else { rgb(32, 36, 44) };
+            c.text(r.x + 14, r.y + 10, label, Size::Small, false, col);
+            // A small switch, as in Settings.
+            if let Some(on) = on {
+                let (sw, sh) = (36, 20);
+                let (sx, sy) = (r.x + r.w - 12 - sw, r.y + (r.h - sh) / 2);
+                let track = match (on, lit) {
+                    (true, false) => rgb(46, 134, 222),
+                    (true, true) => rgb(255, 255, 255),
+                    (false, _) => rgb(204, 208, 214),
+                };
+                c.round_rect(sx, sy, sw, sh, sh / 2, track);
+                let k = sh - 6;
+                let kx = if on { sx + sw - 3 - k } else { sx + 3 };
+                c.circle(kx + k / 2, sy + sh / 2, k / 2, if on && lit { rgb(46, 134, 222) } else { rgb(255, 255, 255) });
+            }
         }
     }
 
@@ -2111,7 +2243,8 @@ impl Desktop {
             kprintln!("solon: switch to {}", app.name());
             return;
         }
-        let work = self.work();
+        // On the screen of the last click.
+        let work = self.work_on(self.screens.get(self.here).copied().unwrap_or(self.main_screen()));
         let n = self.windows.len() as i32;
         let (w, h) = if app == App::Calculator {
             (720.min(work.w), 600.min(work.h))
@@ -2225,13 +2358,17 @@ impl Desktop {
         text_width(&clock, Size::Medium, true).max(text_width(&date, Size::Small, false)) + 8
     }
 
-    /// The dock and where everything in it is. The power button is last.
+    /// The taskbar in use and where everything in it is (the power button last).
     fn dock_layout(&self) -> (Rect, Vec<(DockItem, Rect)>) {
+        self.dock_layout_on(self.dock_screen())
+    }
+
+    /// The taskbar on screen `m` and where everything in it is. The power button is last.
+    fn dock_layout_on(&self, m: Rect) -> (Rect, Vec<(DockItem, Rect)>) {
         let items = self.dock_items();
         let n = items.len() as i32;
         let clock_w = self.dock_clock_w();
         let fixed = 12 + 17 + clock_w + 10 + 40 + 10;
-        let m = self.main_screen();
         let step = (DOCK_ICON + DOCK_GAP).min((m.w - 24 - fixed) / n.max(1)).max(24);
         let width = 12 + n * step - DOCK_GAP + fixed;
         let dock = Rect::new(m.x + (m.w - width) / 2, m.y + m.h - DOCK_H - (BAR_H - DOCK_H) / 2, width, DOCK_H);
@@ -2252,13 +2389,13 @@ impl Desktop {
     fn power_item(&self, i: i32) -> Rect {
         let p = self.power_button();
         let (dock, _) = self.dock_layout();
-        let m = self.main_screen();
+        let m = self.dock_screen();
         Rect::new((p.x + p.w - 220).min(m.x + m.w - 236), dock.y - 12 - 3 * 46 + i * 46, 220, 42)
     }
 
     /// Columns in the Applications menu.
     fn menu_cols(&self) -> usize {
-        if self.main_screen().w >= 5 * 124 + 48 { 5 } else { 4 }
+        if self.dock_screen().w >= 5 * 124 + 48 { 5 } else { 4 }
     }
 
     /// What the Applications menu shows: the apps and folders, or a folder's apps.
@@ -2291,7 +2428,7 @@ impl Desktop {
         let rows = self.menu_entries().len().div_ceil(cols as usize) as i32;
         let (w, h) = (cols * 124 + 40, 66 + rows * 112 + 12);
         let (dock, _) = self.dock_layout();
-        let m = self.main_screen();
+        let m = self.dock_screen();
         Rect::new(m.x + (m.w - w) / 2, dock.y - 14 - h, w, h)
     }
 
@@ -2315,15 +2452,26 @@ impl Desktop {
         self.title_icons = all.iter().map(|&i| (i, icons::image(i, 22))).collect();
     }
 
-    fn draw_dock(&self, c: &mut Canvas) {
-        let (dock, items) = self.dock_layout();
+    /// Every screen's taskbar.
+    fn draw_docks(&self, c: &mut Canvas) {
+        for k in 0..self.screens.len() {
+            if self.has_dock(k) {
+                self.draw_dock(c, self.screens[k]);
+            }
+        }
+    }
+
+    fn draw_dock(&self, c: &mut Canvas, s: Rect) {
+        let (dock, items) = self.dock_layout_on(s);
+        // The Applications and power menus belong to the taskbar in use.
+        let in_use = s == self.dock_screen();
         c.shadow(dock.x, dock.y + 4, dock.w, dock.h, 20, 16, 70);
         c.round_rect(dock.x, dock.y, dock.w, dock.h, 20, rgb(249, 250, 253));
         let focus = self.focused_app();
         for &(item, r) in &items {
             match item {
                 DockItem::Apps => {
-                    let open = self.apps_menu.is_some();
+                    let open = self.apps_menu.is_some() && in_use;
                     c.round_rect(r.x, r.y, r.w, r.h, 12, if open { rgb(30, 100, 210) } else { rgb(46, 124, 232) });
                     for row in 0..3 {
                         for k in 0..3 {
@@ -2344,7 +2492,7 @@ impl Desktop {
                     }
                 }
                 DockItem::Power => {
-                    let bg = if self.power_menu { rgb(214, 220, 230) } else { rgb(234, 237, 242) };
+                    let bg = if self.power_menu && in_use { rgb(214, 220, 230) } else { rgb(234, 237, 242) };
                     c.round_rect(r.x, r.y, r.w, r.h, 12, bg);
                     let (cx, cy) = (r.x + r.w / 2, r.y + r.h / 2 + 1);
                     c.circle(cx, cy, 9, INK);
@@ -2515,7 +2663,7 @@ impl Desktop {
             c.reset_clip();
         }
 
-        self.draw_dock(c);
+        self.draw_docks(c);
         if let Some((msg, _)) = &self.toast {
             let tw = text_width(msg, Size::Small, true) + 40;
             let m = self.main_screen();
@@ -2527,6 +2675,7 @@ impl Desktop {
         self.draw_handoff(c);
         self.draw_apps_menu(c);
         self.draw_desk_menu(c);
+        self.draw_dock_menu(c);
         if self.install_notice {
             self.draw_install_notice(c);
         }
@@ -2694,6 +2843,10 @@ impl Desktop {
                         self.open(App::PhotoFrame);
                         redraw = true;
                     }
+                    SettingsAction::TestSound(key) => {
+                        crate::hda::test(key);
+                        redraw = true;
+                    }
                     SettingsAction::Resolution(Some(m)) if crate::display::change_for(m) != crate::display::Change::Restart => {
                         // At once: the card switches, or the desktop is scaled to the screen.
                         let boot = crate::display::INFO.lock().as_ref().map(|i| i.boot).unwrap_or((0, 0));
@@ -2821,6 +2974,18 @@ impl Desktop {
         // Right button: games use it (flags in Mines), editors show spelling suggestions.
         let rpressed = buttons & 2 != 0 && prev & 2 == 0;
         if rpressed && self.apps_menu.is_none() && !self.power_menu && !self.install_notice {
+            // On a taskbar: its menu of personal options.
+            if let Some(k) = self.dock_strip_at(x, y) {
+                if self.dock_layout_on(self.screens[k]).0.contains(x, y) {
+                    self.here = k;
+                    self.dock_menu = Some((x, y, None));
+                    self.desk_menu = None;
+                    return true;
+                }
+            }
+            if self.dock_menu.take().is_some() {
+                redraw = true;
+            }
             let on_window = self.windows.iter().any(|w| !w.minimized && w.rect().contains(x, y));
             if !on_window && self.work_on(self.screen_at(x, y)).contains(x, y) {
                 self.desk_menu = Some((x, y, None));
@@ -2828,6 +2993,16 @@ impl Desktop {
             }
             if self.desk_menu.take().is_some() {
                 redraw = true;
+            }
+        }
+        // The pointer over the taskbar's menu highlights an item.
+        if moved && self.dock_menu.is_some() {
+            let hover = (0..self.dock_menu_items().len()).find(|&i| self.dock_menu_item(i).contains(x, y));
+            if let Some(m) = &mut self.dock_menu {
+                if m.2 != hover {
+                    m.2 = hover;
+                    redraw = true;
+                }
             }
         }
         // The pointer over the desktop menu highlights an item.
@@ -2931,6 +3106,9 @@ impl Desktop {
             return redraw;
         }
         kprintln!("solon: click at {},{}", x, y);
+        if let Some(k) = self.screens.iter().position(|r| r.contains(x, y)) {
+            self.here = k;
+        }
         if self.display_trial.is_some() {
             let (keep, back) = self.trial_buttons();
             if keep.contains(x, y) {
@@ -2946,6 +3124,29 @@ impl Desktop {
                 self.dismiss_install_notice(open.contains(x, y));
             }
             return true;
+        }
+        if self.dock_menu.is_some() {
+            let items = self.dock_menu_items();
+            let picked = (0..items.len()).find(|&i| self.dock_menu_item(i).contains(x, y));
+            let inside = self.dock_menu_box().is_some_and(|b| b.contains(x, y));
+            self.dock_menu = None;
+            if let Some(i) = picked {
+                let mut n = self.settings;
+                match items[i].1 {
+                    DockOpt::Every => n.dock_all = !n.dock_all,
+                    DockOpt::Date => n.show_date = !n.show_date,
+                    DockOpt::Clock24 => n.clock24 = !n.clock24,
+                    DockOpt::Sound => self.open_settings(Page::Sound, false),
+                    DockOpt::Screens => self.open_settings(Page::Display, false),
+                }
+                if n != self.settings {
+                    self.apply_settings(n);
+                }
+            }
+            if inside || picked.is_some() {
+                return true;
+            }
+            redraw = true;
         }
         if self.desk_menu.is_some() {
             let picked = (0..Self::DESK_MENU.len()).find(|&i| self.desk_menu_item(i).contains(x, y));
@@ -2989,8 +3190,7 @@ impl Desktop {
             self.folder = None;
             return true;
         }
-        let main = self.main_screen();
-        if main.contains(x, y) && y >= main.y + main.h - BAR_H {
+        if self.dock_strip_at(x, y).is_some() {
             let (_, items) = self.dock_layout();
             match items.into_iter().find(|(_, b)| b.contains(x, y)).map(|(it, _)| it) {
                 Some(DockItem::Entry(MenuEntry::App(app))) => {

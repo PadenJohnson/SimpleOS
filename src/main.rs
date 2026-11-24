@@ -350,6 +350,8 @@ extern "C" fn kmain() -> ! {
     kprintln!("settings: {:?}", settings);
     ps2::set_speed(settings::MOUSE[settings.mouse].1);
     spell::set_mode(settings.spelling);
+    hda::set_volume(settings.volume);
+    hda::choose(settings.sound_out);
     if let Some(t) = storage.read_root_file(&mut usb, "Dictionary.txt") {
         spell::load_user(core::str::from_utf8(&t).unwrap_or(""));
     }
@@ -398,6 +400,8 @@ extern "C" fn kmain() -> ! {
         light_tries += 1;
         kprintln!("solon: {}", nvidia::light::light_second());
         second = nvidia::light::second_screen().map(|found| use_second(found, false));
+        // Its sound may be the one chosen.
+        hda::choose(settings.sound_out);
     }
 
     let mut canvas = Canvas::new(lw, lh);
@@ -509,6 +513,7 @@ extern "C" fn kmain() -> ! {
                     light_tries += 1;
                     kprintln!("solon: {}", nvidia::light::light_second());
                     second = nvidia::light::second_screen().map(|found| use_second(found, false));
+                    hda::choose(s.sound_out);
                 }
                 let (old, at) = (lay, ps2::mouse_pos());
                 lay = spread(&mut desktop, &mut canvas, (lw, lh), second.as_ref(), scale);
@@ -552,6 +557,8 @@ extern "C" fn kmain() -> ! {
                 if now >= lit + 3 * HZ {
                     cursor.hide(&screen);
                     let s2 = use_second(found, second_test.is_some());
+                    // Its sound may be the one chosen.
+                    hda::choose(desktop.settings().sound_out);
                     let (old, at) = (lay, ps2::mouse_pos());
                     lay = spread(&mut desktop, &mut canvas, (lw, lh), Some(&s2), scale);
                     carry_pointer(&old, &lay, at);

@@ -136,8 +136,19 @@ without NVIDIA's signed firmware, so screen modes and several monitors are possi
      stands (left, right, above, below) and how the two line up (tops, middles, bottoms, or
      left edges, middles, right edges). Boot option "secondtest" makes the right part of
      QEMU's screen play a second monitor that lights 3 seconds after start.
-   - Next: more connectors (HDMI); turning the second monitor's signal off with "Main screen
-     only" instead of showing black.
+   - 4c (done, waiting for a try): sound to the monitors over DisplayPort (`nvidia/audio.rs`),
+     as nouveau switches it on for each monitor the card shows a picture on: DisplayPort audio
+     on the head (gv100 `dp_audio`, 0x616560), the head as the sound function's device entry
+     (0x616528), "plugged in" and the monitor's ELD, made from its EDID as Linux's
+     `drm_edid_to_eld` does (gf119 `hda_hpd` and `hda_eld`, 0x10ec00 and 0x10ec10). The firmware
+     switches audio on for its monitor but leaves it no room in the stream (audio symbols 0),
+     so those are set from the head's timing and the link (nouveau `nv50_disp_super_2_2_dp`).
+     The card's own HDA codec (10de:009a on the RTX 3080) then plays to the pin for the
+     output (its number + 4) and the head's device entry, with the converter, channel slots
+     and NVIDIA's audio infoframe set as Linux's `nvhdmi` and `hdmi` codec drivers do.
+     Settings > Sound lists each monitor that takes sound.
+   - Next: more connectors (HDMI, and its sound); turning the second monitor's signal off with
+     "Main screen only" instead of showing black.
 
 Each stage is tried on a real card before it's switched on by default.
 

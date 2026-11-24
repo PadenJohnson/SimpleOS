@@ -22,6 +22,8 @@ pub const MOUSE: [(&str, i32); 3] = [("Slow", 50), ("Normal", 100), ("Fast", 180
 
 /// What the screen shows when the computer isn't used.
 pub const SAVERS: [&str; 3] = ["Show photos", "Show the clock", "Do nothing"];
+/// How loud everything is (percent), in Settings > Sound.
+pub const VOLUMES: [(&str, u8); 4] = [("Quiet", 25), ("Medium", 50), ("Loud", 75), ("Full", 100)];
 /// Minutes without use before it starts.
 pub const SAVER_WAIT: [(&str, u64); 6] = [("1 minute", 1), ("5 minutes", 5), ("10 minutes", 10), ("15 minutes", 15), ("30 minutes", 30), ("1 hour", 60)];
 /// Seconds each photo stays on screen.
@@ -66,6 +68,12 @@ pub struct Settings {
     pub main_screen: usize,
     pub side: usize,
     pub align: usize,
+    /// The taskbar (dock) on every screen of an extended desktop, not only the main one.
+    pub dock_all: bool,
+    /// Where sound plays (crate::hda: AUTO, ALL_JACKS or an output's key), and how loud
+    /// (percent).
+    pub sound_out: u32,
+    pub volume: u8,
 }
 
 impl Settings {
@@ -88,6 +96,9 @@ impl Settings {
             main_screen: 0,
             side: 1,
             align: 1,
+            dock_all: true,
+            sound_out: crate::hda::AUTO,
+            volume: 100,
         };
         for i in (0..SIZES.len()).rev() {
             if screen_w >= 2400 && s.size_fits(i, screen_w, screen_h) {
@@ -131,9 +142,9 @@ impl Settings {
 
     pub fn to_text(&self) -> String {
         format!(
-            "background={}\nsize={}\nclock24={}\nshow_date={}\nmouse={}\ninstall_notice={}\nsaver={}\nsaver_wait={}\nslide_time={}\nshuffle={}\nspelling={}\nresolution={}x{}\nscreens={}\nmain_screen={}\nside={}\nalign={}\n",
+            "background={}\nsize={}\nclock24={}\nshow_date={}\nmouse={}\ninstall_notice={}\nsaver={}\nsaver_wait={}\nslide_time={}\nshuffle={}\nspelling={}\nresolution={}x{}\nscreens={}\nmain_screen={}\nside={}\nalign={}\ndock_all={}\nsound_out={}\nvolume={}\n",
             self.background, self.size, self.clock24 as u8, self.show_date as u8, self.mouse, self.install_notice as u8, self.saver, self.saver_wait, self.slide_time, self.shuffle as u8, self.spelling, self.resolution.0, self.resolution.1,
-            self.screens, self.main_screen, self.side, self.align
+            self.screens, self.main_screen, self.side, self.align, self.dock_all as u8, self.sound_out, self.volume
         )
     }
 
@@ -165,6 +176,9 @@ impl Settings {
                 "main_screen" if n <= 1 => s.main_screen = n,
                 "side" if n < SIDES.len() => s.side = n,
                 "align" if n < ALIGNS_SIDE.len() => s.align = n,
+                "dock_all" if n <= 1 => s.dock_all = n == 1,
+                "sound_out" if n <= u32::MAX as usize => s.sound_out = n as u32,
+                "volume" if (5..=100).contains(&n) => s.volume = n as u8,
                 _ => {}
             }
         }
