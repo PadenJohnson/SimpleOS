@@ -1,6 +1,7 @@
 ﻿# Secure Boot
 
-Solon starts on PCs with Secure Boot turned on like this:
+What SimpleOS needs to start on PCs with Secure Boot on: Microsoft-signed shim and its key
+manager (from Fedora), and the SBAT data that Limine carries. Solon starts like this:
 
 1. The PC's firmware starts **shim** (`EFI/BOOT/BOOTX64.EFI`). Shim is signed by Microsoft,
    so every PC that trusts Microsoft's third-party UEFI key starts it.
