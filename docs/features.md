@@ -76,8 +76,13 @@ A folder in the Applications menu.
 ## Videos
 
 - Every video in Solon storage, on USB drives and on phones, with a picture of each; plays
-  phone, camera, computer, DVD/TV and web videos with sound: play/pause, drag along the bar to
-  jump, arrow keys for 5 seconds, full screen, volume.
+  phone, camera, computer, DVD/TV and web videos with sound: click the picture to pause or play
+  (a big sign shows which; double-click for full screen), drag along the bar to jump, arrow
+  keys for 10 seconds, volume.
+- Smooth playback: while a video plays only its picture is drawn again and sent to the screen,
+  each picture is converted and scaled on every processor core, and after a jump the sound
+  waits for the picture so they start together. How it's keeping up goes to the log every 10
+  seconds.
 - Files: MP4/MOV/3GP, MKV, WebM, AVI, MPEG-TS (.ts/.m2ts/.mts) and MPEG-PS (.mpg/.vob).
 - Pictures: H.264, HEVC/H.265 (iPhone "High Efficiency", 8 and 10-bit), MPEG-1/2, MPEG-4 Part 2
   (Xvid, DivX 4/5), DivX 3 (Microsoft MPEG-4 v3), H.263, VP8, VP9 (8, 10 and 12-bit) and
@@ -175,13 +180,18 @@ click.
 
 ## Sound
 
-Intel High Definition Audio (the sound chip in nearly every PC since about 2005): the
-computer's jacks (speakers, headphones, optical; each named by its colour and place, and
-whether something is plugged in), and the monitors on an NVIDIA RTX graphics card over
-DisplayPort (their speakers or headphone jack). Settings > Sound chooses where it plays:
-Automatic (headphones or speakers you plug in, else a monitor's speakers), one of them, or
-every jack at once, each with a Test button; and how loud. AMD and NVIDIA sound controllers
-are told to snoop the processor's caches as Linux does them. *Waiting for a try* on a real PC.
+- Intel High Definition Audio (the sound chip in nearly every PC since about 2005): the
+  computer's jacks (speakers, headphones, optical; each named by its colour and place, and
+  whether something is plugged in), and the monitors on an NVIDIA RTX graphics card over
+  DisplayPort (their speakers or headphone jack). Works on a Ryzen PC's Realtek chip; AMD and
+  NVIDIA sound controllers are told to snoop the processor's caches as Linux does them.
+- USB sound devices (USB Audio Class 1 and 2: headsets, USB speakers and headphones, headphone
+  DACs) on USB 3 ports. Checked with QEMU's USB sound device; *waiting for a try* with a real
+  one.
+- Settings > Sound shows what's connected (jacks with something plugged in, monitors, USB sound
+  devices; "Show every output" for the rest) and chooses where sound plays: Automatic (a USB
+  sound device, else headphones or speakers you plug in, else a monitor's speakers), one of
+  them, or every jack at once, each with a Test button; and how loud.
 
 ## Screens and graphics
 

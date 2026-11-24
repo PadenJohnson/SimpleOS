@@ -146,7 +146,10 @@ without NVIDIA's signed firmware, so screen modes and several monitors are possi
      The card's own HDA codec (10de:009a on the RTX 3080) then plays to the pin for the
      output (its number + 4) and the head's device entry, with the converter, channel slots
      and NVIDIA's audio infoframe set as Linux's `nvhdmi` and `hdmi` codec drivers do.
-     Settings > Sound lists each monitor that takes sound.
+     Settings > Sound lists each monitor that takes sound. First try on the RTX 3080: set up
+     without errors for the ASUS VG249 (head 0, output 2: audio symbols 487 and 1896 for
+     1920x1080 at 148.5 MHz over 2 lanes at 2.7 Gbit/s), and the card's sound function then
+     reported the monitor present with a valid description (ELD).
    - Next: more connectors (HDMI, and its sound); turning the second monitor's signal off with
      "Main screen only" instead of showing black.
 

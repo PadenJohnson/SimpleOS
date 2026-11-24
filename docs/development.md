@@ -52,6 +52,7 @@ Host tools (each its own crate under `tools/`, built for the computer you work o
   Solon storage on it).
 - `--boot-stick <image>` / `--legacy-bios`: boot from a USB image like a real PC.
 - `--sound`: a sound card whose output is saved to `test-out/sound.wav`.
+- `--usb audio`: a USB sound device whose output is saved to `test-out/usb-sound.wav`.
 - `--resolution WxH`, `--smp N`, `--cpu MODEL`.
 - `--cmdline "..."`: boot options, below.
 

@@ -56,7 +56,7 @@ board's Ethernet and Wi-Fi stay unused.
    speed-up (QEMU with 4 cores: 80 ms on one core, 20 ms on four; the sample photos load in
    5.3 s instead of 7.2 s, the slowest single photo being the limit). Next: video decoding.
 
-3. **Sound (waiting for a try).** The board's Realtek codec (10ec:1168, the ALC1220 that
+3. **Sound (works).** The board's Realtek codec (10ec:1168, the ALC1220 that
    ASUS calls SupremeFX S1220A) behind AMD's HD Audio controller (1022:1487) was found and
    set up, and Steamboat Willie's sound was sent to all four of its outputs, but nothing could
    be heard. AMD's controller reads memory without snooping the processor's caches unless told
@@ -67,6 +67,12 @@ board's Ethernet and Wi-Fi stay unused.
    plugged in, and Settings > Sound chooses where sound plays (Automatic follows the jacks
    every second). The RTX 3080's sound function plays to the monitors over DisplayPort (see
    docs/graphics.md, stage 4c).
+   Second try: sound plays (Steamboat Willie through speakers on the green jack). At start the
+   jacks hadn't said yet that something was plugged in, so Automatic picked the monitor's
+   speakers; jacks whose pin asks for it ("trigger required") are now told to look before
+   being read, as Linux's read_pin_sense does. Settings > Sound shows only what's connected.
+   USB sound devices (USB Audio Class 1 and 2) play too, through a new isochronous endpoint
+   in the xHCI driver (`usbaudio.rs`): checked with QEMU's USB sound device.
 
 4. **Smaller things.** Four of the chipset controller's USB 3 ports report a connection but
    never finish link training (front-panel cabling, probably); Solon gives up on them after a
