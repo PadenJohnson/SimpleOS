@@ -1,5 +1,6 @@
 //! Stage 3c: light another monitor with the card's own display engine (RTX 30 series, GA10x),
-//! on request from the diagnostics screen (F12, then L).
+//! when Solon starts (unless Settings say to use the main screen only), or from the
+//! diagnostics screen (F12, then L).
 //!
 //! Ported from nouveau (MIT licence), in nouveau's order:
 //! 1. Pick a DisplayPort monitor the firmware left dark (one that answers on AUX), a free head,
@@ -49,6 +50,8 @@ const CLIENT: u32 = 0x40;
 /// A monitor Solon lit, kept for drawing to it later.
 #[allow(dead_code)]
 pub struct Lit {
+    /// The monitor's name, from its EDID.
+    pub name: String,
     pub head: u32,
     pub sor: u32,
     pub w: u32,
@@ -65,6 +68,30 @@ pub static LIT: Mutex<Option<Lit>> = Mutex::new(None);
 /// pixels are A8R8G8B8.
 pub fn second_screen() -> Option<(u64, u32, u32, u32)> {
     LIT.lock().as_ref().map(|l| (l.virt, l.w, l.h, l.pitch))
+}
+
+/// The lit monitor's name.
+pub fn second_name() -> Option<String> {
+    LIT.lock().as_ref().map(|l| l.name.clone())
+}
+
+/// A monitor plugged into the card that nothing shows a picture on yet (more are plugged in
+/// than the firmware lit): its name and best resolution, for Settings and for lighting it at
+/// start.
+pub fn waiting() -> Option<(String, (u32, u32))> {
+    if LIT.lock().is_some() || MODE_SET.load(core::sync::atomic::Ordering::Relaxed) || !super::present() {
+        return None;
+    }
+    let rep = REPORT.lock();
+    let plugged: Vec<&super::Conn> = rep.as_ref()?.connectors.iter().filter(|c| c.plugged == Some(true)).collect();
+    if plugged.len() <= crate::display::screens() {
+        return None;
+    }
+    // The firmware's monitor is the one it told Solon about; the waiting one is another.
+    let first = crate::display::INFO.lock().as_ref().and_then(|i| i.monitor.clone());
+    let c = plugged.iter().rev().find(|c| c.monitor.is_some() && c.monitor != first).or(plugged.last())?;
+    let name = c.monitor.clone().unwrap_or_else(|| format!("The monitor on {}", c.label));
+    Some((name, c.mode.map_or((0, 0), |m| (m.0, m.1))))
 }
 
 /// A try got as far as setting the monitor's mode; the head keeps it, so another try in the
@@ -329,11 +356,14 @@ struct Light<'a, 'b> {
     ef: bool,
     lt: Lt,
     mode: Mode,
+    /// The monitor's name, from its EDID.
+    name: String,
     chans: Vec<Chan>,
     undo: Undo,
 }
 
-/// F12, then L: light a DisplayPort monitor the firmware left dark. Returns what happened.
+/// Light a DisplayPort monitor the firmware left dark (at start, or F12 then L). Returns what
+/// happened.
 pub fn light_second() -> String {
     if LIT.lock().is_some() {
         return String::from("Solon already lit a second monitor");
@@ -490,6 +520,7 @@ impl<'a, 'b> Light<'a, 'b> {
             ef: false,
             lt: Lt::default(),
             mode,
+            name: super::parse_edid(&e).0.unwrap_or_else(|| String::from("Second monitor")),
             chans: Vec::new(),
             undo: Undo::default(),
         })
@@ -609,7 +640,7 @@ impl<'a, 'b> Light<'a, 'b> {
             olut, w, h, m.refresh() / 100, m.refresh() % 100, self.head, self.sor, self.nr, self.bw as u32 * 27 / 100, self.bw as u32 * 27 / 10 % 10, vpll
         );
         let chans = core::mem::take(&mut self.chans);
-        Ok((msg, Lit { head: self.head, sor: self.sor, w, h, pitch, virt, chans }))
+        Ok((msg, Lit { name: self.name.clone(), head: self.head, sor: self.sor, w, h, pitch, virt, chans }))
     }
 
     /// One line about the monitor and link, for the test picture.

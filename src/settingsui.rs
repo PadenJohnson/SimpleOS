@@ -10,7 +10,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::gfx::{mix, rgb, text_width, Canvas, Rect, Size};
-use crate::settings::{days_in_month, weekday, Settings, BACKGROUNDS, MOUSE, SAVERS, SAVER_WAIT, SIZES, SLIDE_TIME};
+use crate::settings::{days_in_month, weekday, Settings, ALIGNS_SIDE, ALIGNS_STACKED, BACKGROUNDS, MOUSE, SAVERS, SAVER_WAIT, SCREENS, SIDES, SIZES, SLIDE_TIME};
 use crate::wallpaper::{CUSTOM, FIRST_PHOTO, PHOTOS};
 
 const INK: u32 = rgb(32, 36, 44);
@@ -63,7 +63,7 @@ impl Page {
         match self {
             Page::Appearance => "Background, text size",
             Page::DateTime => "Clock, date, time",
-            Page::Display => "Resolution, screensaver",
+            Page::Display => "Screens, resolution",
             Page::Mouse => "Pointer speed",
             Page::Spelling => "Language, your words",
             Page::ThisPc => "CPU, memory, sensors",
@@ -103,6 +103,11 @@ enum Act {
     Mouse(usize),
     Spell(usize),
     Remove(usize),
+    /// Two screens: how they're used, the main one, where the second is, how they line up.
+    Screens(usize),
+    MainScreen(usize),
+    Where(usize),
+    Align(usize),
 }
 
 /// One thing on a page.
@@ -117,12 +122,16 @@ enum It {
     Day { label: String, sel: bool, today: bool, act: Act },
     BgPreview,
     Side { page: Page, on: bool },
+    /// A screen in the picture of how the two are arranged: its name and resolution, whether
+    /// it's the main one, and what it shows (0: the desktop, 1: the same as the main one,
+    /// 2: nothing).
+    Monitor { name: String, res: String, main: bool, shows: u8, act: Act },
 }
 
 impl It {
     fn act(&self) -> Act {
         match self {
-            It::Button { act, .. } | It::Toggle { act, .. } | It::Drop { act, .. } | It::Day { act, .. } => *act,
+            It::Button { act, .. } | It::Toggle { act, .. } | It::Drop { act, .. } | It::Day { act, .. } | It::Monitor { act, .. } => *act,
             It::Seg { act, ok: true, .. } => *act,
             It::Side { page, .. } => Act::Page(*page),
             It::BgPreview => Act::BgPicker,
@@ -548,10 +557,16 @@ impl SettingsApp {
                 on.join(", ")
             }
         });
-        let help = if n > 1 {
+        let help = if crate::display::second().is_some() {
+            String::from("Solon shows the desktop on two of them (Screens, below)")
+        } else if crate::nvidia::light::waiting().is_some() && s.screens == 2 {
+            String::from("Solon leaves the second one off: Screens, below, says to use the main screen only")
+        } else if crate::nvidia::light::waiting().is_some() {
+            String::from("Solon couldn't light the second one (F12 shows why)")
+        } else if n > 1 {
             String::from("Solon uses the first; using more is being worked on")
         } else if monitors.is_some() {
-            format!("Solon shows {} of them for now; lighting the others is the driver's next stage", n)
+            String::from("Plug a second monitor into a DisplayPort and restart: Solon lights it at start")
         } else {
             String::from("A second monitor needs a driver for this graphics card")
         };
@@ -569,6 +584,8 @@ impl SettingsApp {
         ui.text(row.x + row.w - text_width(&m, Size::Small, false), row.y + 20, &m, Size::Small, false, INK);
         ui.end_card();
 
+        self.screens(ui, s, &info);
+
         ui.card("When the computer isn't used");
         let row = ui.row("Show", "The screensaver", ROW + 8);
         ui.drop_right(row, 210, SAVERS[s.saver.min(SAVERS.len() - 1)], Act::Open(Drop::Saver));
@@ -578,6 +595,58 @@ impl SettingsApp {
         ui.drop_right(row, 210, SLIDE_TIME[s.slide_time.min(SLIDE_TIME.len() - 1)].0, Act::Open(Drop::SlideTime));
         let row = ui.row("More", "Which photos, in what order", ROW + 8);
         ui.button(Rect::new(row.x + row.w - 210, row.y + (row.h - 38) / 2, 210, 38), "Open Photo Frame", false, Act::FrameApp);
+        ui.end_card();
+    }
+
+    /// Two screens: a picture of how they're arranged (click one to make it the main one), how
+    /// they're used, which is the main one, where the second one is, and how they line up.
+    fn screens(&self, ui: &mut Ui, s: &Settings, info: &crate::display::DisplayInfo) {
+        ui.card("Screens");
+        let first = info.monitor.clone().unwrap_or_else(|| String::from("Screen 1"));
+        let Some((second, res2)) = crate::display::second().or_else(crate::nvidia::light::waiting) else {
+            ui.row("One screen", "With a second monitor on the graphics card (RTX 30 series), the desktop spreads onto it", ROW + 8);
+            ui.end_card();
+            return;
+        };
+        let res1 = if info.framebuffer.0 > 0 { info.framebuffer } else { info.current };
+        let res2 = if res2.0 > 0 && res2.1 > 0 { res2 } else { (1920, 1080) };
+        let ((cw, ch), parts) = s.arrange((res1.0 as usize, res1.1 as usize), (res2.0 as usize, res2.1 as usize));
+        let row = ui.row("", "", 220);
+        let (aw, ah) = ((row.w - 40) as usize, 188usize);
+        let f = (aw * 1000 / cw.max(1)).min(ah * 1000 / ch.max(1)) as i64;
+        let map = |v: usize| (v as i64 * f / 1000) as i32;
+        let (ox, oy) = (row.x + (row.w - map(cw)) / 2, row.y + 16 + (ah as i32 - map(ch)) / 2);
+        let main = s.main_screen.min(1);
+        for (k, (name, res)) in [(&first, res1), (&second, res2)].into_iter().enumerate() {
+            let p = parts[k];
+            let r = Rect::new(ox + map(p.0) + 3, oy + map(p.1) + 3, map(p.2) - 6, map(p.3) - 6);
+            let shows = match s.screens {
+                0 => 0,
+                _ if k == main => 0,
+                1 => 1,
+                _ => 2,
+            };
+            ui.items.push((r, It::Monitor { name: name.clone(), res: format!("{} x {}", res.0, res.1), main: k == main, shows, act: Act::MainScreen(k) }));
+        }
+        let help = match s.screens {
+            0 => "One desktop across both",
+            1 => "The same picture on both",
+            _ => "The other screen stays dark",
+        };
+        let row = ui.row("Use the screens", help, ROW + 8);
+        let opts: Vec<(&str, bool, bool, Act)> = SCREENS.iter().enumerate().map(|(i, l)| (*l, s.screens == i, true, Act::Screens(i))).collect();
+        ui.seg(row, &opts);
+        let row = ui.row("Main screen", "Has the dock, the clock, messages and new windows", ROW + 8);
+        ui.seg(row, &[(first.as_str(), main == 0, true, Act::MainScreen(0)), (second.as_str(), main == 1, true, Act::MainScreen(1))]);
+        if s.screens == 0 {
+            let row = ui.row(&format!("Where {} is", second), &format!("Next to {}, as they stand on your desk", first), ROW + 8);
+            let opts: Vec<(&str, bool, bool, Act)> = SIDES.iter().enumerate().map(|(i, l)| (*l, s.side == i, true, Act::Where(i))).collect();
+            ui.seg(row, &opts);
+            let labels = if s.side >= 2 { ALIGNS_STACKED } else { ALIGNS_SIDE };
+            let row = ui.row("Line up", "Where they meet, when one screen is bigger", ROW + 8);
+            let opts: Vec<(&str, bool, bool, Act)> = labels.iter().enumerate().map(|(i, l)| (*l, s.align == i, true, Act::Align(i))).collect();
+            ui.seg(row, &opts);
+        }
         ui.end_card();
     }
 
@@ -818,6 +887,37 @@ impl SettingsApp {
                 c.text_centered(b.x + b.w / 2, b.y + b.h / 2 - 9, label, Size::Small, *sel || *today, if *sel { rgb(255, 255, 255) } else { INK });
             }
             It::BgPreview => self.draw_bg_tile(c, b, s.background, false),
+            It::Monitor { name, res, main, shows, .. } => {
+                c.round_rect(b.x, b.y, b.w, b.h, 8, if *main { ON } else { rgb(70, 76, 88) });
+                let glass = match (shows, main) {
+                    (2, _) => rgb(28, 30, 36),
+                    (_, true) => rgb(92, 158, 230),
+                    _ => rgb(126, 176, 228),
+                };
+                let inner = Rect::new(b.x + 4, b.y + 4, b.w - 8, b.h - 8);
+                c.round_rect(inner.x, inner.y, inner.w, inner.h, 5, glass);
+                if *main {
+                    // The dock.
+                    let dw = (inner.w / 3).max(12);
+                    c.round_rect(inner.x + (inner.w - dw) / 2, inner.y + inner.h - 9, dw, 5, 2, rgb(240, 244, 250));
+                }
+                let white = rgb(255, 255, 255);
+                let line2 = match shows {
+                    1 => String::from("Same picture"),
+                    2 => String::from("Not used"),
+                    _ => res.clone(),
+                };
+                let n = crate::photos::ellipsize(name, inner.w - 8, Size::Small, true);
+                let l2 = crate::photos::ellipsize(&line2, inner.w - 8, Size::Small, false);
+                let cy = inner.y + inner.h / 2;
+                let col = if *shows == 2 { rgb(150, 156, 166) } else { white };
+                if inner.h >= 52 {
+                    c.text_centered(inner.x + inner.w / 2, cy - 21, &n, Size::Small, true, col);
+                    c.text_centered(inner.x + inner.w / 2, cy + 1, &l2, Size::Small, false, col);
+                } else {
+                    c.text_centered(inner.x + inner.w / 2, cy - 10, &n, Size::Small, true, col);
+                }
+            }
             It::Side { page, on } => {
                 if *on {
                     c.round_rect(b.x, b.y, b.w, b.h, 10, rgb(255, 255, 255));
@@ -914,6 +1014,10 @@ impl SettingsApp {
                 }
                 return SettingsAction::Redraw;
             }
+            Act::Screens(i) => n.screens = i,
+            Act::MainScreen(i) => n.main_screen = i,
+            Act::Where(i) => n.side = i,
+            Act::Align(i) => n.align = i,
         }
         if n != *s {
             SettingsAction::Change(n)

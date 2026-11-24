@@ -122,13 +122,22 @@ without NVIDIA's signed firmware, so screen modes and several monitors are possi
      Solon stops the channels, switches the link off and puts the registers back.
 4. **Stage 4: more monitors.** Light the other heads and outputs (DisplayPort link training,
    HDMI); the desktop spans them.
-   - 4a (done, waiting for a try on the RTX 3080): the lit monitor shows the desktop. After
-     its test picture has shown for 3 seconds, the desktop is mirrored on it, scaled to fit
-     with its shape kept (Solon's `Screen` sends only what changed, smoothly scaled), with a
-     pointer of its own. Boot option "mirrortest" lets QEMU show the same thing in a corner
-     of its one screen.
-   - Next: extend the desktop across both monitors instead of mirroring; light the second
-     monitor at start without F12; then more connectors (HDMI).
+   - 4a (done, worked on the RTX 3080): the lit monitor showed the desktop mirrored, scaled
+     to fit with its shape kept (Solon's `Screen` sends only what changed, smoothly scaled),
+     with a pointer of its own.
+   - 4b (done, waiting for a try on the RTX 3080): the second monitor is lit when Solon starts
+     (not with "Main screen only", nor with boot option "nolight"; F12 then L still works) and
+     the desktop extends across both. The desktop is one canvas around both screens; each
+     screen shows its part (`Screen::present_part`), the main one has the dock, the clock,
+     messages and new windows, and the pointer only goes where a screen is (it crosses where
+     they meet). Windows keep to the monitor they're on when the arrangement changes and
+     maximize on it; each screen has its own wallpaper. Settings > Display > Screens: Extend
+     (the default), Mirror or Main screen only; the main screen; where the second monitor
+     stands (left, right, above, below) and how the two line up (tops, middles, bottoms, or
+     left edges, middles, right edges). Boot option "secondtest" makes the right part of
+     QEMU's screen play a second monitor that lights 3 seconds after start.
+   - Next: more connectors (HDMI); turning the second monitor's signal off with "Main screen
+     only" instead of showing black.
 
 Each stage is tried on a real card before it's switched on by default.
 

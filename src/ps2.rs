@@ -46,10 +46,7 @@ pub fn inject(e: Event) {
 /// Relative mouse movement from a USB mouse (dy positive = down, wheel positive = scroll down).
 pub fn inject_mouse(dx: i32, dy: i32, buttons: u8, wheel: i8) {
     without_interrupts(|| {
-        let w = BOUND_W.load(Relaxed);
-        let h = BOUND_H.load(Relaxed);
-        let x = (MOUSE_X.load(Relaxed) + speed(dx, &REM_X)).clamp(0, w - 1);
-        let y = (MOUSE_Y.load(Relaxed) + speed(dy, &REM_Y)).clamp(0, h - 1);
+        let (x, y) = keep(MOUSE_X.load(Relaxed) + speed(dx, &REM_X), MOUSE_Y.load(Relaxed) + speed(dy, &REM_Y));
         MOUSE_X.store(x, Relaxed);
         MOUSE_Y.store(y, Relaxed);
         push(Event::Mouse { x, y, buttons, wheel });
@@ -79,17 +76,73 @@ static MOUSE_X: AtomicI32 = AtomicI32::new(0);
 static MOUSE_Y: AtomicI32 = AtomicI32::new(0);
 static BOUND_W: AtomicI32 = AtomicI32::new(1);
 static BOUND_H: AtomicI32 = AtomicI32::new(1);
+/// The screens of an extended desktop, x, y, w, h each (w = 0: none): the pointer stays on
+/// them, out of the corners of the rectangle around them.
+static AREAS: [AtomicI32; 8] = [const { AtomicI32::new(0) }; 8];
 
 static PKT: [AtomicU8; 4] = [AtomicU8::new(0), AtomicU8::new(0), AtomicU8::new(0), AtomicU8::new(0)];
 static PKT_IDX: AtomicU8 = AtomicU8::new(0);
 /// 3 for a plain mouse, 4 once the scroll wheel (IntelliMouse mode) is enabled.
 static PKT_LEN: AtomicU8 = AtomicU8::new(3);
 
+/// One screen, w x h: the pointer goes to its middle.
 pub fn set_bounds(w: usize, h: usize) {
-    BOUND_W.store(w as i32, Relaxed);
-    BOUND_H.store(h as i32, Relaxed);
-    MOUSE_X.store(w as i32 / 2, Relaxed);
-    MOUSE_Y.store(h as i32 / 2, Relaxed);
+    without_interrupts(|| {
+        BOUND_W.store(w as i32, Relaxed);
+        BOUND_H.store(h as i32, Relaxed);
+        for a in &AREAS {
+            a.store(0, Relaxed);
+        }
+        MOUSE_X.store(w as i32 / 2, Relaxed);
+        MOUSE_Y.store(h as i32 / 2, Relaxed);
+    });
+}
+
+/// A desktop of w x h with screens (x, y, w, h each, at most two) in it. The pointer stays
+/// where it is if it's on one, or else goes to the nearest point on one.
+pub fn set_area(w: usize, h: usize, screens: &[(i32, i32, i32, i32)]) {
+    without_interrupts(|| {
+        BOUND_W.store(w.max(1) as i32, Relaxed);
+        BOUND_H.store(h.max(1) as i32, Relaxed);
+        for k in 0..2 {
+            let r = screens.get(k).copied().unwrap_or((0, 0, 0, 0));
+            for (i, v) in [r.0, r.1, r.2, r.3].into_iter().enumerate() {
+                AREAS[k * 4 + i].store(v, Relaxed);
+            }
+        }
+        let (x, y) = keep(MOUSE_X.load(Relaxed), MOUSE_Y.load(Relaxed));
+        MOUSE_X.store(x, Relaxed);
+        MOUSE_Y.store(y, Relaxed);
+    });
+}
+
+/// Put the pointer at (x, y), or the nearest point on a screen.
+pub fn warp(x: i32, y: i32) {
+    without_interrupts(|| {
+        let (x, y) = keep(x, y);
+        MOUSE_X.store(x, Relaxed);
+        MOUSE_Y.store(y, Relaxed);
+    });
+}
+
+/// The nearest point to (x, y) inside the desktop and on a screen.
+fn keep(x: i32, y: i32) -> (i32, i32) {
+    let x = x.clamp(0, BOUND_W.load(Relaxed) - 1);
+    let y = y.clamp(0, BOUND_H.load(Relaxed) - 1);
+    let mut best: Option<(i64, i32, i32)> = None;
+    for k in 0..2 {
+        let a = |i: usize| AREAS[k * 4 + i].load(Relaxed);
+        let (rx, ry, rw, rh) = (a(0), a(1), a(2), a(3));
+        if rw <= 0 || rh <= 0 {
+            continue;
+        }
+        let (cx, cy) = (x.clamp(rx, rx + rw - 1), y.clamp(ry, ry + rh - 1));
+        let d = (cx - x) as i64 * (cx - x) as i64 + (cy - y) as i64 * (cy - y) as i64;
+        if best.is_none_or(|b| d < b.0) {
+            best = Some((d, cx, cy));
+        }
+    }
+    best.map_or((x, y), |b| (b.1, b.2))
 }
 
 pub fn mouse_pos() -> (i32, i32) {
@@ -239,11 +292,8 @@ pub fn on_mouse_byte(b: u8) {
         dy -= 256;
     }
 
-    let w = BOUND_W.load(Relaxed);
-    let h = BOUND_H.load(Relaxed);
     // PS/2 reports "up" as positive Y; screen Y grows downward.
-    let x = (MOUSE_X.load(Relaxed) + speed(dx, &REM_X)).clamp(0, w - 1);
-    let y = (MOUSE_Y.load(Relaxed) - speed(dy, &REM_Y)).clamp(0, h - 1);
+    let (x, y) = keep(MOUSE_X.load(Relaxed) + speed(dx, &REM_X), MOUSE_Y.load(Relaxed) - speed(dy, &REM_Y));
     MOUSE_X.store(x, Relaxed);
     MOUSE_Y.store(y, Relaxed);
     // Wheel is the low 4 bits of byte 3, as a signed nibble.

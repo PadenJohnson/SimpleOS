@@ -192,6 +192,16 @@ extern "C" fn kmain() -> ! {
         kprintln!("solon: no usable 32-bpp framebuffer");
         halt();
     };
+    // Boot option "secondtest" (QEMU has no second monitor): the right part of the screen plays
+    // one, which "lights" 3 seconds after start; the PC's screen is the rest.
+    let second_test = boot_option("secondtest").then(|| {
+        let (fw, fh, base, pitch) = (screen.width, screen.height, screen.base_addr(), screen.pitch());
+        let w1 = fw * 5 / 8;
+        screen.set_mode(base as *mut u8, w1, fh, pitch);
+        let right = base + w1 as u64 * 4;
+        Screen::raw(right as *mut u8, fw - w1, fh, pitch, (16, 8, 0)).clear();
+        (right, (fw - w1) as u32, (fh * 2 / 3) as u32, pitch as u32)
+    });
     let (w, h) = (screen.width, screen.height);
     screen.register_for_crashes();
     kprintln!("solon: framebuffer {}x{}", w, h);
@@ -376,27 +386,44 @@ extern "C" fn kmain() -> ! {
         photos.set(String::from("Boot drive"), items, None);
     }
 
+    // A second monitor: lit by Solon's NVIDIA driver now (unless Settings say to use the main
+    // screen only, or boot option "nolight"), when Settings ask for it later, or from the
+    // diagnostics (F12, then L: its test picture shows for 3 seconds before the desktop).
+    let no_light = boot_option("nolight");
+    let mut second: Option<Screen> = None;
+    let mut second_lit_at: Option<u64> = None;
+    // Tries so far (a monitor that doesn't answer gets one more, when Settings change).
+    let mut light_tries = 0;
+    if !no_light && settings.screens != 2 && nvidia::light::waiting().is_some() {
+        light_tries += 1;
+        kprintln!("solon: {}", nvidia::light::light_second());
+        second = nvidia::light::second_screen().map(|found| use_second(found, false));
+    }
+
     let mut canvas = Canvas::new(lw, lh);
     let mut desktop = Desktop::new(lw, lh, photos, usb, storage, settings, view.res);
+    let mut lay = spread(&mut desktop, &mut canvas, (lw, lh), second.as_ref(), scale);
+    blank_unused(&lay, &screen, view.dst, second.as_ref());
+    let (cx, cy) = lay.main_centre();
+    ps2::warp(cx, cy);
     desktop.show_library();
     let (hh, mm, _) = rtc::time();
     desktop.set_clock(hh, mm);
     desktop.draw(&mut canvas);
-    screen.present(&canvas, scale, view.dst);
+    present_all(&canvas, &lay, scale, &screen, view.dst, second.as_ref());
 
-    // The mouse moves in desktop (logical) pixels; the cursor is drawn on the real screen.
+    // The mouse moves in desktop (logical) pixels; each screen draws the pointer when it's on
+    // that screen's part of the desktop.
     let mut cursor = Cursor::new();
-    cursor.set_zoom(view.cursor_zoom(lw));
-    let (mut mx, mut my) = ps2::mouse_pos();
-    let (cx, cy) = view.to_screen(mx, my, lw, lh);
-    cursor.show_at(&screen, cx, cy);
-    kprintln!("solon: display {}x{}, desktop {}x{} (scale {}%)", view.res.0, view.res.1, lw, lh, scale * 50);
-    // A second monitor lit by Solon's NVIDIA driver (F12, then L): after its test picture
-    // has shown for 3 seconds, the desktop, scaled to fit, with its own pointer.
-    let mut second: Option<Screen> = None;
-    let mut second_lit_at: Option<u64> = None;
     let mut cursor2 = Cursor::new();
-    let mirror_test = EXECUTABLE_CMDLINE_REQUEST.get_response().and_then(|r| r.cmdline().to_str().ok()).is_some_and(|c| c.split_whitespace().any(|w| w == "mirrortest"));
+    cursor.set_zoom(lay.cursor_zoom(0, &screen, view.dst));
+    let (mut mx, mut my) = ps2::mouse_pos();
+    place_pointer(&mut cursor, &screen, &lay, 0, mx, my, view.dst);
+    if let Some(s2) = &second {
+        cursor2.set_zoom(lay.cursor_zoom(1, s2, full_of(s2)));
+        place_pointer(&mut cursor2, s2, &lay, 1, mx, my, full_of(s2));
+    }
+    kprintln!("solon: display {}x{}, desktop {}x{} (scale {}%)", view.res.0, view.res.1, lay.w, lay.h, scale * 50);
     kprintln!("solon: desktop ready");
     kprintln!("cpu: {}", cpu::describe_sample(&cpu::sample()));
     let crash_test = EXECUTABLE_CMDLINE_REQUEST
@@ -466,30 +493,50 @@ extern "C" fn kmain() -> ! {
 
         match desktop.take_request() {
             Some(PowerRequest::Rescale) => {
-                // Text size or resolution changed: draw the desktop at a new size.
+                // Text size, resolution or how the screens are used changed: lay the desktop
+                // out again.
                 cursor.hide(&screen);
+                if let Some(s2) = &second {
+                    cursor2.hide(s2);
+                }
                 let s = desktop.settings();
                 view = apply_view(&mut screen, (w, h), s.resolution);
                 scale = s.scale();
                 (lw, lh) = view.logical(scale);
-                canvas = Canvas::new(lw, lh);
-                desktop.resize(lw, lh);
                 desktop.set_screen(view.res);
-                ps2::set_bounds(lw, lh);
+                // Both screens wanted, and a monitor waiting that wasn't lit at start.
+                if second.is_none() && s.screens != 2 && !no_light && light_tries < 2 && nvidia::light::waiting().is_some() {
+                    light_tries += 1;
+                    kprintln!("solon: {}", nvidia::light::light_second());
+                    second = nvidia::light::second_screen().map(|found| use_second(found, false));
+                }
+                let (old, at) = (lay, ps2::mouse_pos());
+                lay = spread(&mut desktop, &mut canvas, (lw, lh), second.as_ref(), scale);
+                carry_pointer(&old, &lay, at);
+                blank_unused(&lay, &screen, view.dst, second.as_ref());
                 (mx, my) = ps2::mouse_pos();
-                cursor.set_zoom(view.cursor_zoom(lw));
-                kprintln!("solon: display {}x{}, desktop {}x{} (scale {}%)", view.res.0, view.res.1, lw, lh, scale * 50);
+                cursor.set_zoom(lay.cursor_zoom(0, &screen, view.dst));
+                if let Some(s2) = &second {
+                    cursor2.set_zoom(lay.cursor_zoom(1, s2, full_of(s2)));
+                }
+                kprintln!("solon: display {}x{}, desktop {}x{} (scale {}%)", view.res.0, view.res.1, lay.w, lay.h, scale * 50);
                 redraw = true;
             }
             Some(req @ (PowerRequest::ShutDown | PowerRequest::Restart)) => {
                 cursor.hide(&screen);
                 let shutting = req == PowerRequest::ShutDown;
-                message(&mut canvas, &screen, scale, view.dst, if shutting { "Turning off..." } else { "Restarting..." }, "");
+                let say = |title: &str, line: &str| {
+                    message(&screen, view.logical(scale), scale, view.dst, title, line);
+                    if let Some(s2) = &second {
+                        message(s2, (s2.width * 2 / scale as usize, s2.height * 2 / scale as usize), scale, full_of(s2), title, line);
+                    }
+                };
+                say(if shutting { "Turning off..." } else { "Restarting..." }, "");
                 if shutting {
                     desktop.prepare_power_off();
                     power::shutdown(acpi.as_ref());
                     // Still here: the PC didn't switch itself off.
-                    message(&mut canvas, &screen, scale, view.dst, "It's now safe to turn off your computer.", "Hold the power button for a few seconds.");
+                    say("It's now safe to turn off your computer.", "Hold the power button for a few seconds.");
                     halt();
                 }
                 power::restart(acpi.as_ref());
@@ -498,19 +545,20 @@ extern "C" fn kmain() -> ! {
         }
 
         if second.is_none() {
-            // Boot option "mirrortest" (for QEMU, which has no second monitor): the bottom-right
-            // third of the screen plays one, so the mirroring can be seen working.
-            let fake = mirror_test.then(|| {
-                let (w3, h3) = (screen.width / 3, screen.height / 3);
-                let base = screen.base_addr() + ((screen.height - h3 - 8) * screen.pitch() + (screen.width - w3 - 8) * 4) as u64;
-                (base, w3 as u32, h3 as u32, screen.pitch() as u32)
-            });
-            if let Some((virt, w2, h2, pitch2)) = fake.or_else(nvidia::light::second_screen) {
+            // A monitor lit from the diagnostics (or the test one): the desktop spreads onto it
+            // once its test picture has shown for 3 seconds.
+            if let Some(found) = second_test.or_else(nvidia::light::second_screen) {
                 let lit = *second_lit_at.get_or_insert(now);
                 if now >= lit + 3 * HZ {
-                    let s2 = Screen::raw(virt as *mut u8, w2 as usize, h2 as usize, pitch2 as usize, (16, 8, 0));
-                    s2.clear();
-                    kprintln!("solon: second monitor {}x{}: showing the desktop", w2, h2);
+                    cursor.hide(&screen);
+                    let s2 = use_second(found, second_test.is_some());
+                    let (old, at) = (lay, ps2::mouse_pos());
+                    lay = spread(&mut desktop, &mut canvas, (lw, lh), Some(&s2), scale);
+                    carry_pointer(&old, &lay, at);
+                    blank_unused(&lay, &screen, view.dst, Some(&s2));
+                    (mx, my) = ps2::mouse_pos();
+                    cursor.set_zoom(lay.cursor_zoom(0, &screen, view.dst));
+                    cursor2.set_zoom(lay.cursor_zoom(1, &s2, full_of(&s2)));
                     second = Some(s2);
                     redraw = true;
                 }
@@ -519,34 +567,193 @@ extern "C" fn kmain() -> ! {
         if redraw {
             desktop.draw(&mut canvas);
             cursor.hide(&screen);
-            screen.present(&canvas, scale, view.dst);
             if let Some(s2) = &second {
                 cursor2.hide(s2);
-                s2.present(&canvas, scale, s2.fit(lw, lh));
             }
-            if !desktop.hide_pointer() {
-                let (cx, cy) = view.to_screen(mx, my, lw, lh);
-                cursor.show_at(&screen, cx, cy);
-                if let Some(s2) = &second {
-                    let (x, y) = pointer2(s2, mx, my, lw, lh);
-                    cursor2.show_at(s2, x, y);
-                }
-            }
-        } else if moved && !desktop.hide_pointer() {
-            let (cx, cy) = view.to_screen(mx, my, lw, lh);
-            cursor.show_at(&screen, cx, cy);
+            present_all(&canvas, &lay, scale, &screen, view.dst, second.as_ref());
+        }
+        if (redraw || moved) && !desktop.hide_pointer() {
+            place_pointer(&mut cursor, &screen, &lay, 0, mx, my, view.dst);
             if let Some(s2) = &second {
-                let (x, y) = pointer2(s2, mx, my, lw, lh);
-                cursor2.show_at(s2, x, y);
+                place_pointer(&mut cursor2, s2, &lay, 1, mx, my, full_of(s2));
             }
         }
     }
 }
 
-/// Where the pointer goes on the second monitor: the desktop is scaled to fit it.
-fn pointer2(s2: &Screen, mx: i32, my: i32, lw: usize, lh: usize) -> (usize, usize) {
-    let (x, y, w, h) = s2.fit(lw, lh);
-    (x + mx.max(0) as usize * w / lw.max(1), y + my.max(0) as usize * h / lh.max(1))
+/// A word on the kernel command line (boot options, mostly for testing).
+fn boot_option(name: &str) -> bool {
+    EXECUTABLE_CMDLINE_REQUEST.get_response().and_then(|r| r.cmdline().to_str().ok()).is_some_and(|c| c.split_whitespace().any(|w| w == name))
+}
+
+/// The second monitor (the NVIDIA driver's, or the test one: CPU address, width, height,
+/// bytes a row), cleared, ready for the desktop.
+fn use_second(found: (u64, u32, u32, u32), test: bool) -> Screen {
+    let (virt, w2, h2, pitch2) = found;
+    let s2 = Screen::raw(virt as *mut u8, w2 as usize, h2 as usize, pitch2 as usize, (16, 8, 0));
+    s2.clear();
+    let name = if test { String::from("Test screen") } else { nvidia::light::second_name().unwrap_or_else(|| String::from("Second monitor")) };
+    kprintln!("solon: second monitor \"{}\" ({}x{}): showing the desktop", name, w2, h2);
+    display::set_second(name, (w2, h2));
+    s2
+}
+
+/// All of a screen.
+fn full_of(s: &Screen) -> (usize, usize, usize, usize) {
+    (0, 0, s.width, s.height)
+}
+
+/// How the desktop is spread over the screens.
+#[derive(Clone, Copy)]
+struct Layout {
+    /// The whole desktop (the canvas), in desktop pixels.
+    w: usize,
+    h: usize,
+    /// What each screen shows (x, y, w, h in the desktop): [0] the screen the PC started on,
+    /// [1] the second monitor. None: nothing (it's black).
+    parts: [Option<(usize, usize, usize, usize)>; 2],
+    /// The main screen (0 or 1): the dock, the clock, new windows.
+    main: usize,
+    /// Both screens show all of the desktop (the other one scaled to fit).
+    mirror: bool,
+}
+
+impl Layout {
+    /// `one`, `two`: the screens' sizes in desktop pixels (`two`: None without a second).
+    fn new(s: &Settings, one: (usize, usize), two: Option<(usize, usize)>) -> Layout {
+        let Some(two) = two else {
+            return Layout { w: one.0, h: one.1, parts: [Some((0, 0, one.0, one.1)), None], main: 0, mirror: false };
+        };
+        let main = s.main_screen.min(1);
+        if s.screens == 0 {
+            let ((w, h), [p1, p2]) = s.arrange(one, two);
+            return Layout { w, h, parts: [Some(p1), Some(p2)], main, mirror: false };
+        }
+        // Mirror, or the main screen only: the desktop is the main screen's size.
+        let (w, h) = if main == 0 { one } else { two };
+        let mut parts = [None, None];
+        parts[main] = Some((0, 0, w, h));
+        if s.screens == 1 {
+            parts[1 - main] = Some((0, 0, w, h));
+        }
+        Layout { w, h, parts, main, mirror: s.screens == 1 }
+    }
+
+    /// The screens as the desktop sees them (which monitor, where), and the main one's index.
+    fn desktop_screens(&self) -> (alloc::vec::Vec<(usize, gfx::Rect)>, usize) {
+        let rect = |p: (usize, usize, usize, usize)| gfx::Rect::new(p.0 as i32, p.1 as i32, p.2 as i32, p.3 as i32);
+        match self.parts {
+            [Some(a), Some(b)] if !self.mirror => (alloc::vec![(0, rect(a)), (1, rect(b))], self.main),
+            _ => (alloc::vec![(self.main, rect((0, 0, self.w, self.h)))], 0),
+        }
+    }
+
+    /// Where on screen `k` its part goes: `full` (all of it; for the first screen, the place
+    /// the resolution setting gives), or scaled to fit when it mirrors the main screen.
+    fn dst(&self, k: usize, s: &Screen, full: (usize, usize, usize, usize)) -> (usize, usize, usize, usize) {
+        if self.mirror && k != self.main {
+            s.fit(self.w, self.h)
+        } else {
+            full
+        }
+    }
+
+    /// Where the desktop point (x, y) shows on screen `k` (its part shown in `dst`), if it does.
+    fn pointer_on(&self, k: usize, x: i32, y: i32, dst: (usize, usize, usize, usize)) -> Option<(usize, usize)> {
+        let (px, py, pw, ph) = self.parts[k]?;
+        let (x, y) = (x as i64 - px as i64, y as i64 - py as i64);
+        if x < 0 || y < 0 || x >= pw as i64 || y >= ph as i64 {
+            return None;
+        }
+        Some((dst.0 + x as usize * dst.2 / pw, dst.1 + y as usize * dst.3 / ph))
+    }
+
+    /// A bigger pointer on a screen that enlarges the desktop 1.5 times or more.
+    fn cursor_zoom(&self, k: usize, s: &Screen, full: (usize, usize, usize, usize)) -> usize {
+        match self.parts[k] {
+            Some(p) if self.dst(k, s, full).2 * 2 >= p.2 * 3 => 2,
+            _ => 1,
+        }
+    }
+
+    /// The middle of the main screen.
+    fn main_centre(&self) -> (i32, i32) {
+        let (x, y, w, h) = self.parts[self.main].unwrap_or((0, 0, self.w, self.h));
+        ((x + w / 2) as i32, (y + h / 2) as i32)
+    }
+
+    /// The screen showing the desktop point (x, y) (the main one if both do), and where on it.
+    fn locate(&self, x: i32, y: i32) -> Option<(usize, i64, i64, usize, usize)> {
+        [self.main, 1 - self.main].into_iter().find_map(|k| {
+            let (px, py, pw, ph) = self.parts[k]?;
+            let (dx, dy) = (x as i64 - px as i64, y as i64 - py as i64);
+            (dx >= 0 && dy >= 0 && dx < pw as i64 && dy < ph as i64).then_some((k, dx, dy, pw, ph))
+        })
+    }
+}
+
+/// Spread the desktop over the screens as Settings say: a new canvas, the desktop's screens,
+/// where the pointer can go. `one`: the first screen's size in desktop pixels.
+fn spread(desktop: &mut Desktop, canvas: &mut Canvas, one: (usize, usize), second: Option<&Screen>, scale: u32) -> Layout {
+    let s = desktop.settings();
+    let two = second.map(|s2| (s2.width * 2 / scale as usize, s2.height * 2 / scale as usize));
+    let lay = Layout::new(&s, one, two);
+    *canvas = Canvas::new(lay.w, lay.h);
+    let (screens, main) = lay.desktop_screens();
+    let rects: alloc::vec::Vec<(i32, i32, i32, i32)> = screens.iter().map(|(_, r)| (r.x, r.y, r.w, r.h)).collect();
+    desktop.set_layout(lay.w, lay.h, screens, main);
+    ps2::set_area(lay.w, lay.h, &rects);
+    if second.is_some() {
+        kprintln!(
+            "solon: screens: {}, main screen {}, desktop {}x{}, first {:?}, second {:?}",
+            settings::SCREENS[s.screens.min(2)], lay.main + 1, lay.w, lay.h, lay.parts[0], lay.parts[1]
+        );
+    }
+    lay
+}
+
+/// After the layout changed: the pointer (at `at` before the change) stays at the same place
+/// on the same screen, or goes to the middle of the main one if that screen shows nothing now.
+fn carry_pointer(old: &Layout, new: &Layout, at: (i32, i32)) {
+    let (x, y) = at;
+    let to = old.locate(x, y).and_then(|(k, dx, dy, w, h)| {
+        let (px, py, pw, ph) = new.parts[k]?;
+        Some(((px as i64 + dx * pw as i64 / w.max(1) as i64) as i32, (py as i64 + dy * ph as i64 / h.max(1) as i64) as i32))
+    });
+    let (x, y) = to.unwrap_or_else(|| new.main_centre());
+    ps2::warp(x, y);
+}
+
+/// Black on a screen that shows nothing (the other one, with "Main screen only"), and around
+/// the picture on one that shows it smaller (mirroring a screen of another shape).
+fn blank_unused(lay: &Layout, screen: &Screen, first_full: (usize, usize, usize, usize), second: Option<&Screen>) {
+    if lay.parts[0].is_none() || lay.dst(0, screen, first_full) != first_full {
+        screen.clear();
+    }
+    if let Some(s2) = second {
+        if lay.parts[1].is_none() || lay.dst(1, s2, full_of(s2)) != full_of(s2) {
+            s2.clear();
+        }
+    }
+}
+
+/// Put each screen's part of the desktop on it.
+fn present_all(canvas: &Canvas, lay: &Layout, scale: u32, screen: &Screen, first_full: (usize, usize, usize, usize), second: Option<&Screen>) {
+    if let Some(p) = lay.parts[0] {
+        screen.present_part(canvas, p, scale, lay.dst(0, screen, first_full));
+    }
+    if let (Some(s2), Some(p)) = (second, lay.parts[1]) {
+        s2.present_part(canvas, p, scale, lay.dst(1, s2, full_of(s2)));
+    }
+}
+
+/// Draw the pointer on screen `k` where it shows the desktop point (x, y), or take it off that
+/// screen if it doesn't.
+fn place_pointer(cursor: &mut Cursor, s: &Screen, lay: &Layout, k: usize, x: i32, y: i32, full: (usize, usize, usize, usize)) {
+    match lay.pointer_on(k, x, y, lay.dst(k, s, full)) {
+        Some((sx, sy)) => cursor.show_at(s, sx, sy),
+        None => cursor.hide(s),
+    }
 }
 
 /// Where the desktop goes on the screen.
@@ -561,18 +768,6 @@ impl View {
     /// The desktop's size in its own (text-size scaled) pixels.
     fn logical(&self, scale: u32) -> (usize, usize) {
         (self.res.0 * 2 / scale as usize, self.res.1 * 2 / scale as usize)
-    }
-    fn to_screen(&self, x: i32, y: i32, lw: usize, lh: usize) -> (usize, usize) {
-        let (dx, dy, dw, dh) = self.dst;
-        (dx + x.max(0) as usize * dw / lw.max(1), dy + y.max(0) as usize * dh / lh.max(1))
-    }
-    /// A bigger pointer when the desktop is enlarged 1.5 times or more.
-    fn cursor_zoom(&self, lw: usize) -> usize {
-        if self.dst.2 * 2 >= lw * 3 {
-            2
-        } else {
-            1
-        }
     }
 }
 
@@ -602,14 +797,15 @@ fn apply_view(screen: &mut Screen, boot: (usize, usize), want: (u32, u32)) -> Vi
     View { res, dst: ((fw - dw) / 2, (fh - dh) / 2, dw, dh) }
 }
 
-/// A full-screen message (shutting down, restarting...).
-fn message(c: &mut Canvas, screen: &Screen, scale: u32, dst: (usize, usize, usize, usize), title: &str, line: &str) {
+/// A full-screen message (shutting down, restarting...) on a screen whose desktop pixels
+/// measure `size`.
+fn message(screen: &Screen, size: (usize, usize), scale: u32, dst: (usize, usize, usize, usize), title: &str, line: &str) {
+    let mut c = Canvas::new(size.0, size.1);
     let (w, h) = (c.w as i32, c.h as i32);
-    c.reset_clip();
     c.fill_rect(0, 0, w, h, gfx::rgb(14, 20, 28));
     c.text_centered(w / 2, h / 2 - 30, title, gfx::Size::Large, true, gfx::rgb(240, 242, 245));
     c.text_centered(w / 2, h / 2 + 20, line, gfx::Size::Small, false, gfx::rgb(170, 180, 190));
-    screen.present(c, scale, dst);
+    screen.present(&c, scale, dst);
 }
 
 fn halt() -> ! {

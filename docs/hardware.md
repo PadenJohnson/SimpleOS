@@ -51,7 +51,7 @@ board's Ethernet and Wi-Fi stay unused.
    screen and input stay on the first core, which also takes every interrupt. Used so far
    for photo thumbnails (read one at a time on the first core, then decoded together, in
    groups whose pictures fit in about 512 MB) and the smooth scaling of the screen (the
-   mirrored second monitor, lower resolutions). A processor without MONITOR/MWAIT has its
+   second monitor when mirrored, lower resolutions). A processor without MONITOR/MWAIT has its
    other cores put to sleep, as does boot option "onecore". A benchmark at start logs the
    speed-up (QEMU with 4 cores: 80 ms on one core, 20 ms on four; the sample photos load in
    5.3 s instead of 7.2 s, the slowest single photo being the limit). Next: video decoding.

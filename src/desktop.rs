@@ -279,8 +279,10 @@ pub struct Desktop {
     /// Icons drawn small, for the dock (42 px) and title bars (22 px).
     dock_icons: Vec<(icons::Icon, crate::image::Image)>,
     title_icons: Vec<(icons::Icon, crate::image::Image)>,
-    /// The wallpaper, drawn once per size and choice.
+    /// The wallpaper, drawn once per size and choice: for the whole desktop, and for each
+    /// screen (kept, so arranging the screens differently doesn't draw them again).
     wallpaper: Option<Wall>,
+    screen_walls: Vec<Wall>,
     /// The user's own desktop picture (file bytes), once looked for in Solon storage.
     custom_wallpaper: Option<Vec<u8>>,
     custom_checked: bool,
@@ -309,6 +311,12 @@ pub struct Desktop {
     next_live: u64,
     /// Physical screen size (the desktop itself may be drawn smaller and enlarged).
     screen: (usize, usize),
+    /// The screens, in desktop pixels (the canvas covers them all), and which monitor each is
+    /// (0: the one the PC started on, 1: the second). The main one has the dock, the clock,
+    /// messages and new windows. With one screen: (0, 0, w, h).
+    screens: Vec<Rect>,
+    screen_ids: Vec<usize>,
+    main: usize,
     date: (u16, u8, u8),
     power_menu: bool,
     /// One-time notice: Solon runs from its USB stick and could be installed.
@@ -388,6 +396,8 @@ struct Wall {
     bg: usize,
     w: i32,
     h: i32,
+    /// Made for a screen with the big clock (shaded behind it if the clock is white).
+    clock: bool,
     px: Vec<u32>,
     /// Clock and date colour, and whether they need a shadow; the hint along the bottom.
     ink: (u32, bool),
@@ -444,6 +454,7 @@ impl Desktop {
             dock_icons: Vec::new(),
             title_icons: Vec::new(),
             wallpaper: None,
+            screen_walls: Vec::new(),
             custom_wallpaper: None,
             custom_checked: false,
             games: crate::games::Games::new(),
@@ -464,6 +475,9 @@ impl Desktop {
             settings_app: SettingsApp::new(),
             next_live: 0,
             screen,
+            screens: Vec::from([Rect::new(0, 0, w as i32, h as i32)]),
+            screen_ids: Vec::from([0]),
+            main: 0,
             date: crate::rtc::date(),
             power_menu: false,
             install_notice: false,
@@ -519,10 +533,90 @@ impl Desktop {
         self.screen = res;
     }
 
-    pub fn resize(&mut self, w: usize, h: usize) {
+    /// The screens' places in the desktop (several for an extended desktop): which monitor
+    /// each is and where, the canvas `w` x `h` covering them all; `main` (an index into
+    /// `screens`) is the one with the dock. Windows stay on the monitor they were on, if it's
+    /// still in use, and otherwise move to the main screen.
+    pub fn set_layout(&mut self, w: usize, h: usize, screens: Vec<(usize, Rect)>, main: usize) {
+        let old: Vec<(usize, Rect)> = self.screen_ids.iter().copied().zip(self.screens.iter().copied()).collect();
+        let old_main = self.main_screen();
+        let screens = if screens.is_empty() { Vec::from([(0, Rect::new(0, 0, w as i32, h as i32))]) } else { screens };
         self.w = w as i32;
         self.h = h as i32;
+        self.screen_ids = screens.iter().map(|s| s.0).collect();
+        self.screens = screens.iter().map(|s| s.1).collect();
+        self.main = main.min(self.screens.len() - 1);
+        let new_main = self.main_screen();
+        for i in 0..self.windows.len() {
+            let r = self.windows[i].rect();
+            let (cx, cy) = (r.x + r.w / 2, r.y + TITLE_H / 2);
+            // The monitor it was on (or nearest), and where that monitor is now.
+            let from = old.iter().copied().min_by_key(|(_, s)| {
+                let dx = (cx - cx.clamp(s.x, s.x + s.w - 1)) as i64;
+                let dy = (cy - cy.clamp(s.y, s.y + s.h - 1)) as i64;
+                dx * dx + dy * dy
+            });
+            let (from, to) = match from {
+                Some((id, f)) => (f, screens.iter().find(|s| s.0 == id).map_or(new_main, |s| s.1)),
+                None => (old_main, new_main),
+            };
+            let (dx, dy) = (to.x - from.x, to.y - from.y);
+            let win = &mut self.windows[i];
+            win.x += dx;
+            win.y += dy;
+            if let Some(rr) = &mut win.restore {
+                rr.x += dx;
+                rr.y += dy;
+            }
+        }
+        self.desk_menu = None;
+        self.wallpaper = None;
         self.fit_windows();
+    }
+
+    /// The main screen (the dock, the clock, messages, new windows).
+    fn main_screen(&self) -> Rect {
+        self.screens.get(self.main).copied().unwrap_or(Rect::new(0, 0, self.w, self.h))
+    }
+
+    /// The screen a point is on, or else the nearest.
+    fn screen_at(&self, x: i32, y: i32) -> Rect {
+        let dist = |r: &Rect| {
+            let dx = if x < r.x { r.x - x } else if x >= r.x + r.w { x - r.x - r.w + 1 } else { 0 };
+            let dy = if y < r.y { r.y - y } else if y >= r.y + r.h { y - r.y - r.h + 1 } else { 0 };
+            dx as i64 * dx as i64 + dy as i64 * dy as i64
+        };
+        self.screens.iter().copied().min_by_key(dist).unwrap_or(self.main_screen())
+    }
+
+    /// Where windows go on a screen: all of it, less the taskbar on the main one.
+    fn work_on(&self, s: Rect) -> Rect {
+        if s == self.main_screen() {
+            Rect::new(s.x, s.y, s.w, s.h - BAR_H)
+        } else {
+            s
+        }
+    }
+
+    /// Run `f` on the main screen's part of the canvas as if it were the whole canvas (for
+    /// things drawn at full size: the slideshow, the diagnostics).
+    fn on_main(&self, c: &mut Canvas, f: impl FnOnce(&mut Canvas)) {
+        let m = self.main_screen();
+        if m == Rect::new(0, 0, c.w as i32, c.h as i32) {
+            f(c);
+            return;
+        }
+        let (mx, my, mw, mh) = (m.x.max(0) as usize, m.y.max(0) as usize, m.w as usize, m.h as usize);
+        let mut sub = Canvas::new(mw, mh);
+        for y in 0..mh.min(c.h - my) {
+            let n = mw.min(c.w - mx);
+            sub.px[y * mw..y * mw + n].copy_from_slice(&c.px[(my + y) * c.w + mx..(my + y) * c.w + mx + n]);
+        }
+        f(&mut sub);
+        for y in 0..mh.min(c.h - my) {
+            let n = mw.min(c.w - mx);
+            c.px[(my + y) * c.w + mx..(my + y) * c.w + mx + n].copy_from_slice(&sub.px[y * mw..y * mw + n]);
+        }
     }
 
     fn apply_settings(&mut self, n: Settings) {
@@ -530,7 +624,8 @@ impl Desktop {
         self.settings = n;
         crate::ps2::set_speed(settings::MOUSE[n.mouse].1);
         crate::spell::set_mode(n.spelling);
-        if n.size != old.size || n.resolution != old.resolution {
+        let screens_changed = (n.screens, n.main_screen, n.side, n.align) != (old.screens, old.main_screen, old.side, old.align);
+        if n.size != old.size || n.resolution != old.resolution || screens_changed {
             self.request = Some(PowerRequest::Rescale);
         }
         kprintln!("settings: {:?}", n);
@@ -542,7 +637,8 @@ impl Desktop {
     }
 
     fn confirm_box(&self) -> Rect {
-        Rect::new(self.w / 2 - 230, self.h / 2 - 100, 460, 200)
+        let m = self.main_screen();
+        Rect::new(m.x + m.w / 2 - 230, m.y + m.h / 2 - 100, 460, 200)
     }
     fn confirm_ok(&self) -> Rect {
         let b = self.confirm_box();
@@ -1085,7 +1181,7 @@ impl Desktop {
     }
 
     fn draw_log(&self, c: &mut Canvas) {
-        let (w, h) = (self.w, self.h);
+        let (w, h) = (c.w as i32, c.h as i32);
         c.fill_rect_alpha(0, 0, w, h, rgb(10, 12, 16), 235);
         c.text(24, 16, "Solon diagnostics", Size::Medium, true, rgb(255, 255, 255));
         let lines = crate::serial::LOG.lock().lines();
@@ -1364,13 +1460,42 @@ impl Desktop {
         }
     }
 
+    /// The wallpaper for every screen in one canvas-sized picture (black where no screen is);
+    /// the clock's colours are the main screen's.
+    fn make_layout_wallpaper(&mut self, bg: usize, w: i32, h: i32) -> Wall {
+        let mut px = alloc::vec![0u32; (w.max(0) * h.max(0)) as usize];
+        let (mut ink, mut hint) = ((INK, false), (INK, false));
+        let screens = self.screens.clone();
+        let mut old = core::mem::take(&mut self.screen_walls);
+        for (k, s) in screens.iter().enumerate() {
+            let clock = k == self.main;
+            // (A wall made for the other role does if nothing was shaded behind a clock.)
+            let wall = match old.iter().position(|o| (o.bg, o.w, o.h) == (bg, s.w, s.h) && (o.clock == clock || !o.ink.1)) {
+                Some(i) => old.swap_remove(i),
+                None => self.make_wallpaper(bg, s.w, s.h, clock),
+            };
+            if clock {
+                (ink, hint) = (wall.ink, wall.hint);
+            }
+            let n = (s.w.min(w - s.x).max(0)) as usize;
+            for y in 0..s.h.min(h - s.y).max(0) {
+                let (src, dst) = ((y * s.w) as usize, ((s.y + y) * w + s.x) as usize);
+                px[dst..dst + n].copy_from_slice(&wall.px[src..src + n]);
+            }
+            self.screen_walls.push(wall);
+        }
+        // Keep a couple more (a screen just switched to mirroring or off) in case it comes back.
+        self.screen_walls.extend(old.into_iter().filter(|o| o.bg == bg).take(2));
+        Wall { bg, w, h, clock: true, px, ink, hint }
+    }
+
     /// The wallpaper for background `bg` at w x h, and the text colours that suit it.
-    fn make_wallpaper(&mut self, bg: usize, w: i32, h: i32) -> Wall {
+    fn make_wallpaper(&mut self, bg: usize, w: i32, h: i32, clock: bool) -> Wall {
         use crate::wallpaper::{CUSTOM, FIRST_PHOTO, PHOTOS};
         let (wu, hu) = (w as usize, h as usize);
         if bg < FIRST_PHOTO {
             let ink = crate::wallpaper::ink(bg);
-            return Wall { bg, w, h, px: crate::wallpaper::make(bg, wu, hu), ink: (ink, false), hint: (ink, false) };
+            return Wall { bg, w, h, clock, px: crate::wallpaper::make(bg, wu, hu), ink: (ink, false), hint: (ink, false) };
         }
         let img = if bg == CUSTOM { self.custom_image() } else { None };
         let img = img.or_else(|| crate::image::decode(PHOTOS[if bg < CUSTOM { bg - FIRST_PHOTO } else { 0 }].1).ok());
@@ -1382,13 +1507,13 @@ impl Desktop {
         let top = h / 5 + big;
         let mut px = px;
         let ink = crate::wallpaper::ink_for(&px, wu, hu, (w / 4, top - big, w / 2, big + big / 2 + 40));
-        if ink.1 {
+        if ink.1 && clock {
             // White clock: darken softly behind it so it reads on any photo.
             crate::wallpaper::soft_shade(&mut px, wu, hu, w / 2, top - big / 4, w / 3, big * 3 / 2, 90);
         }
         let hint = crate::wallpaper::ink_for(&px, wu, hu, (w / 4, h - BAR_H - 52, w / 2, 28));
         kprintln!("solon: wallpaper {} at {}x{}", crate::wallpaper::name(bg), w, h);
-        Wall { bg, w, h, px, ink, hint }
+        Wall { bg, w, h, clock, px, ink, hint }
     }
 
     /// The user's own desktop picture, decoded (read from Solon storage the first time).
@@ -1431,6 +1556,7 @@ impl Desktop {
         self.custom_wallpaper = Some(bytes);
         self.custom_checked = true;
         self.wallpaper = None;
+        self.screen_walls.clear();
         let mut s = self.settings;
         s.background = crate::wallpaper::CUSTOM;
         self.apply_settings(s);
@@ -1471,14 +1597,15 @@ impl Desktop {
             return None;
         }
         let msg = crate::backup::reminder(self.backup.last.as_ref(), self.date)?;
-        let (w, h) = (self.w, self.h);
+        let main = self.main_screen();
+        let (w, h) = (main.w, main.h);
         let big = (h / 9).clamp(56, 120);
         let top = h / 5 + big;
         let dpx = (big / 4).max(18);
         let (y, m, d) = self.date;
         let n = crate::calendar::today_lines(&self.calendar.events, y, m, d, &self.settings).len().min(4) as i32;
         let lw = text_width(&msg, Size::Small, true) + 54;
-        Some((msg, Rect::new(w / 2 - lw / 2, top + dpx * 2 + 24 + n * 40 + 8, lw, 34)))
+        Some((msg, Rect::new(main.x + w / 2 - lw / 2, main.y + top + dpx * 2 + 24 + n * 40 + 8, lw, 34)))
     }
 
     fn step_copy(&mut self, now: u64) -> bool {
@@ -1690,8 +1817,9 @@ impl Desktop {
     // ---- "install on this computer" notice ------------------------------------------------
 
     fn notice_box(&self) -> Rect {
-        let w = 600.min(self.w - 40);
-        Rect::new((self.w - w) / 2, (self.h - 230) / 2, w, 230)
+        let m = self.main_screen();
+        let w = 600.min(m.w - 40);
+        Rect::new(m.x + (m.w - w) / 2, m.y + (m.h - 230) / 2, w, 230)
     }
     fn notice_open(&self) -> Rect {
         let b = self.notice_box();
@@ -1733,14 +1861,16 @@ impl Desktop {
 
     fn trial_buttons(&self) -> (Rect, Rect) {
         let (w, h) = (460, 190);
-        let (x, y) = ((self.w - w) / 2, (self.h - BAR_H - h) / 2);
+        let m = self.main_screen();
+        let (x, y) = (m.x + (m.w - w) / 2, m.y + (m.h - BAR_H - h) / 2);
         (Rect::new(x + w - 300, y + h - 58, 140, 40), Rect::new(x + w - 150, y + h - 58, 130, 40))
     }
 
     fn draw_display_trial(&self, c: &mut Canvas) {
         let Some((_, end)) = self.display_trial else { return };
         let (w, h) = (460, 190);
-        let (x, y) = ((self.w - w) / 2, (self.h - BAR_H - h) / 2);
+        let m = self.main_screen();
+        let (x, y) = (m.x + (m.w - w) / 2, m.y + (m.h - BAR_H - h) / 2);
         c.fill_rect_alpha(0, 0, self.w, self.h, 0, 120);
         c.round_rect(x, y, w, h, 14, rgb(250, 250, 252));
         c.text(x + 24, y + 22, "Keep this resolution?", Size::Medium, true, rgb(40, 44, 52));
@@ -1790,7 +1920,7 @@ impl Desktop {
 
     /// The area above the taskbar.
     fn work(&self) -> Rect {
-        Rect::new(0, 0, self.w, self.h - BAR_H)
+        self.work_on(self.main_screen())
     }
 
     // ---- the desktop's right-click menu ------------------------------------------------
@@ -1798,7 +1928,7 @@ impl Desktop {
     /// Its items: label, and the Settings page it opens (with the background chooser).
     const DESK_MENU: [(&'static str, Page, bool); 7] = [
         ("Change background", Page::Appearance, true),
-        ("Display and resolution", Page::Display, false),
+        ("Screens and resolution", Page::Display, false),
         ("Screensaver", Page::Display, false),
         ("Date and time", Page::DateTime, false),
         ("Text and icon size", Page::Appearance, false),
@@ -1809,8 +1939,8 @@ impl Desktop {
     fn desk_menu_box(&self) -> Option<Rect> {
         let (x, y, _) = self.desk_menu?;
         let (w, h) = (250, Self::DESK_MENU.len() as i32 * 38 + 12 + 9);
-        let work = self.work();
-        Some(Rect::new(x.min(work.w - w - 4).max(4), y.min(work.h - h - 4).max(4), w, h))
+        let work = self.work_on(self.screen_at(x, y));
+        Some(Rect::new(x.min(work.x + work.w - w - 4).max(work.x + 4), y.min(work.y + work.h - h - 4).max(work.y + 4), w, h))
     }
 
     fn desk_menu_item(&self, i: usize) -> Rect {
@@ -1844,7 +1974,7 @@ impl Desktop {
     fn handoff_box(&self) -> Rect {
         let (w, h) = (440, 172);
         let work = self.work();
-        Rect::new(work.w - w - 20, work.h - h - 16, w, h)
+        Rect::new(work.x + work.w - w - 20, work.y + work.h - h - 16, w, h)
     }
     /// The "Not now" and "Open" buttons.
     fn handoff_buttons(&self) -> (Rect, Rect) {
@@ -1939,8 +2069,9 @@ impl Desktop {
     }
 
     fn set_maximized(&mut self, app: App, max: bool) {
-        let work = self.work();
         let Some(i) = self.index_of(app) else { return };
+        let r = self.windows[i].rect();
+        let work = self.work_on(self.screen_at(r.x + r.w / 2, r.y + TITLE_H / 2));
         let w = &mut self.windows[i];
         match (max, w.restore) {
             (true, None) => {
@@ -1957,16 +2088,18 @@ impl Desktop {
 
     /// Keep windows on screen after the desktop size changes.
     fn fit_windows(&mut self) {
-        let work = self.work();
-        for w in &mut self.windows {
+        for i in 0..self.windows.len() {
+            let r = self.windows[i].rect();
+            let work = self.work_on(self.screen_at(r.x + r.w / 2, r.y + TITLE_H / 2));
+            let w = &mut self.windows[i];
             if w.restore.is_some() {
                 (w.x, w.y, w.w, w.h) = (work.x, work.y, work.w, work.h);
                 continue;
             }
             w.w = w.w.min(work.w);
             w.h = w.h.min(work.h);
-            w.x = w.x.clamp(0, (work.w - w.w).max(0));
-            w.y = w.y.clamp(0, (work.h - w.h).max(0));
+            w.x = w.x.clamp(work.x, work.x + (work.w - w.w).max(0));
+            w.y = w.y.clamp(work.y, work.y + (work.h - w.h).max(0));
         }
     }
 
@@ -1985,8 +2118,8 @@ impl Desktop {
         } else {
             ((work.w * 82 / 100).clamp(560.min(work.w), work.w), (work.h * 86 / 100).clamp(360.min(work.h), work.h))
         };
-        let x = ((work.w - w) / 2 + (n % 6) * 28 - 70).clamp(0, (work.w - w).max(0));
-        let y = ((work.h - h) / 2 + (n % 6) * 28 - 50).clamp(0, (work.h - h).max(0));
+        let x = work.x + ((work.w - w) / 2 + (n % 6) * 28 - 70).clamp(0, (work.w - w).max(0));
+        let y = work.y + ((work.h - h) / 2 + (n % 6) * 28 - 50).clamp(0, (work.h - h).max(0));
         self.windows.push(Window { app, x, y, w, h, minimized: false, restore: None });
         self.order.push(app);
         // The editors want all the room they can get.
@@ -2098,9 +2231,10 @@ impl Desktop {
         let n = items.len() as i32;
         let clock_w = self.dock_clock_w();
         let fixed = 12 + 17 + clock_w + 10 + 40 + 10;
-        let step = (DOCK_ICON + DOCK_GAP).min((self.w - 24 - fixed) / n.max(1)).max(24);
+        let m = self.main_screen();
+        let step = (DOCK_ICON + DOCK_GAP).min((m.w - 24 - fixed) / n.max(1)).max(24);
         let width = 12 + n * step - DOCK_GAP + fixed;
-        let dock = Rect::new((self.w - width) / 2, self.h - DOCK_H - (BAR_H - DOCK_H) / 2, width, DOCK_H);
+        let dock = Rect::new(m.x + (m.w - width) / 2, m.y + m.h - DOCK_H - (BAR_H - DOCK_H) / 2, width, DOCK_H);
         let iy = dock.y + (DOCK_H - DOCK_ICON) / 2 - 1;
         let mut v: Vec<(DockItem, Rect)> = items.iter().enumerate().map(|(i, &it)| (it, Rect::new(dock.x + 12 + i as i32 * step, iy, DOCK_ICON, DOCK_ICON))).collect();
         v.push((DockItem::Power, Rect::new(dock.x + dock.w - 10 - 40, dock.y + (DOCK_H - 40) / 2, 40, 40)));
@@ -2118,12 +2252,13 @@ impl Desktop {
     fn power_item(&self, i: i32) -> Rect {
         let p = self.power_button();
         let (dock, _) = self.dock_layout();
-        Rect::new((p.x + p.w - 220).min(self.w - 236), dock.y - 12 - 3 * 46 + i * 46, 220, 42)
+        let m = self.main_screen();
+        Rect::new((p.x + p.w - 220).min(m.x + m.w - 236), dock.y - 12 - 3 * 46 + i * 46, 220, 42)
     }
 
     /// Columns in the Applications menu.
     fn menu_cols(&self) -> usize {
-        if self.w >= 5 * 124 + 48 { 5 } else { 4 }
+        if self.main_screen().w >= 5 * 124 + 48 { 5 } else { 4 }
     }
 
     /// What the Applications menu shows: the apps and folders, or a folder's apps.
@@ -2156,7 +2291,8 @@ impl Desktop {
         let rows = self.menu_entries().len().div_ceil(cols as usize) as i32;
         let (w, h) = (cols * 124 + 40, 66 + rows * 112 + 12);
         let (dock, _) = self.dock_layout();
-        Rect::new((self.w - w) / 2, dock.y - 14 - h, w, h)
+        let m = self.main_screen();
+        Rect::new(m.x + (m.w - w) / 2, dock.y - 14 - h, w, h)
     }
 
     fn menu_item(&self, i: usize) -> Rect {
@@ -2259,14 +2395,24 @@ impl Desktop {
             c.fill_rect(0, 0, w, h, 0);
             return;
         }
-        if let Some(ss) = &mut self.slideshow {
+        // Full-screen things go on the main screen; the others go dark meanwhile.
+        if let Some(mut ss) = self.slideshow.take() {
             ss.time = self.clock;
             ss.date = self.date;
-            ss.draw(c, &self.settings);
+            let settings = self.settings;
+            if self.screens.len() > 1 {
+                c.fill_rect(0, 0, w, h, 0);
+            }
+            self.on_main(c, |sub| ss.draw(sub, &settings));
+            self.slideshow = Some(ss);
             return;
         }
         if self.videos.fullscreen() {
-            self.videos.draw(c, Rect::new(0, 0, w, h));
+            if self.screens.len() > 1 {
+                c.fill_rect(0, 0, w, h, 0);
+            }
+            let main = self.main_screen();
+            self.videos.draw(c, main);
             return;
         }
 
@@ -2276,7 +2422,7 @@ impl Desktop {
         // Wallpaper (drawn once), with a big clock.
         let bg = self.settings.background;
         if !matches!(&self.wallpaper, Some(wp) if wp.bg == bg && wp.w == w && wp.h == h) {
-            self.wallpaper = Some(self.make_wallpaper(bg, w, h));
+            self.wallpaper = Some(self.make_layout_wallpaper(bg, w, h));
         }
         let (ink, shadow, hint_ink) = self.wallpaper.as_ref().map_or((INK, false, INK), |wp| (wp.ink.0, wp.ink.1, wp.hint.0));
         if let Some(Wall { px, .. }) = &self.wallpaper {
@@ -2284,25 +2430,28 @@ impl Desktop {
                 c.px.copy_from_slice(px);
             }
         }
-        let maximized = self.windows.iter().any(|w| !w.minimized && w.restore.is_some());
+        // The clock, events and hints, on the main screen (unless a window fills it).
+        let main = self.main_screen();
+        let maximized = self.windows.iter().any(|w| !w.minimized && w.restore.is_some() && main.contains(w.x + w.w / 2, w.y + TITLE_H / 2));
         if !maximized {
             use crate::font::{width, Face};
+            let (mx, mw, mh) = (main.x, main.w, main.h);
             let clock = self.settings.clock_text(self.clock.0, self.clock.1);
-            let big = (h / 9).clamp(56, 120) as u16;
-            let top = h / 5 + big as i32;
-            c.text_face((w / 2 - width(&clock, Face::Sans, big) / 2) * 64, top, &clock, Face::Sans, big, ink);
+            let big = (mh / 9).clamp(56, 120) as u16;
+            let top = main.y + mh / 5 + big as i32;
+            c.text_face((mx + mw / 2 - width(&clock, Face::Sans, big) / 2) * 64, top, &clock, Face::Sans, big, ink);
             let date = settings::long_date_text(self.date.0, self.date.1, self.date.2);
             let dpx = (big / 4).max(18);
-            c.text_face((w / 2 - width(&date, Face::Sans, dpx) / 2) * 64, top + dpx as i32 * 2, &date, Face::Sans, dpx, ink);
+            c.text_face((mx + mw / 2 - width(&date, Face::Sans, dpx) / 2) * 64, top + dpx as i32 * 2, &date, Face::Sans, dpx, ink);
             // Today's holiday and events, from the Calendar.
             let (y, m, d) = self.date;
             let lines = crate::calendar::today_lines(&self.calendar.events, y, m, d, &self.settings);
             let mut ly = top + dpx as i32 * 2 + 24;
             for l in lines.iter().take(4) {
-                let l = crate::photos::ellipsize(l, w - 80, Size::Medium, false);
+                let l = crate::photos::ellipsize(l, mw - 80, Size::Medium, false);
                 let lw = text_width(&l, Size::Medium, false) + 36;
-                c.round_rect_alpha(w / 2 - lw / 2, ly, lw, 32, 16, 0xFF_FFFF, 150);
-                c.text_centered(w / 2, ly + 6, &l, Size::Medium, false, if shadow { rgb(30, 34, 42) } else { ink });
+                c.round_rect_alpha(mx + mw / 2 - lw / 2, ly, lw, 32, 16, 0xFF_FFFF, 150);
+                c.text_centered(mx + mw / 2, ly + 6, &l, Size::Medium, false, if shadow { rgb(30, 34, 42) } else { ink });
                 ly += 40;
             }
             if let Some((msg, b)) = self.backup_nudge() {
@@ -2312,10 +2461,11 @@ impl Desktop {
             }
             if self.windows.is_empty() {
                 let hint = "Click the blue button at the bottom to see all your apps";
+                let hy = main.y + mh - BAR_H;
                 if hint_ink == rgb(255, 255, 255) {
-                    c.text_centered(w / 2 + 1, h - BAR_H - 47, hint, Size::Small, false, rgb(0, 0, 0));
+                    c.text_centered(mx + mw / 2 + 1, hy - 47, hint, Size::Small, false, rgb(0, 0, 0));
                 }
-                c.text_centered(w / 2, h - BAR_H - 48, hint, Size::Small, false, hint_ink);
+                c.text_centered(mx + mw / 2, hy - 48, hint, Size::Small, false, hint_ink);
             }
         }
 
@@ -2368,10 +2518,11 @@ impl Desktop {
         self.draw_dock(c);
         if let Some((msg, _)) = &self.toast {
             let tw = text_width(msg, Size::Small, true) + 40;
-            let y = h - BAR_H - 46;
-            c.shadow(w / 2 - tw / 2, y + 3, tw, 34, 17, 12, 70);
-            c.round_rect(w / 2 - tw / 2, y, tw, 34, 17, rgb(36, 40, 50));
-            c.text_centered(w / 2, y + 9, msg, Size::Small, true, rgb(255, 255, 255));
+            let m = self.main_screen();
+            let (y, cx) = (m.y + m.h - BAR_H - 46, m.x + m.w / 2);
+            c.shadow(cx - tw / 2, y + 3, tw, 34, 17, 12, 70);
+            c.round_rect(cx - tw / 2, y, tw, 34, 17, rgb(36, 40, 50));
+            c.text_centered(cx, y + 9, msg, Size::Small, true, rgb(255, 255, 255));
         }
         self.draw_handoff(c);
         self.draw_apps_menu(c);
@@ -2382,7 +2533,7 @@ impl Desktop {
         self.draw_display_trial(c);
         self.draw_power(c);
         if self.show_log {
-            self.draw_log(c);
+            self.on_main(c, |sub| self.draw_log(sub));
         }
     }
 
@@ -2632,7 +2783,7 @@ impl Desktop {
             self.last_input = now;
         }
         if self.videos.fullscreen() && !self.screen_off {
-            let full = Rect::new(0, 0, self.w, self.h);
+            let full = self.main_screen();
             let released = buttons & 1 == 0 && prev & 1 != 0;
             let mut redraw = moved && self.videos.on_move();
             if wheel != 0 {
@@ -2671,7 +2822,7 @@ impl Desktop {
         let rpressed = buttons & 2 != 0 && prev & 2 == 0;
         if rpressed && self.apps_menu.is_none() && !self.power_menu && !self.install_notice {
             let on_window = self.windows.iter().any(|w| !w.minimized && w.rect().contains(x, y));
-            if !on_window && self.work().contains(x, y) {
+            if !on_window && self.work_on(self.screen_at(x, y)).contains(x, y) {
                 self.desk_menu = Some((x, y, None));
                 return true;
             }
@@ -2764,11 +2915,14 @@ impl Desktop {
                 self.drag = None;
                 return redraw;
             }
-            let work = self.work();
+            // Anywhere on the desktop, the title bar on the screen under the pointer (above
+            // the taskbar on the main one).
+            let work = self.work_on(self.screen_at(x, y));
+            let full_w = self.w;
             if let Some(i) = self.index_of(app) {
                 let win = &mut self.windows[i];
-                win.x = (x - ox).clamp(-win.w + 120, work.w - 120);
-                win.y = (y - oy).clamp(0, work.h - TITLE_H);
+                win.x = (x - ox).clamp(-win.w + 120, full_w - 120);
+                win.y = (y - oy).clamp(work.y, work.y + work.h - TITLE_H);
                 return true;
             }
         }
@@ -2835,7 +2989,8 @@ impl Desktop {
             self.folder = None;
             return true;
         }
-        if y >= self.h - BAR_H {
+        let main = self.main_screen();
+        if main.contains(x, y) && y >= main.y + main.h - BAR_H {
             let (_, items) = self.dock_layout();
             match items.into_iter().find(|(_, b)| b.contains(x, y)).map(|(it, _)| it) {
                 Some(DockItem::Entry(MenuEntry::App(app))) => {
@@ -2959,7 +3114,7 @@ impl Desktop {
             return true;
         }
         if self.show_log {
-            let page = ((self.h - 90) / 18).max(1) as usize;
+            let page = ((self.main_screen().h - 90) / 18).max(1) as usize;
             match sc {
                 0x01 => self.show_log = false,
                 0x48 => self.log_scroll += 1,

@@ -166,6 +166,17 @@ pub fn screens() -> usize {
     SCREENS.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// The second monitor the desktop is shown on, once there is one: its name and resolution.
+static SECOND: Mutex<Option<(String, (u32, u32))>> = Mutex::new(None);
+
+pub fn set_second(name: String, res: (u32, u32)) {
+    *SECOND.lock() = Some((name, res));
+}
+
+pub fn second() -> Option<(String, (u32, u32))> {
+    SECOND.lock().clone()
+}
+
 pub fn init(modes: &[(u32, u32, u16)], current: (u32, u32), edid: Option<&[u8]>) {
     let mut m: Vec<(u32, u32)> = modes.iter().filter(|x| x.2 == 32 && x.0 >= 640 && x.1 >= 480).map(|x| (x.0, x.1)).collect();
     m.push(current);

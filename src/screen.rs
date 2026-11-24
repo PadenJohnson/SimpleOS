@@ -16,11 +16,28 @@ pub struct Rgb(pub u8, pub u8, pub u8);
 
 /// What was sent last: how it was laid out, and the desktop picture itself.
 struct Last {
-    w: usize,
-    h: usize,
+    part: (usize, usize, usize, usize),
     scale: u32,
     dst: (usize, usize, usize, usize),
     px: Vec<u32>,
+}
+
+/// A rectangle of a canvas: what one screen shows of the desktop.
+#[derive(Clone, Copy)]
+struct Src<'a> {
+    px: &'a [u32],
+    stride: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+}
+
+impl<'a> Src<'a> {
+    fn row(&self, y: usize) -> &'a [u32] {
+        let o = (self.y + y) * self.stride + self.x;
+        &self.px[o..o + self.w]
+    }
 }
 
 pub struct Screen {
@@ -199,21 +216,33 @@ impl Screen {
     /// screen at a whole/half text scale, otherwise smoothly scaled. Only what changed since
     /// the last time is sent.
     pub fn present(&self, c: &crate::gfx::Canvas, scale: u32, dst: (usize, usize, usize, usize)) {
+        self.present_part(c, (0, 0, c.w, c.h), scale, dst);
+    }
+
+    /// Put part of the canvas (x, y, w, h: this screen's share of an extended desktop) on
+    /// the screen in `dst`, as `present` does with all of it.
+    pub fn present_part(&self, c: &crate::gfx::Canvas, part: (usize, usize, usize, usize), scale: u32, dst: (usize, usize, usize, usize)) {
+        let (px_, py_) = (part.0.min(c.w), part.1.min(c.h));
+        let part = (px_, py_, part.2.min(c.w - px_), part.3.min(c.h - py_));
+        if part.2 == 0 || part.3 == 0 {
+            return;
+        }
+        let src = Src { px: &c.px, stride: c.w, x: part.0, y: part.1, w: part.2, h: part.3 };
         self.full.set(self.full.get() + (dst.2 * dst.3) as u64);
-        let direct = dst == (0, 0, self.width, self.height) && c.w * scale as usize / 2 == self.width && c.h * scale as usize / 2 == self.height;
-        // Which rows changed, and where in them (in the canvas).
+        let direct = dst == (0, 0, self.width, self.height) && src.w * scale as usize / 2 == self.width && src.h * scale as usize / 2 == self.height;
+        // Which rows changed, and where in them (in the part).
         let mut last = self.last.borrow_mut();
-        let same_layout = last.as_ref().is_some_and(|l| l.w == c.w && l.h == c.h && l.scale == scale && l.dst == dst);
+        let same_layout = last.as_ref().is_some_and(|l| l.part == part && l.scale == scale && l.dst == dst);
         let mut rows: Vec<(usize, usize, usize)> = Vec::new();
         if same_layout {
             let l = last.as_mut().unwrap();
-            for y in 0..c.h {
-                let (a, b) = (&c.px[y * c.w..(y + 1) * c.w], &mut l.px[y * c.w..(y + 1) * c.w]);
+            for y in 0..src.h {
+                let (a, b) = (src.row(y), &mut l.px[y * src.w..(y + 1) * src.w]);
                 if a == b {
                     continue;
                 }
                 let x0 = a.iter().zip(b.iter()).position(|(p, q)| p != q).unwrap_or(0);
-                let x1 = c.w - a.iter().rev().zip(b.iter().rev()).position(|(p, q)| p != q).unwrap_or(0);
+                let x1 = src.w - a.iter().rev().zip(b.iter().rev()).position(|(p, q)| p != q).unwrap_or(0);
                 b[x0..x1].copy_from_slice(&a[x0..x1]);
                 rows.push((y, x0, x1));
             }
@@ -221,14 +250,18 @@ impl Screen {
                 return;
             }
         } else {
-            *last = Some(Last { w: c.w, h: c.h, scale, dst, px: c.px.clone() });
-            rows = (0..c.h).map(|y| (y, 0, c.w)).collect();
+            let mut px = Vec::with_capacity(src.w * src.h);
+            for y in 0..src.h {
+                px.extend_from_slice(src.row(y));
+            }
+            *last = Some(Last { part, scale, dst, px });
+            rows = (0..src.h).map(|y| (y, 0, src.w)).collect();
         }
         drop(last);
         if direct && scale <= 2 {
             // Same size: just the changed part of each changed row.
             for &(y, x0, x1) in &rows {
-                self.write_row(y, x0, &c.px[y * c.w + x0..y * c.w + x1]);
+                self.write_row(y, x0, &src.row(y)[x0..x1]);
             }
             return;
         }
@@ -247,16 +280,16 @@ impl Screen {
         }
         for b in bands {
             if direct {
-                self.blit_scaled_area(c, scale, b);
+                self.blit_scaled_area(src, scale, b);
             } else {
-                self.blit_fit_area(c, dst, b);
+                self.blit_fit_area(src, dst, b);
             }
         }
     }
 
     /// Enlarge part of a canvas (`a`, in canvas pixels) by `scale` halves (3 = 1.5x, 4 = 2x)
     /// with nearest-neighbour sampling.
-    fn blit_scaled_area(&self, c: &crate::gfx::Canvas, scale: u32, a: Area) {
+    fn blit_scaled_area(&self, c: Src, scale: u32, a: Area) {
         let s = scale as usize;
         // Screen columns and rows whose source falls in the area.
         let ox0 = a.x0 * s / 2;
@@ -272,7 +305,7 @@ impl Screen {
         for row in oy0..oy1 {
             let sy = (row * 2 / s).min(c.h - 1);
             if sy != last_src {
-                let src = &c.px[sy * c.w..(sy + 1) * c.w];
+                let src = c.row(sy);
                 for (d, &sx) in line.iter_mut().zip(&xmap) {
                     *d = src[sx];
                 }
@@ -284,7 +317,7 @@ impl Screen {
 
     /// Scale part of a canvas (`a`) into its place in `dst` with bilinear filtering (what a
     /// monitor does with a resolution that isn't its own). Bands of rows go to all the cores.
-    fn blit_fit_area(&self, c: &crate::gfx::Canvas, dst: (usize, usize, usize, usize), a: Area) {
+    fn blit_fit_area(&self, c: Src, dst: (usize, usize, usize, usize), a: Area) {
         let (dx, dy, dw, dh) = dst;
         let (dw, dh) = (dw.min(self.width.saturating_sub(dx)), dh.min(self.height.saturating_sub(dy)));
         if dw == 0 || dh == 0 || c.w == 0 || c.h == 0 {
@@ -310,12 +343,11 @@ impl Screen {
         // Bands of at least 32 rows, about two per core.
         let bands = (crate::smp::threads() * 2).min(rows.div_ceil(32)).max(1);
         let per = rows.div_ceil(bands);
-        let (xmap, src) = (&xmap, &c.px);
-        let (cw, ch) = (c.w, c.h);
+        let xmap = &xmap;
         crate::smp::run(bands, &|b| {
             let (r0, r1) = (oy0 + b * per, (oy0 + (b + 1) * per).min(oy1));
             if r0 < r1 {
-                fit_rows(src, cw, ch, dh, xmap, r0, r1, |row, line| out.write(dy + row, dx + ox0, line));
+                fit_rows(c, dh, xmap, r0, r1, |row, line| out.write(dy + row, dx + ox0, line));
                 // Write-combined memory: send this core's last writes on now, not whenever it
                 // next writes.
                 unsafe { core::arch::x86_64::_mm_sfence() };
@@ -355,17 +387,17 @@ impl Rows {
     }
 }
 
-/// Output rows `r0..r1` of a bilinear scale of a `cw` x `ch` picture to height `dh`, the
-/// columns given by `xmap` (source index and weight of the next pixel); each finished row
-/// goes to `emit`.
-fn fit_rows(src: &[u32], cw: usize, ch: usize, dh: usize, xmap: &[(usize, u32)], r0: usize, r1: usize, mut emit: impl FnMut(usize, &[u32])) {
+/// Output rows `r0..r1` of a bilinear scale of a picture to height `dh`, the columns given by
+/// `xmap` (source index and weight of the next pixel); each finished row goes to `emit`.
+fn fit_rows(src: Src, dh: usize, xmap: &[(usize, u32)], r0: usize, r1: usize, mut emit: impl FnMut(usize, &[u32])) {
+    let (cw, ch) = (src.w, src.h);
     let lerp = |a: u32, b: u32, w: u32| -> u32 {
         let rb = ((a & 0xFF00FF) * (256 - w) + (b & 0xFF00FF) * w) >> 8;
         let g = ((a & 0x00FF00) * (256 - w) + (b & 0x00FF00) * w) >> 8;
         (rb & 0xFF00FF) | (g & 0x00FF00)
     };
     let hrow = |sy: usize, out: &mut [u32]| {
-        let row = &src[sy * cw..(sy + 1) * cw];
+        let row = src.row(sy);
         for (o, &(i, w)) in out.iter_mut().zip(xmap) {
             *o = if w == 0 || i + 1 >= cw { row[i] } else { lerp(row[i], row[i + 1], w) };
         }

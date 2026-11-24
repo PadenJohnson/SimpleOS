@@ -27,6 +27,14 @@ pub const SAVER_WAIT: [(&str, u64); 6] = [("1 minute", 1), ("5 minutes", 5), ("1
 /// Seconds each photo stays on screen.
 pub const SLIDE_TIME: [(&str, u64); 5] = [("5 seconds", 5), ("10 seconds", 10), ("20 seconds", 20), ("30 seconds", 30), ("1 minute", 60)];
 
+/// How two screens are used: one desktop across both, the same on both, or only the main one.
+pub const SCREENS: [&str; 3] = ["Extend", "Mirror", "Main screen only"];
+/// Where the second screen is, next to the first (the one the PC starts on).
+pub const SIDES: [&str; 4] = ["Left", "Right", "Above", "Below"];
+/// How the two line up where they meet: side by side, or one above the other.
+pub const ALIGNS_SIDE: [&str; 3] = ["Tops", "Middles", "Bottoms"];
+pub const ALIGNS_STACKED: [&str; 3] = ["Left edges", "Middles", "Right edges"];
+
 /// The desktop needs at least this many (scaled) pixels for every window to fit.
 pub const MIN_W: usize = 1000;
 pub const MIN_H: usize = 620;
@@ -50,12 +58,37 @@ pub struct Settings {
     pub spelling: usize,
     /// The resolution the desktop is shown at; (0, 0) = the mode the screen started in.
     pub resolution: (u32, u32),
+    /// Two screens: how they're used (SCREENS), which is the main one (0: the screen the PC
+    /// starts on, 1: the second), where the second is next to the first (SIDES, as they stand
+    /// on the desk, whichever is the main one) and how they line up (0: tops or left edges,
+    /// 1: middles, 2: bottoms or right edges).
+    pub screens: usize,
+    pub main_screen: usize,
+    pub side: usize,
+    pub align: usize,
 }
 
 impl Settings {
     /// First-boot defaults: bigger text on very high-resolution screens.
     pub fn defaults(screen_w: usize, screen_h: usize) -> Settings {
-        let mut s = Settings { background: crate::wallpaper::DEFAULT, size: 0, clock24: false, show_date: true, mouse: 1, install_notice: false, saver: 0, saver_wait: 1, slide_time: 1, shuffle: true, spelling: 0, resolution: (0, 0) };
+        let mut s = Settings {
+            background: crate::wallpaper::DEFAULT,
+            size: 0,
+            clock24: false,
+            show_date: true,
+            mouse: 1,
+            install_notice: false,
+            saver: 0,
+            saver_wait: 1,
+            slide_time: 1,
+            shuffle: true,
+            spelling: 0,
+            resolution: (0, 0),
+            screens: 0,
+            main_screen: 0,
+            side: 1,
+            align: 1,
+        };
         for i in (0..SIZES.len()).rev() {
             if screen_w >= 2400 && s.size_fits(i, screen_w, screen_h) {
                 s.size = i;
@@ -75,10 +108,32 @@ impl Settings {
         screen_w * 2 / s >= MIN_W && screen_h * 2 / s >= MIN_H
     }
 
+    /// An extended desktop: the second screen next to the first as `side` and `align` say.
+    /// Returns the desktop's size and each screen's place in it (x, y, w, h), for screens of
+    /// `one` and `two` pixels.
+    pub fn arrange(&self, one: (usize, usize), two: (usize, usize)) -> ((usize, usize), [(usize, usize, usize, usize); 2]) {
+        let (w1, h1, w2, h2) = (one.0 as i64, one.1 as i64, two.0 as i64, two.1 as i64);
+        let line = |len1: i64, len2: i64| match self.align {
+            0 => 0,
+            2 => len1 - len2,
+            _ => (len1 - len2) / 2,
+        };
+        let (x2, y2) = match self.side {
+            0 => (-w2, line(h1, h2)),
+            2 => (line(w1, w2), -h2),
+            3 => (line(w1, w2), h1),
+            _ => (w1, line(h1, h2)),
+        };
+        let (x0, y0) = (x2.min(0), y2.min(0));
+        let size = ((w1.max(x2 + w2) - x0) as usize, (h1.max(y2 + h2) - y0) as usize);
+        (size, [((-x0) as usize, (-y0) as usize, one.0, one.1), ((x2 - x0) as usize, (y2 - y0) as usize, two.0, two.1)])
+    }
+
     pub fn to_text(&self) -> String {
         format!(
-            "background={}\nsize={}\nclock24={}\nshow_date={}\nmouse={}\ninstall_notice={}\nsaver={}\nsaver_wait={}\nslide_time={}\nshuffle={}\nspelling={}\nresolution={}x{}\n",
-            self.background, self.size, self.clock24 as u8, self.show_date as u8, self.mouse, self.install_notice as u8, self.saver, self.saver_wait, self.slide_time, self.shuffle as u8, self.spelling, self.resolution.0, self.resolution.1
+            "background={}\nsize={}\nclock24={}\nshow_date={}\nmouse={}\ninstall_notice={}\nsaver={}\nsaver_wait={}\nslide_time={}\nshuffle={}\nspelling={}\nresolution={}x{}\nscreens={}\nmain_screen={}\nside={}\nalign={}\n",
+            self.background, self.size, self.clock24 as u8, self.show_date as u8, self.mouse, self.install_notice as u8, self.saver, self.saver_wait, self.slide_time, self.shuffle as u8, self.spelling, self.resolution.0, self.resolution.1,
+            self.screens, self.main_screen, self.side, self.align
         )
     }
 
@@ -106,6 +161,10 @@ impl Settings {
                 "slide_time" if n < SLIDE_TIME.len() => s.slide_time = n,
                 "shuffle" if n <= 1 => s.shuffle = n == 1,
                 "spelling" if n < crate::spell::CHOICES.len() => s.spelling = n,
+                "screens" if n < SCREENS.len() => s.screens = n,
+                "main_screen" if n <= 1 => s.main_screen = n,
+                "side" if n < SIDES.len() => s.side = n,
+                "align" if n < ALIGNS_SIDE.len() => s.align = n,
                 _ => {}
             }
         }
