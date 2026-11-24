@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build the kernel, assemble a UEFI boot folder, and run it in QEMU.
+# Run Solon in a QEMU window (Linux, macOS, Raspberry Pi): build the kernel, assemble a UEFI
+# boot folder with the sample photos, and start it.
 set -euo pipefail
 cd "$(dirname "$0")"
 
