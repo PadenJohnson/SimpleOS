@@ -20,7 +20,8 @@
 #                       "wheel:down", "hold:w,1500", "wait:500" (ms), "shot:name" (test-out/name.png),
 #                       "plug:<id>", "unplug:<id>"
 #   --photos DIR...     photo folders to put on the boot drive (default: ./samples)
-#   --usb U...          USB devices: "kbd", "mouse", "disk:<image>" (read-only check: a copy is used
+#   --usb U...          USB devices: "kbd", "mouse", "audio" (a USB sound device whose output is
+#                       saved to test-out/usb-sound.wav), "disk:<image>" (read-only check: a copy is used
 #                       and compared afterwards), "rwdisk:<image>" (used in place, writable),
 #                       "hot:<id>=<image>" (ready to plug in later with "plug:<id>")
 #   --internal D...     internal disks, used in place: "nvme:<image>", "sata:<image>"
@@ -189,6 +190,10 @@ if [ ${#usb[@]} -gt 0 ]; then
     case "$kind" in
       kbd) args+=(-device usb-kbd,bus=xhci.0) ;;
       mouse) args+=(-device usb-mouse,bus=xhci.0) ;;
+      audio)
+        # A USB sound device (Audio Class 1); what it plays lands in test-out/usb-sound.wav.
+        rm -f test-out/usb-sound.wav
+        args+=(-audiodev wav,id=usbsnd,path=test-out/usb-sound.wav -device usb-audio,bus=xhci.0,audiodev=usbsnd) ;;
       disk)
         # Writable copy: the firmware (OVMF) crashes on read-only USB disks at boot.
         # Comparing the copy afterwards proves Solon never wrote to the drive.
