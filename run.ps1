@@ -1,4 +1,5 @@
-# Build the kernel, assemble a UEFI boot folder, and run it in QEMU (native Windows).
+# Run Solon in a QEMU window (Windows): build the kernel, assemble a UEFI boot folder with the
+# sample photos, and start it.
 # Usage:  powershell -ExecutionPolicy Bypass -File .\run.ps1
 # Options: -Profile release | -Photos C:\my\pictures | -Qemu "C:\path\qemu-system-x86_64.exe" | -Bios "C:\path\OVMF.fd"
 param(
