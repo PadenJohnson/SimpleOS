@@ -33,7 +33,7 @@ summary of what it does.
 |---|---|
 | `ps2.rs`, `keys.rs`, `textfield.rs` | Keyboard and mouse, keys for the editors, one-line text boxes |
 | `hc.rs`, `xhci.rs`, `ehci.rs`, `usb.rs` | USB 3 and USB 2 controllers, devices, hubs, keyboards and mice |
-| `msc.rs`, `phone.rs`, `usbprint.rs` | USB drives, phones and cameras (MTP/PTP), printers |
+| `msc.rs`, `phone.rs`, `usbprint.rs`, `usbaudio.rs` | USB drives, phones and cameras (MTP/PTP), printers, sound devices |
 | `ahci.rs`, `nvme.rs`, `disk.rs`, `fs/` | SATA and NVMe disks, partition tables, FAT and exFAT |
 | `library.rs`, `install.rs`, `update.rs`, `backup.rs` | Solon storage, installing, updating from USB, backups |
 | `hda.rs` | Sound: HD Audio controllers, the computer's jacks and the monitors |

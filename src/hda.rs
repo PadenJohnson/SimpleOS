@@ -1,9 +1,10 @@
 //! Sound: Intel High Definition Audio controllers (every PC since about 2005) and their
 //! codecs: the motherboard's jacks (speakers, headphones, optical) and the monitors on an
-//! NVIDIA graphics card (DisplayPort sound, switched on by nvidia::audio). Plays 48 kHz 16-bit
-//! stereo through the output chosen in Settings > Sound, or automatically: a jack with
-//! something plugged in (headphones first), else built-in speakers, else a monitor's speakers,
-//! else every jack at once. Polled: the player tops the ring buffer up a few times a second.
+//! NVIDIA graphics card (DisplayPort sound, switched on by nvidia::audio). Also the front for
+//! USB sound devices (usbaudio.rs). Plays 48 kHz 16-bit stereo through the output chosen in
+//! Settings > Sound, or automatically: a USB sound device, else a jack with something plugged
+//! in (headphones first), else built-in speakers, else a monitor's speakers, else every jack at
+//! once. Polled: the player tops the ring buffer up a few times a second.
 //!
 //! Every controller found is set up. AMD and NVIDIA controllers only read the processor's
 //! latest writes when told to snoop (Linux hda_intel: AMD's PCI register 0x42, NVIDIA's
@@ -32,8 +33,9 @@ const FORMAT: u16 = 0x0011;
 pub const AUTO: u32 = 0;
 /// Every jack on the computer at once.
 pub const ALL_JACKS: u32 = 1;
-/// Keys of monitors' outputs have this bit.
+/// Keys of monitors' outputs have this bit, and USB sound devices' this one (with their id).
 const MONITOR: u32 = 1 << 31;
+const USB: u32 = 1 << 30;
 
 /// An output, as Settings shows it.
 #[derive(Clone)]
@@ -45,6 +47,8 @@ pub struct OutputInfo {
     /// Something plugged in (None: the jack can't tell, or it's a monitor).
     pub plugged: Option<bool>,
     pub monitor: bool,
+    /// A USB sound device.
+    pub usb: bool,
 }
 
 /// One analog or optical output of a codec: a jack or built-in speakers.
@@ -59,8 +63,10 @@ struct Out {
     path: Vec<(u32, Option<u32>)>,
     hp: bool,
     eapd: bool,
-    /// The jack tells whether something is plugged in.
+    /// The jack tells whether something is plugged in, and needs telling to look first
+    /// (pin capability "trigger required", as Linux's read_pin_sense does).
     detect: bool,
+    trigger: bool,
     /// Built into the computer (a laptop's or all-in-one's speakers).
     builtin: bool,
     /// An S/PDIF output (its converter needs "digital on").
@@ -110,8 +116,9 @@ struct Ctl {
 /// Every controller, and what plays where.
 pub struct Sound {
     ctls: Vec<Ctl>,
-    /// The controller playing.
+    /// The controller playing, or a USB sound device (usbaudio::STREAM).
     active: usize,
+    usb_out: bool,
     /// What Settings ask for, and what's set up now (a key, or ALL_JACKS).
     chosen: u32,
     using: Option<u32>,
@@ -431,6 +438,7 @@ impl Ctl {
                     hp: device == 2,
                     eapd: pincap & (1 << 16) != 0,
                     detect,
+                    trigger: pincap & (1 << 1) != 0,
                     builtin: connectivity == 2,
                     digital: device == 4,
                     rank,
@@ -488,9 +496,12 @@ impl Ctl {
 
     /// Something plugged into this jack (None: it can't tell).
     fn plugged(&mut self, o: usize) -> Option<bool> {
-        let (codec, pin, detect) = (self.outs[o].codec, self.outs[o].pin, self.outs[o].detect);
+        let (codec, pin, detect, trigger) = (self.outs[o].codec, self.outs[o].pin, self.outs[o].detect, self.outs[o].trigger);
         if !detect {
             return None;
+        }
+        if trigger {
+            self.cmd(codec, pin, 0x709 << 8); // look now
         }
         self.cmd(codec, pin, 0xF09 << 8).map(|v| v & 0x8000_0000 != 0)
     }
@@ -751,6 +762,11 @@ impl Sound {
         v
     }
 
+    /// The USB sound devices plugged in: (key, name, kind).
+    fn usb_devices(&self) -> Vec<(u32, String, &'static str)> {
+        crate::usbaudio::DEVICES.lock().iter().map(|(id, name, kind)| (USB | id, name.clone(), *kind)).collect()
+    }
+
     /// The jack with `key`: (controller, output).
     fn jack(&self, key: u32) -> Option<(usize, usize)> {
         self.ctls.iter().enumerate().find_map(|(ci, c)| c.outs.iter().position(|o| o.key == key).map(|oi| (ci, oi)))
@@ -765,10 +781,17 @@ impl Sound {
         if want & MONITOR != 0 && self.monitors().iter().any(|m| m.0 == want) {
             return Some(want);
         }
-        if want > ALL_JACKS && want & MONITOR == 0 && self.jack(want).is_some() {
+        if want & MONITOR == 0 && want & USB != 0 && self.usb_devices().iter().any(|d| d.0 == want) {
             return Some(want);
         }
-        // Automatic: a jack with something plugged in, headphones first.
+        if want > ALL_JACKS && want & (MONITOR | USB) == 0 && self.jack(want).is_some() {
+            return Some(want);
+        }
+        // Automatic: a USB sound device (plugged in to be used), then a jack with something
+        // plugged in, headphones first.
+        if let Some(d) = self.usb_devices().first() {
+            return Some(d.0);
+        }
         let mut best: Option<(u32, u32)> = None;
         for ci in 0..self.ctls.len() {
             for oi in 0..self.ctls[ci].outs.len() {
@@ -796,24 +819,83 @@ impl Sound {
         monitors.first().map(|m| m.0)
     }
 
+    /// What plays now: (running, frames played, frames written).
+    fn clock(&mut self) -> (bool, u64, u64) {
+        if self.usb_out {
+            let st = crate::usbaudio::STREAM.lock();
+            return (st.running, st.played, st.written);
+        }
+        match self.ctls.get_mut(self.active) {
+            Some(c) => {
+                c.update_played();
+                (c.running, c.played, c.written)
+            }
+            None => (false, 0, 0),
+        }
+    }
+
+    fn stop_out(&mut self) {
+        if self.usb_out {
+            crate::usbaudio::STREAM.lock().running = false;
+        } else if let Some(c) = self.ctls.get_mut(self.active) {
+            if c.running {
+                c.stop();
+            }
+        }
+    }
+
+    fn start_out(&mut self, played: u64, written: u64) {
+        if self.usb_out {
+            crate::usbaudio::STREAM.lock().start_at(played, written);
+        } else if let Some(c) = self.ctls.get_mut(self.active) {
+            c.start_at(played, written);
+        }
+    }
+
+    /// Queue frames at `at` (the next to be written) on whatever plays now.
+    fn put_out(&mut self, pcm: &[i16]) {
+        let vol = self.volume;
+        if self.usb_out {
+            crate::usbaudio::STREAM.lock().queue(pcm, vol);
+            return;
+        }
+        let Some(c) = self.ctls.get_mut(self.active) else { return };
+        let at = c.written;
+        c.put(at, pcm, vol);
+        c.written += (pcm.len() / 2) as u64;
+        // Clear a little beyond, so that running dry plays silence rather than old sound.
+        let w = c.written;
+        let silence = [0i16; 2048];
+        let mut clear = (RATE as usize / 5) * 2;
+        let mut pos = w;
+        while clear > 0 {
+            let n = clear.min(silence.len());
+            c.put(pos, &silence[..n], 256);
+            pos += (n / 2) as u64;
+            clear -= n;
+        }
+    }
+
     /// Play through `target` (from `target()`), carrying on whatever is playing.
     fn route(&mut self, target: u32) {
         if self.using == Some(target) {
             return;
         }
-        let (running, played, written) = {
-            let c = &mut self.ctls[self.active];
-            c.update_played();
-            (c.running, c.played, c.written)
-        };
+        let (running, played, written) = self.clock();
         if running {
-            self.ctls[self.active].stop();
+            self.stop_out();
         }
         for c in self.ctls.iter_mut() {
             c.all_off();
         }
+        self.usb_out = false;
+        crate::usbaudio::STREAM.lock().chosen = None;
         let mut name = String::new();
-        if target == ALL_JACKS {
+        if target & MONITOR == 0 && target & USB != 0 {
+            crate::usbaudio::STREAM.lock().chosen = Some(target & !USB);
+            self.usb_out = true;
+            name = self.usb_devices().into_iter().find(|d| d.0 == target).map(|d| d.1).unwrap_or_default();
+        } else if target == ALL_JACKS {
             if let Some(ci) = self.ctls.iter().position(|c| !c.outs.is_empty()) {
                 for oi in 0..self.ctls[ci].outs.len() {
                     self.ctls[ci].jack_on(oi);
@@ -839,7 +921,7 @@ impl Sound {
         self.using = Some(target);
         kprintln!("hda: playing through {}", name);
         if running {
-            self.ctls[self.active].start_at(played, written);
+            self.start_out(played, written);
         }
     }
 
@@ -850,6 +932,9 @@ impl Sound {
         if let Some((ci, oi)) = self.jack(key) {
             return self.ctls[ci].outs[oi].name.clone();
         }
+        if let Some(d) = self.usb_devices().into_iter().find(|d| d.0 == key) {
+            return d.1;
+        }
         self.monitors().into_iter().find(|m| m.0 == key).map(|m| m.3.name).unwrap_or_default()
     }
 }
@@ -859,9 +944,9 @@ impl Sound {
 pub fn init(devices: &[pci::Device]) {
     let ctls: Vec<Ctl> = devices.iter().filter(|d| d.class == 0x04 && d.subclass == 0x03).filter_map(Ctl::init).collect();
     if ctls.is_empty() {
-        return;
+        kprintln!("hda: no HD Audio sound (USB sound devices can still play)");
     }
-    let mut s = Sound { ctls, active: 0, chosen: AUTO, using: None, volume: 256, test_end: None, last_look: 0 };
+    let mut s = Sound { ctls, active: 0, usb_out: false, chosen: AUTO, using: None, volume: 256, test_end: None, last_look: 0 };
     if let Some(t) = s.target(AUTO) {
         s.route(t);
     }
@@ -872,23 +957,27 @@ pub fn available() -> bool {
     SOUND.lock().as_ref().is_some_and(|s| s.using.is_some())
 }
 
-/// Every output, for Settings: jacks (with whether something is plugged in), then monitors.
+/// Every output, for Settings: jacks (with whether something is plugged in), monitors and
+/// USB sound devices.
 pub fn outputs() -> Vec<OutputInfo> {
     let mut g = SOUND.lock();
     let Some(s) = g.as_mut() else { return Vec::new() };
     let mut v = Vec::new();
+    for (key, name, kind) in s.usb_devices() {
+        v.push(OutputInfo { key, name, place: format!("USB {}", kind), plugged: None, monitor: false, usb: true });
+    }
     for ci in 0..s.ctls.len() {
         let mut order: Vec<usize> = (0..s.ctls[ci].outs.len()).collect();
         order.sort_by_key(|&oi| s.ctls[ci].outs[oi].rank);
         for oi in order {
             let plugged = s.ctls[ci].plugged(oi);
             let o = &s.ctls[ci].outs[oi];
-            v.push(OutputInfo { key: o.key, name: o.name.clone(), place: String::from(o.place), plugged, monitor: false });
+            v.push(OutputInfo { key: o.key, name: o.name.clone(), place: String::from(o.place), plugged, monitor: false, usb: false });
         }
     }
     for (key, _, _, m) in s.monitors() {
         let place = if m.speakers { "Its speakers, through the DisplayPort cable" } else { "Its headphone jack, through the DisplayPort cable" };
-        v.push(OutputInfo { key, name: m.name, place: String::from(place), plugged: None, monitor: true });
+        v.push(OutputInfo { key, name: m.name, place: String::from(place), plugged: None, monitor: true, usb: false });
     }
     v
 }
@@ -923,13 +1012,11 @@ pub fn set_volume(percent: u8) {
 pub fn test(key: u32) {
     let mut g = SOUND.lock();
     let Some(s) = g.as_mut() else { return };
-    if s.ctls[s.active].running && s.test_end.is_none() {
+    if s.clock().0 && s.test_end.is_none() {
         return;
     }
     let Some(t) = s.target(key) else { return };
-    if s.ctls[s.active].running {
-        s.ctls[s.active].stop();
-    }
+    s.stop_out();
     s.route(t);
     // Two notes, a fifth apart, fading out.
     let mut pcm = Vec::new();
@@ -941,24 +1028,20 @@ pub fn test(key: u32) {
         pcm.push(v);
         pcm.push(v);
     }
-    let vol = s.volume;
-    let c = &mut s.ctls[s.active];
-    c.start_at(0, 0);
-    c.put(0, &pcm, vol);
-    c.written = total;
+    s.start_out(0, 0);
+    s.put_out(&pcm);
     s.test_end = Some(total + RATE as u64 / 10);
 }
 
-/// Called often (the desktop's tick): ends a test sound, and every second, when chosen
-/// automatically, follows what's plugged in.
+/// Called often (the desktop's tick): ends a test sound, and every second follows what's
+/// plugged in (when chosen automatically, or when the chosen USB device was unplugged).
 pub fn poll(now: u64) {
     let mut g = SOUND.lock();
     let Some(s) = g.as_mut() else { return };
     if let Some(end) = s.test_end {
-        let c = &mut s.ctls[s.active];
-        c.update_played();
-        if c.played >= end || !c.running {
-            c.stop();
+        let (running, played, _) = s.clock();
+        if played >= end || !running {
+            s.stop_out();
             s.test_end = None;
             if let Some(t) = s.target(s.chosen) {
                 s.route(t);
@@ -966,11 +1049,14 @@ pub fn poll(now: u64) {
         }
         return;
     }
-    if s.chosen == AUTO && now >= s.last_look + crate::interrupts::HZ {
+    if now >= s.last_look + crate::interrupts::HZ {
         s.last_look = now;
-        if let Some(t) = s.target(AUTO) {
-            if s.using != Some(t) {
-                s.route(t);
+        let gone = s.usb_out && s.using.is_some_and(|k| !s.usb_devices().iter().any(|d| d.0 == k));
+        if s.chosen == AUTO || gone || s.using.is_none() {
+            if let Some(t) = s.target(s.chosen) {
+                if s.using != Some(t) {
+                    s.route(t);
+                }
             }
         }
     }
@@ -983,14 +1069,13 @@ pub const LEAD: usize = RATE as usize * 3 / 10;
 pub fn start() {
     if let Some(s) = SOUND.lock().as_mut() {
         if s.test_end.take().is_some() {
-            s.ctls[s.active].stop();
+            s.stop_out();
             if let Some(t) = s.target(s.chosen) {
                 s.route(t);
             }
         }
-        let c = &mut s.ctls[s.active];
-        if !c.running {
-            c.start_at(0, 0);
+        if !s.clock().0 {
+            s.start_out(0, 0);
         }
     }
 }
@@ -998,10 +1083,7 @@ pub fn start() {
 pub fn stop() {
     if let Some(s) = SOUND.lock().as_mut() {
         if s.test_end.is_none() {
-            let c = &mut s.ctls[s.active];
-            if c.running {
-                c.stop();
-            }
+            s.stop_out();
         }
     }
 }
@@ -1009,62 +1091,49 @@ pub fn stop() {
 /// Frames the speakers have played since `start` (the clock for keeping pictures in step).
 pub fn played() -> u64 {
     match SOUND.lock().as_mut() {
-        Some(s) => {
-            let c = &mut s.ctls[s.active];
-            c.update_played();
-            c.played
-        }
+        Some(s) => s.clock().1,
         None => 0,
     }
 }
 
 /// How many frames the player may queue now (to stay `LEAD` ahead).
 pub fn wanted() -> usize {
-    match SOUND.lock().as_mut() {
-        Some(s) if s.ctls[s.active].running && s.test_end.is_none() => {
-            let c = &mut s.ctls[s.active];
-            c.update_played();
-            // Fell behind (e.g. a long pause): skip ahead.
-            if c.written < c.played {
-                c.written = c.played;
-            }
-            let ahead = (c.written - c.played) as usize;
-            LEAD.saturating_sub(ahead)
-        }
-        _ => 0,
+    let mut g = SOUND.lock();
+    let Some(s) = g.as_mut() else { return 0 };
+    if s.test_end.is_some() {
+        return 0;
     }
+    let (running, played, written) = s.clock();
+    if !running {
+        return 0;
+    }
+    // Fell behind (e.g. a long pause): skip ahead.
+    let written = if written < played {
+        if s.usb_out {
+            crate::usbaudio::STREAM.lock().written = played;
+        } else if let Some(c) = s.ctls.get_mut(s.active) {
+            c.written = played;
+        }
+        played
+    } else {
+        written
+    };
+    LEAD.saturating_sub((written - played) as usize)
 }
 
-/// Queue interleaved stereo frames after what's already queued, and clear a little
-/// beyond them so that running dry plays silence rather than old sound.
+/// Queue interleaved stereo frames after what's already queued.
 pub fn queue(pcm: &[i16]) {
     if let Some(s) = SOUND.lock().as_mut() {
-        let vol = s.volume;
-        if s.test_end.is_some() {
+        if s.test_end.is_some() || !s.clock().0 {
             return;
         }
-        let c = &mut s.ctls[s.active];
-        if !c.running {
-            return;
-        }
-        let at = c.written;
-        c.put(at, pcm, vol);
-        c.written += (pcm.len() / 2) as u64;
-        let w = c.written;
-        let silence = [0i16; 2048];
-        let mut clear = (RATE as usize / 5) * 2;
-        let mut pos = w;
-        while clear > 0 {
-            let n = clear.min(silence.len());
-            c.put(pos, &silence[..n], 256);
-            pos += (n / 2) as u64;
-            clear -= n;
-        }
+        s.put_out(pcm);
     }
 }
 
-/// Boot option "soundtest": half a second of a 440 Hz tone, then 0.3 s of 880 Hz.
-pub fn self_test() {
+/// Boot option "soundtest": half a second of a 440 Hz tone, then 0.3 s of 880 Hz. `pump`
+/// keeps USB sound devices fed (usb.rs's poll); it gives up after a few seconds.
+pub fn self_test(pump: &mut dyn FnMut()) {
     if !available() {
         kprintln!("hda: sound test: no sound device");
         return;
@@ -1072,7 +1141,9 @@ pub fn self_test() {
     start();
     let mut t = 0u64;
     let total = RATE as u64 * 8 / 10;
-    while t < total {
+    let give_up = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed) + 5 * crate::interrupts::HZ;
+    while t < total && crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed) < give_up {
+        pump();
         let n = wanted().min((total - t) as usize);
         if n > 0 {
             let mut buf = Vec::with_capacity(n * 2);
@@ -1091,6 +1162,7 @@ pub fn self_test() {
     // Let it finish playing, with a little silence after (sound still in flight).
     let end = t + RATE as u64 / 3;
     for _ in 0..200 {
+        pump();
         if played() >= end {
             break;
         }

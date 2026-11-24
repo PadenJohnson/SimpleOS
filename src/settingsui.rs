@@ -119,6 +119,8 @@ enum Act {
     SoundOut(u32),
     TestSound(u32),
     Volume(u8),
+    /// Show the outputs with nothing connected too (or not).
+    AllOutputs,
 }
 
 /// One thing on a page.
@@ -254,6 +256,8 @@ pub struct SettingsApp {
     /// Previews of the built-in photos, and of the user's own desktop picture.
     thumbs: Vec<crate::image::Image>,
     custom_thumb: Option<crate::image::Image>,
+    /// Sound: show every output, not only what's connected.
+    all_outputs: bool,
 }
 
 /// The resolutions offered: the PC's modes that are big enough for Solon's desktop.
@@ -284,7 +288,7 @@ const DAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday",
 impl SettingsApp {
     pub fn new() -> SettingsApp {
         let thumbs = PHOTOS.iter().filter_map(|p| crate::image::decode(p.2).ok()).collect();
-        let mut s = SettingsApp { page: Page::Appearance, t: (2026, 1, 1, 0, 0), edited: false, month: (2026, 1), open: None, bg_picker: false, scroll: 0, thumbs, custom_thumb: None };
+        let mut s = SettingsApp { page: Page::Appearance, t: (2026, 1, 1, 0, 0), edited: false, month: (2026, 1), open: None, bg_picker: false, scroll: 0, thumbs, custom_thumb: None, all_outputs: false };
         s.reload_time();
         s
     }
@@ -398,7 +402,12 @@ impl SettingsApp {
             _ => String::from("Headphones or speakers you plug in, else a monitor's speakers"),
         };
         choice(ui, "Automatic", &auto_help, AUTO);
-        for o in &outs {
+        // What's connected: jacks with something plugged in, monitors and USB sound devices
+        // (and the one chosen, connected or not). The rest on request.
+        let connected = |o: &crate::hda::OutputInfo| o.monitor || o.usb || o.plugged == Some(true);
+        let jacks = outs.iter().filter(|o| !o.monitor && !o.usb).count();
+        let hidden = outs.iter().filter(|o| !connected(o) && o.key != s.sound_out).count() + (jacks > 1 && s.sound_out != ALL_JACKS) as usize;
+        for o in outs.iter().filter(|o| self.all_outputs || connected(o) || o.key == s.sound_out) {
             let help = match o.plugged {
                 Some(true) => format!("{}, plugged in", o.place),
                 Some(false) => format!("{}, nothing plugged in", o.place),
@@ -406,8 +415,14 @@ impl SettingsApp {
             };
             choice(ui, &o.name, &help, o.key);
         }
-        if outs.iter().filter(|o| !o.monitor).count() > 1 {
+        if jacks > 1 && (self.all_outputs || s.sound_out == ALL_JACKS) {
             choice(ui, "Every jack at once", "Speakers, headphones and the other jacks together", ALL_JACKS);
+        }
+        if hidden > 0 || self.all_outputs {
+            let row = ui.row("", "", 52);
+            let label = if self.all_outputs { String::from("Show only what's connected") } else { format!("Show every output ({} more)", hidden) };
+            let w = text_width(&label, Size::Small, true) + 36;
+            ui.button(Rect::new(row.x, row.y + 8, w, 36), &label, false, Act::AllOutputs);
         }
         ui.end_card();
         ui.card("Volume");
@@ -1082,6 +1097,10 @@ impl SettingsApp {
                 return SettingsAction::Redraw;
             }
             Act::SoundOut(k) => n.sound_out = k,
+            Act::AllOutputs => {
+                self.all_outputs = !self.all_outputs;
+                return SettingsAction::Redraw;
+            }
             Act::TestSound(k) => return SettingsAction::TestSound(k),
             Act::Volume(v) => n.volume = v,
             Act::Screens(i) => n.screens = i,

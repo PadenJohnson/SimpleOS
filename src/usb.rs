@@ -81,6 +81,8 @@ pub struct Usb {
     pub printers: Vec<UsbPrinter>,
     /// Phones and cameras (MTP / PTP). Read only.
     pub phones: Vec<Phone>,
+    /// USB sound devices (headsets, speakers, headphones).
+    audio: Vec<crate::usbaudio::Device>,
     next_id: u32,
     next_hub_poll: u64,
     boot_disk: Option<[u8; 16]>,
@@ -290,6 +292,7 @@ impl Usb {
             drives: Vec::new(),
             printers: Vec::new(),
             phones: Vec::new(),
+            audio: Vec::new(),
             next_id: 1,
             next_hub_poll: 0,
             boot_disk,
@@ -337,6 +340,12 @@ impl Usb {
             changed |= self.poll_hubs();
         }
         self.poll_hid();
+        // Sound to USB devices: keep their packets coming.
+        for k in 0..self.audio.len() {
+            let ci = self.audio[k].ctrl;
+            let (audio, hcs) = (&mut self.audio, &mut self.hcs);
+            audio[k].pump(&mut hcs[ci]);
+        }
         changed
     }
 
@@ -475,6 +484,18 @@ impl Usb {
 
         // Pick the interfaces we know how to drive.
         let mut eps = Vec::new();
+        // USB sound devices (Audio Class 1 and 2), on USB 3 controllers.
+        let audio = if self.hcs[ci].is_usb3() { crate::usbaudio::parse(cfg) } else { None };
+        let audio_ifaces: Vec<u8> = audio.as_ref().map(|a| a.ifaces.clone()).unwrap_or_default();
+        let audio_dev = audio.map(|info| {
+            let id = self.next_id;
+            self.next_id += 1;
+            let name = if product.is_empty() { String::from("USB sound") } else { product.clone() };
+            crate::usbaudio::Device::new(id, ci, slot, name, info, matches!(speed, Speed::Full | Speed::Low))
+        });
+        if let Some(d) = &audio_dev {
+            eps.push(d.endpoint());
+        }
         // Printers: prefer IPP over USB (protocol 4), then bidirectional (2), then plain (1).
         let printer_iface = [4u8, 2, 1].iter().find_map(|&p| {
             ifaces.iter().find(|f| f.class == 7 && f.sub == 1 && f.proto == p && f.eps.iter().any(|e| e.0 & 0x80 == 0 && e.1 & 3 == 2))
@@ -507,7 +528,7 @@ impl Usb {
             }
         }
         for f in &ifaces {
-            if phone_plan.is_some_and(|(n, _, _)| n == f.num) {
+            if phone_plan.is_some_and(|(n, _, _)| n == f.num) || audio_ifaces.contains(&f.num) {
                 continue;
             }
             if f.class == 3 && f.sub == 1 && (f.proto == 1 || f.proto == 2) {
@@ -536,6 +557,12 @@ impl Usb {
         }
         let hc = &mut self.hcs[ci];
         hc.configure_endpoints(slot, &eps, None)?;
+
+        if let Some(d) = audio_dev {
+            crate::usbaudio::DEVICES.lock().push((d.id, d.name.clone(), d.info_kind()));
+            kprintln!("usb:   sound device \"{}\" ready", d.name);
+            self.audio.push(d);
+        }
 
         for (iface, dci, mps, kind) in hid_plans {
             let _ = hc.control(slot, 0x21, 0x0B, 0, iface as u16, None); // SET_PROTOCOL(boot)
@@ -675,7 +702,12 @@ impl Usb {
         self.phones.retain(|p| !p.ctrl_slot().is_some_and(|(c, s)| c == ci && gone.contains(&s)));
         let phone_gone = self.phones.len() != phones_before;
         self.drives.retain(|d| !(d.ctrl == ci && gone.contains(&d.slot)));
-        self.drives.len() != before || printer_gone || phone_gone
+        let audio_before = self.audio.len();
+        self.audio.retain(|a| !(a.ctrl == ci && gone.contains(&a.slot)));
+        let ids: Vec<u32> = self.audio.iter().map(|a| a.id).collect();
+        crate::usbaudio::DEVICES.lock().retain(|d| ids.contains(&d.0));
+        let audio_gone = self.audio.len() != audio_before;
+        self.drives.len() != before || printer_gone || phone_gone || audio_gone
     }
 
     fn poll_hid(&mut self) {

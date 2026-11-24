@@ -73,6 +73,11 @@ pub fn tsc_per_us() -> u64 {
     per_us
 }
 
+/// Microseconds since start (from the time-stamp counter), for timing work.
+pub fn now_us() -> u64 {
+    (unsafe { _rdtsc() }) / tsc_per_us()
+}
+
 fn cpuid(leaf: u32) -> (u32, u32, u32, u32) {
     let r = __cpuid(leaf);
     (r.eax, r.ebx, r.ecx, r.edx)

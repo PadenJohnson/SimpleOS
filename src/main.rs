@@ -81,6 +81,7 @@ mod textedit;
 mod textfield;
 mod usb;
 mod update;
+mod usbaudio;
 mod usbprint;
 mod videos;
 mod wallpaper;
@@ -339,7 +340,9 @@ extern "C" fn kmain() -> ! {
     // Sound card (Intel HD Audio).
     hda::init(&pci::scan());
     if EXECUTABLE_CMDLINE_REQUEST.get_response().and_then(|r| r.cmdline().to_str().ok()).is_some_and(|c| c.split_whitespace().any(|w| w == "soundtest")) {
-        hda::self_test();
+        hda::self_test(&mut || {
+            usb.poll();
+        });
     }
 
     // Power off / restart need the ACPI tables.
@@ -420,7 +423,7 @@ extern "C" fn kmain() -> ! {
     let (hh, mm, _) = rtc::time();
     desktop.set_clock(hh, mm);
     desktop.draw(&mut canvas);
-    present_all(&canvas, &lay, scale, &screen, view.dst, second.as_ref());
+    present_all(&canvas, &lay, scale, &screen, view.dst, second.as_ref(), None);
 
     // The mouse moves in desktop (logical) pixels; each screen draws the pointer when it's on
     // that screen's part of the desktop.
@@ -452,6 +455,8 @@ extern "C" fn kmain() -> ! {
     }
 
     let mut buttons = 0u8;
+    // Redraws, fast ones, drawing and sending time (us), since (us): logged while a video plays.
+    let mut draw_stats = (0u64, 0u64, 0u64, 0u64, 0u64);
     let mut next_clock_check = 0u64;
     let mut next_traffic_log = TICKS.load(Relaxed) + 60 * HZ;
     loop {
@@ -577,13 +582,39 @@ extern "C" fn kmain() -> ! {
                 }
             }
         }
+        // The video player: when only its picture or controls changed and nothing covers them,
+        // just that area is drawn and sent.
+        let video = desktop.tick_videos(now);
+        let area = if video && !redraw { desktop.video_dirty() } else { None };
+        redraw |= video;
         if redraw {
-            desktop.draw(&mut canvas);
+            let t0 = cpu::now_us();
+            match area {
+                Some(_) => desktop.draw_fast(&mut canvas),
+                None => desktop.draw(&mut canvas),
+            }
+            let t1 = cpu::now_us();
             cursor.hide(&screen);
             if let Some(s2) = &second {
                 cursor2.hide(s2);
             }
-            present_all(&canvas, &lay, scale, &screen, view.dst, second.as_ref());
+            present_all(&canvas, &lay, scale, &screen, view.dst, second.as_ref(), area);
+            let t2 = cpu::now_us();
+            // While a video plays: how long drawing and sending take, every 10 seconds.
+            draw_stats.0 += 1;
+            draw_stats.1 += area.is_some() as u64;
+            draw_stats.2 += t1 - t0;
+            draw_stats.3 += t2 - t1;
+            if !desktop.video_playing() {
+                draw_stats = (0, 0, 0, 0, t2);
+            } else if t2 >= draw_stats.4 + 10_000_000 {
+                let n = draw_stats.0.max(1);
+                kprintln!(
+                    "display: last 10 s of video: {} redraws ({} just the video), drawing {} ms and sending {} ms each",
+                    draw_stats.0, draw_stats.1, draw_stats.2 / n / 1000, draw_stats.3 / n / 1000
+                );
+                draw_stats = (0, 0, 0, 0, t2);
+            }
         }
         if (redraw || moved) && !desktop.hide_pointer() {
             place_pointer(&mut cursor, &screen, &lay, 0, mx, my, view.dst);
@@ -750,13 +781,15 @@ fn blank_unused(lay: &Layout, screen: &Screen, first_full: (usize, usize, usize,
     }
 }
 
-/// Put each screen's part of the desktop on it.
-fn present_all(canvas: &Canvas, lay: &Layout, scale: u32, screen: &Screen, first_full: (usize, usize, usize, usize), second: Option<&Screen>) {
+/// Put each screen's part of the desktop on it (when only `area` of the desktop changed, only
+/// that is looked at).
+fn present_all(canvas: &Canvas, lay: &Layout, scale: u32, screen: &Screen, first_full: (usize, usize, usize, usize), second: Option<&Screen>, area: Option<gfx::Rect>) {
+    let area = area.map(|a| (a.x.max(0) as usize, a.y.max(0) as usize, a.w.max(0) as usize, a.h.max(0) as usize));
     if let Some(p) = lay.parts[0] {
-        screen.present_part(canvas, p, scale, lay.dst(0, screen, first_full));
+        screen.present_area(canvas, p, scale, lay.dst(0, screen, first_full), area);
     }
     if let (Some(s2), Some(p)) = (second, lay.parts[1]) {
-        s2.present_part(canvas, p, scale, lay.dst(1, s2, full_of(s2)));
+        s2.present_area(canvas, p, scale, lay.dst(1, s2, full_of(s2)), area);
     }
 }
 

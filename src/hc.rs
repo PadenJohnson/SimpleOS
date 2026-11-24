@@ -98,6 +98,22 @@ impl Hc {
             Hc::E(_) => None,
         }
     }
+    /// Isochronous packets (USB 3 controllers only; see Xhci::isoch).
+    pub fn isoch(&mut self, slot: u8, dci: u8, packets: &[(u64, u32)]) -> Result<u64, UsbError> {
+        match self {
+            Hc::X(h) => h.isoch(slot, dci, packets),
+            Hc::E(_) => Err(UsbError::Failed(0)),
+        }
+    }
+    pub fn take_completions(&mut self, slot: u8, dci: u8) -> Vec<Completion> {
+        match self {
+            Hc::X(h) => h.take_completions(slot, dci),
+            Hc::E(_) => Vec::new(),
+        }
+    }
+    pub fn is_usb3(&self) -> bool {
+        matches!(self, Hc::X(_))
+    }
     pub fn shutdown(&mut self) {
         both!(self, h => h.shutdown())
     }

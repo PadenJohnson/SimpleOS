@@ -254,6 +254,35 @@ impl Engine {
     /// `budget`: the most packets to decode now (small while playing).
     pub fn picture(&mut self, read: &mut Read, ms: u64, w: usize, h: usize, budget: usize, unchanged: Option<i64>) -> Option<(i64, Option<Vec<u32>>)> {
         self.vdec.as_ref()?;
+        self.advance(read, ms, budget);
+        let (pts, pic) = self.current.as_ref()?;
+        if unchanged == Some(*pts) {
+            return Some((*pts, None));
+        }
+        Some((*pts, Some(pic_rgb(pic, self.rotation, w, h))))
+    }
+
+    /// The picture shown now: its time (microseconds) and the picture itself.
+    pub fn current(&self) -> Option<(i64, &Pic)> {
+        self.current.as_ref().map(|(t, p)| (*t, p))
+    }
+
+    /// How much the picture is turned (0, 90, 180 or 270 degrees).
+    pub fn rotation(&self) -> u32 {
+        self.rotation
+    }
+
+    /// The current picture at w x h (0x00RRGGBB), on one core (Videos has a faster way).
+    pub fn current_rgb(&self, w: usize, h: usize) -> Option<Vec<u32>> {
+        self.current.as_ref().map(|(_, p)| pic_rgb(p, self.rotation, w, h))
+    }
+
+    /// Decode towards the picture shown at `ms`, giving the decoder at most `budget`
+    /// packets. True when the current picture is the one for `ms` (or no later one is coming).
+    pub fn advance(&mut self, read: &mut Read, ms: u64, budget: usize) -> bool {
+        if self.vdec.is_none() {
+            return true;
+        }
         let target = ms as i64 * 1000;
         let behind = self.current.as_ref().is_some_and(|c| c.0 > target + 1000);
         let key = self.src.demux.key_before(target);
@@ -282,11 +311,7 @@ impl Engine {
         if self.current.is_none() {
             self.current = self.frames.pop_front();
         }
-        let (pts, pic) = self.current.as_ref()?;
-        if unchanged == Some(*pts) {
-            return Some((*pts, None));
-        }
-        Some((*pts, Some(pic_rgb(pic, self.rotation, w, h))))
+        !self.frames.is_empty() || (self.video_end && self.flushed)
     }
 
     /// `n` stereo frames of sound at 48 kHz, starting `from` frames into the video.

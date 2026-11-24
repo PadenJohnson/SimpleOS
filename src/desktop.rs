@@ -793,6 +793,64 @@ impl Desktop {
     }
 
     /// True while there's background work (photos to decode, an import), so the main loop shouldn't sleep.
+    /// The video player's turn (separate from `tick`, so that when only the video changed the
+    /// main loop can draw just its window: `fast_area`). True = something to redraw.
+    pub fn tick_videos(&mut self, now: u64) -> bool {
+        let Some(win) = self.windows.iter().find(|w| w.app == App::Videos) else { return false };
+        let visible = !win.minimized || self.videos.fullscreen();
+        matches!(self.videos.tick(now, &mut self.storage, &mut self.usb, visible), VideosAction::Redraw)
+    }
+
+    /// For a video-only redraw: the part of the Videos window that changed (to send to the
+    /// screen), within `fast_area`.
+    pub fn video_dirty(&mut self) -> Option<Rect> {
+        let area = self.fast_area()?;
+        let d = self.videos.take_dirty().unwrap_or(area);
+        let (x0, y0) = (d.x.max(area.x), d.y.max(area.y));
+        let (x1, y1) = ((d.x + d.w).min(area.x + area.w), (d.y + d.h).min(area.y + area.h));
+        Some(if x1 > x0 && y1 > y0 { Rect::new(x0, y0, x1 - x0, y1 - y0) } else { area })
+    }
+
+    /// Where the Videos window is when it alone can be drawn again: the top window (or full
+    /// screen), with no menu, message or other window over it. None: draw everything.
+    pub fn fast_area(&self) -> Option<Rect> {
+        let overlays = self.screen_off
+            || self.slideshow.is_some()
+            || self.apps_menu.is_some()
+            || self.power_menu
+            || self.confirm.is_some()
+            || self.desk_menu.is_some()
+            || self.dock_menu.is_some()
+            || self.toast.is_some()
+            || self.install_notice
+            || self.display_trial.is_some()
+            || self.show_log
+            || self.handoff.is_some();
+        if overlays {
+            return None;
+        }
+        if self.videos.fullscreen() {
+            return Some(self.main_screen());
+        }
+        let top = self.windows.iter().rposition(|w| !w.minimized)?;
+        let w = &self.windows[top];
+        (w.app == App::Videos).then(|| w.body())
+    }
+
+    /// Draw just what's inside the Videos window (see `fast_area`; its frame doesn't change
+    /// while a video plays).
+    pub fn draw_fast(&mut self, c: &mut Canvas) {
+        let Some(area) = self.fast_area() else { return };
+        c.set_clip(area);
+        self.videos.draw(c, area);
+        c.reset_clip();
+    }
+
+    /// A video is playing (for the main loop's timing log).
+    pub fn video_playing(&self) -> bool {
+        self.videos.playing()
+    }
+
     pub fn busy(&self) -> bool {
         self.photos.needs_loading() || self.job.is_some() || self.copy.is_some() || self.disks.busy() || self.movie.exporting() || self.backup.busy() || self.import.busy() || self.slideshow.as_ref().map_or(false, |s| s.busy())
     }
@@ -1043,10 +1101,7 @@ impl Desktop {
             let a = self.movie.tick(now, &mut self.storage, &mut self.usb, visible);
             redraw |= self.movie_action(a, now);
         }
-        if let Some(win) = self.windows.iter().find(|w| w.app == App::Videos) {
-            let visible = !win.minimized || self.videos.fullscreen();
-            redraw |= matches!(self.videos.tick(now, &mut self.storage, &mut self.usb, visible), VideosAction::Redraw);
-        }
+        // (Videos ticks on its own: `tick_videos`.)
         // Started in a resolution being tried? Ask whether to keep it; go back if nobody answers.
         // Load the calendar once Solon storage is there (for today's events on the desktop).
         if !self.calendar.loaded() && self.storage.library.is_some() {

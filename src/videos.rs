@@ -12,7 +12,9 @@ use crate::gfx::{rgb, Canvas, Rect, Size};
 use crate::image::Image;
 use crate::interrupts::{HZ, TICKS};
 use crate::library::Storage;
+use crate::media::dec::Pic;
 use crate::media::Engine;
+use crate::video::h264d::Frame;
 use crate::movie::Io;
 use crate::movieui::{LibIo, BOOT_FILES};
 use crate::photos::{ellipsize, Source};
@@ -43,6 +45,9 @@ struct Play {
     sound: bool,
     /// 48 kHz frames queued since `from`.
     queued: u64,
+    /// The clock waits for the picture: at the start and after a jump, until the picture
+    /// for `from` is decoded (from the key frame before it), so sound and picture start together.
+    held: bool,
 }
 
 struct Player {
@@ -55,6 +60,21 @@ struct Player {
     shown: Option<i64>,
     /// Dragging: 1 = the position, 2 = the volume.
     dragging: u8,
+    /// What the time and the position bar show (seconds, bar pixels): redrawn when they change.
+    last_bar: (u64, u64),
+    /// A big pause or play sign over the picture after a click on it (playing?, until tick).
+    flash: Option<(bool, u64)>,
+}
+
+/// How playback is keeping up, logged every 10 seconds while a video plays.
+#[derive(Default)]
+struct Stats {
+    since_us: u64,
+    decode_us: u64,
+    convert_us: u64,
+    pictures: u64,
+    /// Ticks where the picture wasn't ready in time.
+    late: u64,
 }
 
 pub enum VideosAction {
@@ -74,6 +94,9 @@ pub struct VideosApp {
     fullscreen: bool,
     controls_until: u64,
     last_press: u64,
+    stats: Stats,
+    /// What changed since the last look (for the desktop's video-only redraws).
+    dirty: Option<Rect>,
 }
 
 /// File names Solon tries as videos (what's inside decides whether it can play them).
@@ -103,6 +126,84 @@ fn picture(e: &mut Engine, io: &mut dyn Io, src: &Source, ms: u64, w: usize, h: 
     let mut read = |off: u64, len: usize| io.read(src, off, len);
     let (id, px) = e.picture(&mut read, ms, w, h, budget, shown)?;
     Some((id, px.map(|px| Image { w, h, px: px.iter().map(|v| v | 0xFF00_0000).collect(), opaque: true })))
+}
+
+/// A raw pointer that may be shared between cores (each writes its own rows).
+#[derive(Clone, Copy)]
+struct Rows(*mut u32);
+unsafe impl Send for Rows {}
+unsafe impl Sync for Rows {}
+
+/// A YUV picture at w x h for the screen (0xFFRRGGBB): brightness scaled smoothly (bilinear),
+/// colour from the nearest sample, in bands of rows on every core.
+fn to_screen(f: &Frame, w: usize, h: usize) -> Vec<u32> {
+    let mut out = vec![0u32; w * h];
+    if f.width == 0 || f.height == 0 || w == 0 || h == 0 {
+        return out;
+    }
+    let cs = f.stride / 2;
+    // Fixed-point YCbCr -> RGB (x1024), as Frame::to_rgb.
+    let (cr_r, cb_g, cr_g, cb_b) = if f.bt709 { (1613, 192, 479, 1900) } else { (1436, 352, 731, 1815) };
+    let (ys, yo) = if f.full_range { (1024, 0) } else { (1192, 16) };
+    let (cr_r, cb_g, cr_g, cb_b) = if f.full_range { (cr_r, cb_g, cr_g, cb_b) } else { (cr_r * 1167 / 1024, cb_g * 1167 / 1024, cr_g * 1167 / 1024, cb_b * 1167 / 1024) };
+    // Where each output column and row samples the picture: index and weight of the next (0-255).
+    let map = |o: usize, n_out: usize, n_in: usize| -> (usize, u32) {
+        let pos = (((2 * o + 1) * n_in) << 16) / (2 * n_out);
+        let pos = pos.saturating_sub(1 << 15);
+        let i = (pos >> 16).min(n_in - 1);
+        (i, if i + 1 < n_in { ((pos >> 8) & 0xFF) as u32 } else { 0 })
+    };
+    let xs: Vec<(usize, u32)> = (0..w).map(|o| map(o, w, f.width)).collect();
+    let yss: Vec<(usize, u32)> = (0..h).map(|o| map(o, h, f.height)).collect();
+    let clip = |v: i32| v.clamp(0, 255) as u32;
+    let rows = Rows(out.as_mut_ptr());
+    let bands = (crate::smp::threads() * 2).min(h.div_ceil(16)).max(1);
+    let per = h.div_ceil(bands);
+    let (xs, yss) = (&xs, &yss);
+    crate::smp::run(bands, &|b| {
+        let rows = rows;
+        for oy in b * per..((b + 1) * per).min(h) {
+            let (sy, wy) = yss[oy];
+            let y0 = (f.crop_y + sy) * f.stride + f.crop_x;
+            let y1 = (f.crop_y + (sy + 1).min(f.height - 1)) * f.stride + f.crop_x;
+            let c0 = (f.crop_y + sy) / 2 * cs;
+            for (ox, &(sx, wx)) in xs.iter().enumerate() {
+                let sx1 = (sx + 1).min(f.width - 1);
+                let top = f.y[y0 + sx] as u32 * (256 - wx) + f.y[y0 + sx1] as u32 * wx;
+                let bot = f.y[y1 + sx] as u32 * (256 - wx) + f.y[y1 + sx1] as u32 * wx;
+                let luma = ((top * (256 - wy) + bot * wy + (1 << 15)) >> 16) as i32;
+                let yv = (luma - yo) * ys;
+                let ci = c0 + (f.crop_x + sx) / 2;
+                let (cb, cr) = (f.u[ci] as i32 - 128, f.v[ci] as i32 - 128);
+                let r = (yv + cr_r * cr + 512) >> 10;
+                let g = (yv - cb_g * cb - cr_g * cr + 512) >> 10;
+                let bl = (yv + cb_b * cb + 512) >> 10;
+                unsafe { *rows.0.add(oy * w + ox) = 0xFF00_0000 | clip(r) << 16 | clip(g) << 8 | clip(bl) };
+            }
+        }
+    });
+    out
+}
+
+/// The smallest rectangle around both.
+fn union(a: Option<Rect>, b: Rect) -> Rect {
+    match a {
+        None => b,
+        Some(a) => {
+            let (x0, y0) = (a.x.min(b.x), a.y.min(b.y));
+            let (x1, y1) = ((a.x + a.w).max(b.x + b.w), (a.y + a.h).max(b.y + b.h));
+            Rect::new(x0, y0, x1 - x0, y1 - y0)
+        }
+    }
+}
+
+/// The engine's current picture at w x h for the screen.
+fn current_image(e: &Engine, w: usize, h: usize) -> Option<Image> {
+    let px = match e.current()? {
+        (_, Pic::Yuv(f)) if e.rotation() == 0 => to_screen(f, w, h),
+        _ => e.current_rgb(w, h)?.iter().map(|v| v | 0xFF00_0000).collect(),
+    };
+    Some(Image { w, h, px, opaque: true })
 }
 
 /// Videos on a USB drive or phone (a few folders deep, and not forever).
@@ -137,7 +238,7 @@ fn item(name: String, place: String, src: Source, size: u64) -> Item {
 
 impl VideosApp {
     pub fn new() -> VideosApp {
-        VideosApp { items: Vec::new(), scroll: 0, player: None, last_click: None, body: Rect::new(0, 0, 0, 0), volume: 80, fullscreen: false, controls_until: 0, last_press: 0 }
+        VideosApp { items: Vec::new(), scroll: 0, player: None, last_click: None, body: Rect::new(0, 0, 0, 0), volume: 80, fullscreen: false, controls_until: 0, last_press: 0, stats: Stats::default(), dirty: None }
     }
 
     pub fn playing(&self) -> bool {
@@ -272,9 +373,27 @@ impl VideosApp {
         let pr = self.picture_rect(r);
         let show_bar = self.show_bar();
         let Some(p) = self.player.as_ref() else { return };
-        c.fill_rect(r.x, r.y, r.w, r.h, 0);
-        if let Some(img) = &p.picture {
-            c.draw_image(img, pr.x + (pr.w - img.w as i32) / 2, pr.y + (pr.h - img.h as i32) / 2);
+        match &p.picture {
+            Some(img) => {
+                // Black only around the picture (it's redrawn for every frame).
+                let (ix, iy, iw, ih) = (pr.x + (pr.w - img.w as i32) / 2, pr.y + (pr.h - img.h as i32) / 2, img.w as i32, img.h as i32);
+                c.fill_rect(r.x, r.y, r.w, iy - r.y, 0);
+                c.fill_rect(r.x, iy + ih, r.w, r.y + r.h - iy - ih, 0);
+                c.fill_rect(r.x, iy, ix - r.x, ih, 0);
+                c.fill_rect(ix + iw, iy, r.x + r.w - ix - iw, ih, 0);
+                c.draw_image(img, ix, iy);
+            }
+            None => c.fill_rect(r.x, r.y, r.w, r.h, 0),
+        }
+        if let Some((playing, _)) = p.flash {
+            let (cx, cy) = (pr.x + pr.w / 2, pr.y + pr.h / 2);
+            c.circle_alpha(cx, cy, 46, 0, 150);
+            if playing {
+                c.triangle([(cx - 14, cy - 22), (cx - 14, cy + 22), (cx + 24, cy)], TEXT);
+            } else {
+                c.round_rect(cx - 17, cy - 20, 12, 40, 3, TEXT);
+                c.round_rect(cx + 5, cy - 20, 12, 40, 3, TEXT);
+            }
         }
         let mut msg_y = r.y + r.h / 2 - 40;
         for m in [p.file.problem.as_deref(), p.file.sound_problem.as_deref()].into_iter().flatten() {
@@ -328,7 +447,8 @@ impl VideosApp {
                 it.dur_ms = Some(dur);
                 it.problem = f.problem.clone();
                 kprintln!("videos: playing \"{}\" ({} ms)", it.name, dur);
-                self.player = Some(Player { item: i, file: f, pos: 0, dur, play: None, picture: None, shown: None, dragging: 0 });
+                self.player = Some(Player { item: i, file: f, pos: 0, dur, play: None, picture: None, shown: None, dragging: 0, last_bar: (u64::MAX, 0), flash: None });
+                self.stats = Stats { since_us: crate::cpu::now_us(), ..Stats::default() };
                 self.toggle();
             }
             Err(e) => {
@@ -352,11 +472,9 @@ impl VideosApp {
         if p.pos + 200 >= p.dur {
             p.pos = 0;
         }
+        // The clock (and the sound) start once the picture for this moment is ready.
         let sound = crate::hda::available() && p.file.has_sound();
-        if sound {
-            crate::hda::start();
-        }
-        p.play = Some(Play { from: p.pos, tick: TICKS.load(Relaxed), sound, queued: 0 });
+        p.play = Some(Play { from: p.pos, tick: TICKS.load(Relaxed), sound, queued: 0, held: true });
     }
 
     fn close_player(&mut self) {
@@ -399,10 +517,13 @@ impl VideosApp {
         let pic = self.picture_rect(self.body);
         let bar_was = self.show_bar();
         let volume = self.volume;
+        let body = self.body;
+        let mut dirty: Option<Rect> = None;
+        let stats = &mut self.stats;
         if let Some(p) = self.player.as_mut() {
             let src = self.items[p.item].src.clone();
             let mut redraw = false;
-            if let Some(pl) = p.play.as_mut() {
+            if let Some(pl) = p.play.as_mut().filter(|pl| !pl.held) {
                 let elapsed = if pl.sound { crate::hda::played() * 1000 / 48000 } else { now.saturating_sub(pl.tick) * 1000 / HZ };
                 if p.dragging != 1 {
                     p.pos = (pl.from + elapsed).min(p.dur);
@@ -422,32 +543,98 @@ impl VideosApp {
                         pl.queued += want as u64;
                     }
                 }
-                redraw = true;
                 if p.pos >= p.dur {
                     if pl.sound {
                         crate::hda::stop();
                     }
                     p.play = None;
+                    redraw = true;
                 }
             }
             if p.file.problem.is_none() && pic.w > 2 {
                 let (vw, vh) = (p.file.width, p.file.height);
                 let (w, h) = if pic.w as usize * vh > pic.h as usize * vw { (pic.h as usize * vw / vh, pic.h as usize) } else { (pic.w as usize, pic.w as usize * vh / vw) };
                 let (w, h) = (w.max(2), h.max(2));
-                let budget = if p.play.is_some() { 3 } else { 400 };
-                let same_size = p.picture.as_ref().is_some_and(|i| i.w == w && i.h == h);
-                let shown = if same_size { p.shown } else { None };
-                if let Some((id, img)) = picture(&mut p.file, &mut io, &src, p.pos, w, h, budget, shown) {
-                    if let Some(img) = img {
-                        p.shown = Some(id);
-                        p.picture = Some(img);
-                        redraw = true;
+                // Decode towards the picture for now: a few pictures a tick while playing; at
+                // the start, after a jump or when paused, as many as fit in about 30 ms (the
+                // clock waits meanwhile, so the picture doesn't lag behind the sound).
+                let t0 = crate::cpu::now_us();
+                let held = p.play.as_ref().is_none_or(|pl| pl.held);
+                let mut ready;
+                {
+                    let mut read = |off: u64, len: usize| io.read(&src, off, len);
+                    if held {
+                        loop {
+                            ready = p.file.advance(&mut read, p.pos, 1);
+                            if ready || crate::cpu::now_us() - t0 > 30_000 {
+                                break;
+                            }
+                        }
+                    } else {
+                        ready = p.file.advance(&mut read, p.pos, 3);
                     }
                 }
+                stats.decode_us += crate::cpu::now_us() - t0;
+                if !ready && !held {
+                    stats.late += 1;
+                }
+                // The picture caught up: start the clock and the sound from here.
+                if ready {
+                    if let Some(pl) = p.play.as_mut().filter(|pl| pl.held) {
+                        pl.held = false;
+                        pl.from = p.pos;
+                        pl.tick = now;
+                        pl.queued = 0;
+                        if pl.sound {
+                            crate::hda::start();
+                        }
+                    }
+                }
+                // A new picture (or a new size): convert it, on every core.
+                let same_size = p.picture.as_ref().is_some_and(|i| i.w == w && i.h == h);
+                let id = p.file.current().map(|c| c.0);
+                if id.is_some() && (id != p.shown || !same_size) {
+                    let t1 = crate::cpu::now_us();
+                    if let Some(img) = current_image(&p.file, w, h) {
+                        p.picture = Some(img);
+                        p.shown = id;
+                        stats.pictures += 1;
+                        redraw = true;
+                        dirty = Some(pic);
+                    }
+                    stats.convert_us += crate::cpu::now_us() - t1;
+                }
+            }
+            // The time and the position bar: redrawn when what they show changes.
+            let (_, _, seek, _, _) = Self::controls(body);
+            let bar = (p.pos / 1000, seek.w.max(1) as u64 * p.pos / p.dur.max(1));
+            if bar != p.last_bar {
+                p.last_bar = bar;
+                redraw = true;
+                dirty = Some(union(dirty, Self::bar(body)));
+            }
+            if p.flash.is_some_and(|f| now >= f.1) {
+                p.flash = None;
+                redraw = true;
+                dirty = Some(union(dirty, pic));
+            }
+            // Every 10 seconds of playing: how it's keeping up.
+            let t = crate::cpu::now_us();
+            if p.play.is_some() && t >= stats.since_us + 10_000_000 {
+                let n = stats.pictures.max(1);
+                kprintln!(
+                    "videos: last 10 s: {} pictures, decoding {} ms and converting {} ms a picture, {} late ticks",
+                    stats.pictures, stats.decode_us / n / 1000, stats.convert_us / n / 1000, stats.late
+                );
+                *stats = Stats { since_us: t, ..Stats::default() };
+            } else if p.play.is_none() {
+                stats.since_us = t;
             }
             if bar_was != self.show_bar() {
                 redraw = true;
+                dirty = Some(body);
             }
+            self.dirty = if redraw { Some(dirty.unwrap_or(body)) } else { None };
             return if redraw { VideosAction::Redraw } else { VideosAction::None };
         }
         // Make one picture for the list.
@@ -554,13 +741,21 @@ impl VideosApp {
                 }
                 return VideosAction::None;
             }
-            // On the picture: double-click switches full screen, a single click pauses.
+            // On the picture: a click pauses or plays (a big sign shows which), a double-click
+            // switches full screen.
             if double {
                 self.toggle(); // undo the first click's pause
                 let on = !self.fullscreen;
                 self.set_fullscreen(on);
+                if let Some(p) = self.player.as_mut() {
+                    p.flash = None;
+                }
             } else {
                 self.toggle();
+                let playing = self.playing();
+                if let Some(p) = self.player.as_mut() {
+                    p.flash = Some((playing, now + HZ * 6 / 10));
+                }
             }
             return VideosAction::Redraw;
         }
@@ -627,6 +822,11 @@ impl VideosApp {
 
     pub fn closed(&mut self) {
         self.close_player();
+    }
+
+    /// What changed in the last tick (picture, controls), for the desktop's fast redraw.
+    pub fn take_dirty(&mut self) -> Option<Rect> {
+        self.dirty.take()
     }
 }
 

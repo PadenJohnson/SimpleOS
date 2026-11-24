@@ -17,6 +17,9 @@ const TRB_NORMAL: u32 = 1;
 const TRB_SETUP: u32 = 2;
 const TRB_DATA: u32 = 3;
 const TRB_STATUS: u32 = 4;
+const TRB_ISOCH: u32 = 5;
+/// Isoch TRB: start as soon as possible (no frame number).
+const SIA: u32 = 1 << 31;
 const TRB_LINK: u32 = 6;
 const TRB_NOOP: u32 = 8;
 const TRB_ENABLE_SLOT: u32 = 9;
@@ -52,6 +55,8 @@ const PORT_CHANGE_BITS: u32 = 0x00FE_0000; // CSC PEC WRC OCC PRC PLC CEC (write
 const PORT_PRC: u32 = 1 << 21;
 
 const RING_TRBS: usize = 256;
+/// Isochronous rings are bigger: sound keeps tens of milliseconds of packets queued.
+const ISOCH_RING_TRBS: usize = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Speed {
@@ -105,15 +110,21 @@ struct Ring {
     buf: Dma,
     enq: usize,
     cycle: u32,
+    /// TRBs in the ring (the last is the link back to the start).
+    n: usize,
 }
 
 impl Ring {
     fn new() -> Ring {
-        let buf = Dma::new(RING_TRBS * 16, 4096);
-        let r = Ring { buf, enq: 0, cycle: 1 };
+        Ring::with_size(RING_TRBS)
+    }
+
+    fn with_size(n: usize) -> Ring {
+        let buf = Dma::new(n * 16, 4096.max(n * 16).next_power_of_two().min(65536));
+        let r = Ring { buf, enq: 0, cycle: 1, n };
         // Link TRB at the end, pointing back to the start.
         let phys = r.buf.phys();
-        r.write_trb(RING_TRBS - 1, [phys as u32, (phys >> 32) as u32, 0, TRB_LINK << 10 | TOGGLE]);
+        r.write_trb(n - 1, [phys as u32, (phys >> 32) as u32, 0, TRB_LINK << 10 | TOGGLE]);
         r
     }
 
@@ -135,7 +146,7 @@ impl Ring {
     /// Make sure the next `n` TRBs fit before the link TRB, so a multi-TRB transfer
     /// never wraps in the middle.
     fn reserve(&mut self, n: usize) {
-        while self.enq + n > RING_TRBS - 1 {
+        while self.enq + n > self.n - 1 {
             self.push([0, 0, 0, TRB_NOOP << 10]);
         }
     }
@@ -145,10 +156,10 @@ impl Ring {
         let phys = self.buf.phys() + (self.enq * 16) as u64;
         self.write_trb(self.enq, [t[0], t[1], t[2], (t[3] & !CYCLE) | self.cycle]);
         self.enq += 1;
-        if self.enq == RING_TRBS - 1 {
+        if self.enq == self.n - 1 {
             // Hand the link TRB to the controller, then wrap.
             let p = self.buf.phys();
-            self.write_trb(RING_TRBS - 1, [p as u32, (p >> 32) as u32, 0, TRB_LINK << 10 | TOGGLE | self.cycle]);
+            self.write_trb(self.n - 1, [p as u32, (p >> 32) as u32, 0, TRB_LINK << 10 | TOGGLE | self.cycle]);
             self.cycle ^= 1;
             self.enq = 0;
         }
@@ -182,6 +193,8 @@ pub enum EpType {
     BulkOut,
     BulkIn,
     InterruptIn,
+    /// Sound to a USB audio device: a packet every service interval.
+    IsochOut,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -189,7 +202,7 @@ pub struct EpConfig {
     pub dci: u8,
     pub kind: EpType,
     pub max_packet: u16,
-    /// Raw bInterval from the endpoint descriptor (interrupt endpoints).
+    /// Raw bInterval from the endpoint descriptor (interrupt and isochronous endpoints).
     pub interval: u8,
     pub max_burst: u8,
 }
@@ -201,6 +214,8 @@ pub struct Completion {
     pub code: u8,
     /// Bytes NOT transferred.
     pub residual: u32,
+    /// The TRB the event is about (its physical address).
+    pub trb: u64,
 }
 
 pub struct Xhci {
@@ -512,6 +527,7 @@ impl Xhci {
                     dci: ((ctrl >> 16) & 0x1F) as u8,
                     code,
                     residual: status & 0xFF_FFFF,
+                    trb: (hi as u64) << 32 | lo as u64,
                 }),
                 EVT_PORT_CHANGE => self.port_changes.push((lo >> 24) as u8),
                 _ => {}
@@ -668,12 +684,14 @@ impl Xhci {
         let mut max_dci = 1;
         let mut rings = Vec::new();
         for ep in eps {
-            let ring = Ring::new();
+            let isoch = matches!(ep.kind, EpType::IsochOut);
+            let ring = if isoch { Ring::with_size(ISOCH_RING_TRBS) } else { Ring::new() };
             let dq = ring.dequeue_ptr();
             let (ty, avg) = match ep.kind {
                 EpType::BulkOut => (2u32, 3072u32),
                 EpType::BulkIn => (6, 3072),
                 EpType::InterruptIn => (7, ep.max_packet as u32),
+                EpType::IsochOut => (1, ep.max_packet as u32),
             };
             let interval = match (ep.kind, speed) {
                 (EpType::InterruptIn, Speed::Low | Speed::Full) => {
@@ -682,18 +700,23 @@ impl Xhci {
                     31 - frames.leading_zeros()
                 }
                 (EpType::InterruptIn, _) => (ep.interval.clamp(1, 16) - 1) as u32,
+                // Isochronous: every 2^(bInterval-1) frames (full speed) or microframes.
+                (EpType::IsochOut, Speed::Low | Speed::Full) => (ep.interval.clamp(1, 16) - 1) as u32 + 3,
+                (EpType::IsochOut, _) => (ep.interval.clamp(1, 16) - 1) as u32,
                 _ => 0,
             };
-            let esit = if matches!(ep.kind, EpType::InterruptIn) {
+            let esit = if matches!(ep.kind, EpType::InterruptIn | EpType::IsochOut) {
                 ep.max_packet as u32 * (ep.max_burst as u32 + 1)
             } else {
                 0
             };
+            // Error retries: none for isochronous endpoints (a late packet is just dropped).
+            let cerr = if isoch { 0 } else { 3 };
             let idx = 1 + ep.dci as usize;
             let base = unsafe { s.in_ctx.ptr::<u8>().add(idx * csz) as *mut u32 };
             unsafe {
                 write_volatile(base, interval << 16);
-                write_volatile(base.add(1), 3 << 1 | ty << 3 | (ep.max_burst as u32) << 8 | (ep.max_packet as u32) << 16);
+                write_volatile(base.add(1), cerr << 1 | ty << 3 | (ep.max_burst as u32) << 8 | (ep.max_packet as u32) << 16);
                 write_volatile(base.add(2), dq as u32);
                 write_volatile(base.add(3), (dq >> 32) as u32);
                 write_volatile(base.add(4), avg | esit << 16);
@@ -785,6 +808,28 @@ impl Xhci {
         ring.push([buf as u32, (buf >> 32) as u32, len as u32, TRB_NORMAL << 10 | IOC | ISP]);
         self.ring_doorbell(slot, dci as u32);
         Ok(())
+    }
+
+    /// Queue packets on an isochronous OUT endpoint, one per service interval from the last
+    /// one queued (each starts "as soon as possible" after the one before). Only the last asks
+    /// for an event; returns that TRB's address, which its completion will carry.
+    pub fn isoch(&mut self, slot: u8, dci: u8, packets: &[(u64, u32)]) -> Result<u64, UsbError> {
+        let ring = self.slots.get_mut(slot as usize).and_then(|s| s.as_mut()).and_then(|s| s.rings[dci as usize].as_mut());
+        let ring = ring.ok_or(UsbError::NoDevice)?;
+        let mut last = 0;
+        for (i, &(buf, len)) in packets.iter().enumerate() {
+            let ioc = if i + 1 == packets.len() { IOC } else { 0 };
+            last = ring.push([buf as u32, (buf >> 32) as u32, len & 0x1_FFFF, TRB_ISOCH << 10 | SIA | ioc]);
+        }
+        self.ring_doorbell(slot, dci as u32);
+        Ok(last)
+    }
+
+    /// Every finished transfer on an endpoint, oldest first.
+    pub fn take_completions(&mut self, slot: u8, dci: u8) -> Vec<Completion> {
+        let (mine, rest): (Vec<Completion>, Vec<Completion>) = self.done.drain(..).partition(|c| c.slot == slot && c.dci == dci);
+        self.done = rest;
+        mine
     }
 
     /// Bulk transfer and wait. Returns bytes actually transferred.

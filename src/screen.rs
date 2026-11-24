@@ -222,6 +222,13 @@ impl Screen {
     /// Put part of the canvas (x, y, w, h: this screen's share of an extended desktop) on
     /// the screen in `dst`, as `present` does with all of it.
     pub fn present_part(&self, c: &crate::gfx::Canvas, part: (usize, usize, usize, usize), scale: u32, dst: (usize, usize, usize, usize)) {
+        self.present_area(c, part, scale, dst, None);
+    }
+
+    /// `present_part`, when only `area` (x, y, w, h in the canvas) can have changed: only
+    /// there is compared with what was sent (a playing video doesn't make the whole desktop
+    /// be looked at again).
+    pub fn present_area(&self, c: &crate::gfx::Canvas, part: (usize, usize, usize, usize), scale: u32, dst: (usize, usize, usize, usize), area: Option<(usize, usize, usize, usize)>) {
         let (px_, py_) = (part.0.min(c.w), part.1.min(c.h));
         let part = (px_, py_, part.2.min(c.w - px_), part.3.min(c.h - py_));
         if part.2 == 0 || part.3 == 0 {
@@ -236,15 +243,28 @@ impl Screen {
         let mut rows: Vec<(usize, usize, usize)> = Vec::new();
         if same_layout {
             let l = last.as_mut().unwrap();
-            for y in 0..src.h {
-                let (a, b) = (src.row(y), &mut l.px[y * src.w..(y + 1) * src.w]);
+            // The rows and columns to look at, in the part's own coordinates.
+            let (y0, y1, c0, c1) = match area {
+                Some((ax, ay, aw, ah)) => (
+                    ay.saturating_sub(part.1).min(src.h),
+                    (ay + ah).saturating_sub(part.1).min(src.h),
+                    ax.saturating_sub(part.0).min(src.w),
+                    (ax + aw).saturating_sub(part.0).min(src.w),
+                ),
+                None => (0, src.h, 0, src.w),
+            };
+            if c0 >= c1 {
+                return;
+            }
+            for y in y0..y1 {
+                let (a, b) = (&src.row(y)[c0..c1], &mut l.px[y * src.w + c0..y * src.w + c1]);
                 if a == b {
                     continue;
                 }
                 let x0 = a.iter().zip(b.iter()).position(|(p, q)| p != q).unwrap_or(0);
-                let x1 = src.w - a.iter().rev().zip(b.iter().rev()).position(|(p, q)| p != q).unwrap_or(0);
+                let x1 = a.len() - a.iter().rev().zip(b.iter().rev()).position(|(p, q)| p != q).unwrap_or(0);
                 b[x0..x1].copy_from_slice(&a[x0..x1]);
-                rows.push((y, x0, x1));
+                rows.push((y, c0 + x0, c0 + x1));
             }
             if rows.is_empty() {
                 return;
