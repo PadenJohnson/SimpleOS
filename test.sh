@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Headless boot test (bash version of test.ps1): build, boot in QEMU with no window, capture the
-# serial log + a screenshot, check for expected log lines. Needs qemu-system-x86_64, OVMF and python3.
+# Headless boot test (Linux, macOS, Raspberry Pi; bash version of test.ps1): build, boot in QEMU
+# with no window, drive the mouse and keyboard, take screenshots, and check the serial log for
+# expected lines. Needs qemu-system-x86_64, OVMF and python3.
 #
 # Usage: ./test.sh [options]
 # Options take the same names as test.ps1, written either way: --seconds 12 or -Seconds 12.
