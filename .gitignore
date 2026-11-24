@@ -1,4 +1,7 @@
-# Build output (kernel and tools/mkimg)
+# Not kept in git: build output, the boot folder and test results, and the Limine binaries
+# (cloned separately).
+
+# Build output (kernel and tools)
 target/
 /dist
 
