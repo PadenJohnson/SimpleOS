@@ -1,3 +1,7 @@
+//! Build script: links the kernel with `linker.ld`, and stamps it with the commit it was built
+//! from and that commit's time (shown on the crash screen and used to tell which of two Solon
+//! versions is newer when updating from a USB drive).
+
 use std::env;
 use std::process::Command;
 
