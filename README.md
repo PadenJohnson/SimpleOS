@@ -1,6 +1,16 @@
 # SimpleOS
 An OS for my parents family computer, an OS for my Grandma to save photos and view them. No internet, no logon, Local storage with editing capabities. supreme simplicity with enterprise safety. Desktop, usb and printer drivers with ISO download
 
+## The idea
+
+The idea of this OS is to be the most advanced while acceptable for people remembering the
+past. Underneath, it uses today's hardware to the full: every processor core, its own
+graphics drivers lighting a second monitor, every common photo and video format. On top, it
+looks and works the way people already know computers: windows, a dock, folders, a big clock,
+plain words instead of jargon, big clear text, and nothing that changes or asks for attention
+by itself. New things arrive working, set up sensibly from the start (a second monitor simply
+extends the desktop), with the choices in Settings for anyone who wants them.
+
 ## What it is
 
 SimpleOS (internally "Solon") is a small operating system written from scratch in Rust for
@@ -67,6 +77,11 @@ nothing to download.
   Digital Plus), DTS, AMR and AMR-WB (old phones' 3GP videos), Vorbis, Opus and PCM; surround
   is mixed to stereo. All with Solon's own decoders, checked against FFmpeg. DTS-HD and 7.1
   E-AC-3 play their main 5.1 part. Not yet: WMV/VC-1, AV1, RealVideo, Theora.
+  A classic to try it with: Steamboat Willie (1928), public domain in the US since 2024
+  (still under copyright in some countries, such as Germany; Mickey Mouse is a Disney
+  trademark). `tools/get-steamboat-willie.sh` downloads the 1080p VP9 version from Wikimedia
+  Commons and can copy it into a stick's Solon storage (Videos folder). Solon's decoder plays
+  it frame for frame the same as FFmpeg.
 - Video Editor: a simple Kdenlive-style editor. Photos, phone and camera videos (.mp4, .mov,
   .avi) and music (.wav) on the left, a preview with Play/Pause, and a timeline with Video, Titles
   and two Music tracks. Add, drag to reorder or move, drag the ends to shorten, split at the
@@ -116,7 +131,10 @@ nothing to download.
   other PCs lower resolutions are drawn at their size and scaled smoothly to fill the screen,
   as a monitor does; only one bigger than the screen's start-up mode needs a restart, after
   which Solon asks "Keep this resolution?" and goes back by itself after 15 seconds; the
-  monitor's name and refresh rate; the screensaver), Mouse (speed),
+  monitor's name and refresh rate; with two monitors, Screens: a picture of how they stand,
+  Extend (one desktop across both, the default), Mirror or Main screen only, which one is the
+  main screen (the dock, the clock, messages and new windows), where the second one stands
+  (left, right, above or below) and how they line up; the screensaver), Mouse (speed),
   Spelling (language, and the words you added, with Remove), This PC and About. Saved in the
   library.
   Right-click the desktop for quick ways to the background, display, screensaver, date and
@@ -126,8 +144,9 @@ nothing to download.
   the screen to the card. Native drivers come a step at a time: see
   [docs/graphics.md](docs/graphics.md). The NVIDIA driver (GeForce RTX 20 series and newer)
   reads the card, its display engine and which connectors have monitors, and on RTX 30
-  series cards lights a second DisplayPort monitor (F12, then L) and mirrors the desktop on
-  it, scaled to fit.
+  series cards lights a second DisplayPort monitor when Solon starts and spreads the desktop
+  across both: the pointer and windows move between them, windows maximize on the screen
+  they're on, and each screen has its own wallpaper (Settings > Display > Screens).
 - Every processor core is used: photo thumbnails are decoded together and the screen is
   scaled on all cores (see [docs/hardware.md](docs/hardware.md)).
 - This PC (Settings): the processor (name, cores and threads; on AMD Ryzen its clock,
