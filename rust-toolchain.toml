@@ -1,4 +1,5 @@
-# Nightly is needed only for `extern "x86-interrupt"` (abi_x86_interrupt).
+# The Rust toolchain: nightly (needed only for `extern "x86-interrupt"`, abi_x86_interrupt),
+# with the bare-metal x86-64 target.
 [toolchain]
 channel = "nightly"
 targets = ["x86_64-unknown-none"]
