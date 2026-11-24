@@ -68,6 +68,7 @@ mod scrollbar;
 mod settings;
 mod settingsui;
 mod smbios;
+mod smp;
 mod spell;
 mod sheetui;
 mod textedit;
@@ -86,8 +87,8 @@ use core::sync::atomic::Ordering::Relaxed;
 
 use alloc::string::String;
 use limine::request::{
-    ExecutableCmdlineRequest, ExecutableFileRequest, FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, RequestsEndMarker, RequestsStartMarker, RsdpRequest,
-    SmbiosRequest, StackSizeRequest,
+    ExecutableCmdlineRequest, ExecutableFileRequest, FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, RequestsEndMarker, RequestsStartMarker,
+    RsdpRequest, SmbiosRequest, StackSizeRequest,
 };
 use limine::BaseRevision;
 use x86_64::instructions::{hlt, interrupts as cpu_irq};
@@ -140,6 +141,11 @@ static EXECUTABLE_CMDLINE_REQUEST: ExecutableCmdlineRequest = ExecutableCmdlineR
 #[used]
 #[link_section = ".requests"]
 static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
+
+/// The other processor cores: Limine starts them and parks them for Solon to take over.
+#[used]
+#[link_section = ".requests"]
+static MP_REQUEST: MpRequest = MpRequest::new();
 
 /// The SMBIOS tables (what the motherboard, BIOS and memory are).
 #[used]
@@ -281,6 +287,16 @@ extern "C" fn kmain() -> ! {
         smbios::init(if a >= hhdm { a - hhdm } else { a });
     }
     kprintln!("hwmon: {}", hwmon::init());
+    // Boot option "onecore": leave the other cores alone (Limine still starts them; they sleep).
+    let one_core = EXECUTABLE_CMDLINE_REQUEST.get_response().and_then(|r| r.cmdline().to_str().ok()).is_some_and(|c| c.split_whitespace().any(|w| w == "onecore"));
+    if let Some(mp) = MP_REQUEST.get_response() {
+        if one_core {
+            smp::park(mp);
+        } else {
+            smp::init(mp);
+        }
+    }
+    smp::bench();
     cpu::sample(); // starts the clock and power counters
     if let Some(r) = hwmon::read() {
         kprintln!("hwmon: {}", hwmon::describe(&r));

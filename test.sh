@@ -28,6 +28,9 @@
 #   --legacy-bios       boot with SeaBIOS instead of UEFI
 #   --cmdline TEXT      kernel command line (development boot only), e.g. "testprinter=pcl"
 #   --resolution WxH    screen mode (development boot only), e.g. "1920x1080"
+#   --smp N             N processor cores (threads) instead of one
+#   --cpu MODEL         QEMU processor model, e.g. "max" (has MONITOR/MWAIT, which the other cores
+#                       sleep in)
 #   --stick-on-usb2     with --boot-stick: put the stick on a USB 2 controller Solon can't use
 #   --no-esp            no development boot folder: boot from an internal disk (after installing)
 #   --sound             add an Intel HD Audio card; what it plays lands in test-out/sound.wav
@@ -42,7 +45,7 @@ set -uo pipefail
 cd "$(dirname "$0")"
 root=$(pwd)
 
-seconds=8 wait_for="" qemu=qemu-system-x86_64 boot_stick="" cmdline="" resolution=""
+seconds=8 wait_for="" qemu=qemu-system-x86_64 boot_stick="" cmdline="" resolution="" smp="" cpu=""
 no_boot_photos=0 legacy_bios=0 stick_on_usb2=0 no_esp=0 sound=0 expect_exit=0 secure_boot=0 reset_sb=0
 expect=() events=() photos=() usb=() internal=() expect_set=0
 
@@ -59,6 +62,8 @@ while [ $# -gt 0 ]; do
     bootstick) boot_stick=${1:?}; shift ;;
     cmdline) cmdline=${1?}; shift ;;
     resolution) resolution=${1?}; shift ;;
+    smp) smp=${1:?}; shift ;;
+    cpu) cpu=${1:?}; shift ;;
     expect|events|event|photos|usb|internal)
       take "$@"; shift ${#list[@]}
       [ ${#list[@]} -gt 0 ] || die "--$opt needs a value"
@@ -114,6 +119,10 @@ args=(-machine q35 -m 1G -display none
       -serial "file:$log"
       -serial file:test-out/printjob.bin
       -qmp "unix:$out_dir/qmp.sock,server=on,wait=off")
+[ -n "$smp" ] && args+=(-smp "$smp")
+[ -n "$cpu" ] && args+=(-cpu "$cpu")
+# Environment: QEMU_EXTRA adds QEMU options (e.g. "-accel tcg,thread=multi").
+[ -n "${QEMU_EXTRA:-}" ] && read -r -a extra <<< "$QEMU_EXTRA" && args+=("${extra[@]}")
 if [ $secure_boot = 1 ]; then
   mkdir -p test-out/sb
   if [ -f test-out/sb/OVMF_CODE.secboot.fd ]; then

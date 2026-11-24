@@ -118,6 +118,44 @@ pub fn decode(bytes: &[u8]) -> Result<Image, &'static str> {
 
 /// A picture for a thumbnail grid: an embedded preview when the file has a big enough one
 /// (HEIC), else the full picture. Returns (picture, full size).
+/// A JPEG's or PNG's size from its header, without decoding it (None: another format, or
+/// not found).
+pub fn peek_size(b: &[u8]) -> Option<(usize, usize)> {
+    if b.len() >= 24 && b.starts_with(&[0x89, b'P', b'N', b'G']) && &b[12..16] == b"IHDR" {
+        let be = |o: usize| u32::from_be_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) as usize;
+        return Some((be(16), be(20)));
+    }
+    if !b.starts_with(&[0xFF, 0xD8]) {
+        return None;
+    }
+    let mut i = 2;
+    while i + 4 <= b.len() {
+        if b[i] != 0xFF {
+            return None;
+        }
+        let m = b[i + 1];
+        if m == 0xFF {
+            i += 1;
+            continue;
+        }
+        let len = u16::from_be_bytes([b[i + 2], b[i + 3]]) as usize;
+        // Start of frame (any kind but DHT, JPG and DAC): precision, height, width.
+        if (0xC0..=0xCF).contains(&m) && m != 0xC4 && m != 0xC8 && m != 0xCC {
+            if i + 9 > b.len() {
+                return None;
+            }
+            let h = u16::from_be_bytes([b[i + 5], b[i + 6]]) as usize;
+            let w = u16::from_be_bytes([b[i + 7], b[i + 8]]) as usize;
+            return Some((w, h));
+        }
+        if m == 0xDA || m == 0xD9 || len < 2 {
+            return None;
+        }
+        i += 2 + len;
+    }
+    None
+}
+
 pub fn decode_preview(bytes: &[u8], min: usize) -> Result<(Image, (usize, usize)), &'static str> {
     if sniff(bytes) == Some(Format::Heif) {
         if let Some(t) = crate::imgfmt::heif::decode_thumb(bytes, min) {

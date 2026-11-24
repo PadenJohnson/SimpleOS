@@ -283,7 +283,7 @@ impl Screen {
     }
 
     /// Scale part of a canvas (`a`) into its place in `dst` with bilinear filtering (what a
-    /// monitor does with a resolution that isn't its own).
+    /// monitor does with a resolution that isn't its own). Bands of rows go to all the cores.
     fn blit_fit_area(&self, c: &crate::gfx::Canvas, dst: (usize, usize, usize, usize), a: Area) {
         let (dx, dy, dw, dh) = dst;
         let (dw, dh) = (dw.min(self.width.saturating_sub(dx)), dh.min(self.height.saturating_sub(dy)));
@@ -305,37 +305,90 @@ impl Screen {
                 (((f >> 8) as usize).min(c.w - 1), (f & 255) as u32)
             })
             .collect();
-        let lerp = |a: u32, b: u32, w: u32| -> u32 {
-            let rb = ((a & 0xFF00FF) * (256 - w) + (b & 0xFF00FF) * w) >> 8;
-            let g = ((a & 0x00FF00) * (256 - w) + (b & 0x00FF00) * w) >> 8;
-            (rb & 0xFF00FF) | (g & 0x00FF00)
-        };
-        let hrow = |sy: usize, out: &mut [u32]| {
-            let src = &c.px[sy * c.w..(sy + 1) * c.w];
-            for (o, &(i, w)) in out.iter_mut().zip(&xmap) {
-                *o = if w == 0 || i + 1 >= c.w { src[i] } else { lerp(src[i], src[i + 1], w) };
+        let out = Rows { base: self.base as usize, pitch: self.pitch, width: self.width, height: self.height, shifts: (self.r_shift, self.g_shift, self.b_shift) };
+        let rows = oy1 - oy0;
+        // Bands of at least 32 rows, about two per core.
+        let bands = (crate::smp::threads() * 2).min(rows.div_ceil(32)).max(1);
+        let per = rows.div_ceil(bands);
+        let (xmap, src) = (&xmap, &c.px);
+        let (cw, ch) = (c.w, c.h);
+        crate::smp::run(bands, &|b| {
+            let (r0, r1) = (oy0 + b * per, (oy0 + (b + 1) * per).min(oy1));
+            if r0 < r1 {
+                fit_rows(src, cw, ch, dh, xmap, r0, r1, |row, line| out.write(dy + row, dx + ox0, line));
+                // Write-combined memory: send this core's last writes on now, not whenever it
+                // next writes.
+                unsafe { core::arch::x86_64::_mm_sfence() };
             }
-        };
-        let n = ox1 - ox0;
-        let (mut ra, mut rb, mut line) = (alloc::vec![0u32; n], alloc::vec![0u32; n], alloc::vec![0u32; n]);
-        let mut have = (usize::MAX, usize::MAX);
-        for row in oy0..oy1 {
-            let f = (((row as u64 * 2 + 1) * c.h as u64 * 256) / (dh as u64 * 2)).saturating_sub(128);
-            let (y0, wy) = (((f >> 8) as usize).min(c.h - 1), (f & 255) as u32);
-            let y1 = (y0 + 1).min(c.h - 1);
-            if have != (y0, y1) {
-                if have.1 == y0 {
-                    core::mem::swap(&mut ra, &mut rb);
-                } else {
-                    hrow(y0, &mut ra);
-                }
-                hrow(y1, &mut rb);
-                have = (y0, y1);
-            }
-            for i in 0..n {
-                line[i] = if wy == 0 { ra[i] } else { lerp(ra[i], rb[i], wy) };
-            }
-            self.write_row(dy + row, dx + ox0, &line);
+        });
+        self.written.set(self.written.get() + ((ox1 - ox0) * rows) as u64);
+    }
+}
+
+/// Where rows of a screen go, for writing from any core (the screen's own bookkeeping
+/// stays with the first core).
+#[derive(Clone, Copy)]
+struct Rows {
+    base: usize,
+    pitch: usize,
+    width: usize,
+    height: usize,
+    shifts: (u8, u8, u8),
+}
+
+impl Rows {
+    fn write(&self, y: usize, x: usize, src: &[u32]) {
+        let n = src.len().min(self.width.saturating_sub(x));
+        if y >= self.height || n == 0 {
+            return;
         }
+        let dst = (self.base + y * self.pitch + x * 4) as *mut u32;
+        if self.shifts == (16, 8, 0) {
+            unsafe { ptr::copy_nonoverlapping(src.as_ptr(), dst, n) };
+        } else {
+            let (r, g, b) = self.shifts;
+            for (i, &p) in src[..n].iter().enumerate() {
+                let v = ((p >> 16) & 0xff) << r | ((p >> 8) & 0xff) << g | (p & 0xff) << b;
+                unsafe { ptr::write_volatile(dst.add(i), v) };
+            }
+        }
+    }
+}
+
+/// Output rows `r0..r1` of a bilinear scale of a `cw` x `ch` picture to height `dh`, the
+/// columns given by `xmap` (source index and weight of the next pixel); each finished row
+/// goes to `emit`.
+fn fit_rows(src: &[u32], cw: usize, ch: usize, dh: usize, xmap: &[(usize, u32)], r0: usize, r1: usize, mut emit: impl FnMut(usize, &[u32])) {
+    let lerp = |a: u32, b: u32, w: u32| -> u32 {
+        let rb = ((a & 0xFF00FF) * (256 - w) + (b & 0xFF00FF) * w) >> 8;
+        let g = ((a & 0x00FF00) * (256 - w) + (b & 0x00FF00) * w) >> 8;
+        (rb & 0xFF00FF) | (g & 0x00FF00)
+    };
+    let hrow = |sy: usize, out: &mut [u32]| {
+        let row = &src[sy * cw..(sy + 1) * cw];
+        for (o, &(i, w)) in out.iter_mut().zip(xmap) {
+            *o = if w == 0 || i + 1 >= cw { row[i] } else { lerp(row[i], row[i + 1], w) };
+        }
+    };
+    let n = xmap.len();
+    let (mut ra, mut rb, mut line) = (alloc::vec![0u32; n], alloc::vec![0u32; n], alloc::vec![0u32; n]);
+    let mut have = (usize::MAX, usize::MAX);
+    for row in r0..r1 {
+        let f = (((row as u64 * 2 + 1) * ch as u64 * 256) / (dh as u64 * 2)).saturating_sub(128);
+        let (y0, wy) = (((f >> 8) as usize).min(ch - 1), (f & 255) as u32);
+        let y1 = (y0 + 1).min(ch - 1);
+        if have != (y0, y1) {
+            if have.1 == y0 {
+                core::mem::swap(&mut ra, &mut rb);
+            } else {
+                hrow(y0, &mut ra);
+            }
+            hrow(y1, &mut rb);
+            have = (y0, y1);
+        }
+        for i in 0..n {
+            line[i] = if wy == 0 { ra[i] } else { lerp(ra[i], rb[i], wy) };
+        }
+        emit(row, &line);
     }
 }

@@ -357,7 +357,9 @@ impl SettingsApp {
         ui.card("Processor");
         ui.info("Name", if cpu.brand.is_empty() { "Not named by the processor" } else { &cpu.brand });
         let n = |k: u32, one: &str, many: &str| format!("{} {}", k, if k == 1 { one } else { many });
-        ui.info("Cores", &format!("{}, {} (Solon uses one for now)", n(cpu.cores, "core", "cores"), n(cpu.threads, "thread", "threads")));
+        let used = crate::smp::threads() as u32;
+        let use_note = if used >= cpu.threads { String::from("Solon uses them all") } else if used > 1 { format!("Solon uses {}", used) } else { String::from("Solon uses one") };
+        ui.info("Cores", &format!("{}, {} ({})", n(cpu.cores, "core", "cores"), n(cpu.threads, "thread", "threads"), use_note));
         let base = cpu.pstates.first().copied().unwrap_or(cpu.tsc_mhz);
         let speed = match now.mhz {
             Some(m) => format!("{} while busy (base {})", ghz(m), ghz(base)),

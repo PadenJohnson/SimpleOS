@@ -7,6 +7,9 @@ ASUS ROG STRIX B550-F GAMING WIFI II.
 What that board had working already: USB (both of its xHCI controllers), SATA, NVMe, and
 sound (Realtek codec over Intel HD Audio).
 
+Solon has no network on purpose (no internet, nothing to download: see the README), so the
+board's Ethernet and Wi-Fi stay unused.
+
 ## Stages
 
 1. **Know and measure (done).** Settings > This PC, and the log at start:
@@ -40,13 +43,19 @@ sound (Realtek codec over Intel HD Audio).
    voltage is doubled back (the board halves it) and +5 V and +12 V are read through the
    board's dividers (LibreHardwareMonitor's table for this board).
 
-2. **All the cores.** Start the other 15 threads (Limine's MP request already brings them
-   up and parks them) and give heavy work to them: video decoding, photos, drawing.
+2. **All the cores (started).** Limine's MP request starts the other cores; Solon takes
+   each over (its own GDT, TSS and double-fault stack, the IDT every core shares, interrupts
+   off) and parks it in MONITOR/MWAIT on a job counter. `smp::run(n, f)` spreads `f(0..n)`
+   over every core, the caller's included, and returns when all are done. Only
+   self-contained work goes to the other cores (decoding, scaling); drivers, disks, the
+   screen and input stay on the first core, which also takes every interrupt. Used so far
+   for photo thumbnails (read one at a time on the first core, then decoded together, in
+   groups whose pictures fit in about 512 MB) and the smooth scaling of the screen (the
+   mirrored second monitor, lower resolutions). A processor without MONITOR/MWAIT has its
+   other cores put to sleep, as does boot option "onecore". A benchmark at start logs the
+   speed-up (QEMU with 4 cores: 80 ms on one core, 20 ms on four; the sample photos load in
+   5.3 s instead of 7.2 s, the slowest single photo being the limit). Next: video decoding.
 
-3. **Network.** The board's Intel I225-V 2.5 Gb Ethernet, and the internet protocols Solon
-   doesn't have yet (DHCP, DNS, TCP). The Wi-Fi card (Intel AX210) needs firmware loading
-   and much more; it comes after.
-
-4. **Smaller things.** Four of the chipset controller's USB 3 ports report a connection but
+3. **Smaller things.** Four of the chipset controller's USB 3 ports report a connection but
    never finish link training (front-panel cabling, probably); Solon gives up on them after a
    warm reset each, which costs boot time. The board's RGB lights (an ASUS Aura USB device).

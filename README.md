@@ -128,6 +128,8 @@ nothing to download.
   reads the card, its display engine and which connectors have monitors, and on RTX 30
   series cards lights a second DisplayPort monitor (F12, then L) and mirrors the desktop on
   it, scaled to fit.
+- Every processor core is used: photo thumbnails are decoded together and the screen is
+  scaled on all cores (see [docs/hardware.md](docs/hardware.md)).
 - This PC (Settings): the processor (name, cores and threads; on AMD Ryzen its clock,
   temperature and package power, live), the motherboard and BIOS and each memory module (from
   the firmware's SMBIOS tables), and the board's sensors on Nuvoton NCT6798D/NCT6799D chips

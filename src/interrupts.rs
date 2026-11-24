@@ -132,6 +132,29 @@ pub fn init() {
     }
 }
 
+/// Another core, started to do work: its own GDT and TSS (each core needs its own TSS, and its
+/// own double-fault stack in it), and the IDT every core shares. Interrupts stay off there.
+pub fn init_ap() {
+    let stack: &'static mut [u8] = alloc::vec![0u8; EMERGENCY_STACK].leak();
+    let mut tss = TaskStateSegment::new();
+    tss.interrupt_stack_table[DOUBLE_FAULT_IST as usize] = VirtAddr::from_ptr(stack.as_ptr()) + EMERGENCY_STACK as u64;
+    let tss: &'static TaskStateSegment = alloc::boxed::Box::leak(alloc::boxed::Box::new(tss));
+    let mut gdt = GlobalDescriptorTable::new();
+    let code = gdt.append(Descriptor::kernel_code_segment());
+    let data = gdt.append(Descriptor::kernel_data_segment());
+    let tss_sel = gdt.append(Descriptor::tss_segment(tss));
+    let gdt: &'static GlobalDescriptorTable = alloc::boxed::Box::leak(alloc::boxed::Box::new(gdt));
+    gdt.load();
+    unsafe {
+        CS::set_reg(code);
+        SS::set_reg(data);
+        DS::set_reg(data);
+        ES::set_reg(data);
+        load_tss(tss_sel);
+    }
+    IDT.load();
+}
+
 /// Firmware sometimes leaves the local APIC's own timer (and other local interrupts)
 /// running. Solon uses the old PIT and PIC, so switch those off; keep the APIC itself on,
 /// because the PIC's interrupts pass through it on most PCs.

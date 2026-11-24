@@ -289,12 +289,16 @@ impl Photos {
         self.photos.iter().any(|p| matches!(p.state, State::Pending)) || self.needs_full().is_some()
     }
 
-    /// Decode the next pending photo (the one being viewed first). Returns true if one was processed.
+    /// Decode the next pending photos: the one being viewed on its own (full size), or else
+    /// thumbnails, several at once over all the cores. Returns true if any was processed.
     pub fn load_next(&mut self, fetch: &mut dyn FnMut(&Source) -> Result<Bytes, &'static str>) -> bool {
         let viewing = match self.mode {
             Mode::View(i) if matches!(self.photos[i].state, State::Pending) => Some(i),
             _ => self.needs_full(),
         };
+        if viewing.is_none() && crate::smp::threads() > 1 {
+            return self.load_thumbs(fetch);
+        }
         // The ones on screen first, then the rest in order.
         let (first, count) = self.visible;
         let on_screen = (first..first + count).take_while(|&k| k < self.photos.len()).find(|&k| matches!(self.photos[k].state, State::Pending));
@@ -327,6 +331,92 @@ impl Photos {
                     *image = None;
                 }
             }
+        }
+        if !self.needs_loading() {
+            kprintln!("solon: all photos loaded");
+        }
+        true
+    }
+
+    /// Thumbnails for the next pending photos (the ones on screen first), as many as there are
+    /// cores: read one at a time (the disks belong to the first core), then decoded together,
+    /// in groups whose pictures fit in about 512 MB at once.
+    fn load_thumbs(&mut self, fetch: &mut dyn FnMut(&Source) -> Result<Bytes, &'static str>) -> bool {
+        const BUDGET: usize = 512 << 20;
+        let t0 = ticks();
+        let want = crate::smp::threads().clamp(1, 16);
+        let (first, count) = self.visible;
+        let pending = |k: usize| matches!(self.photos[k].state, State::Pending);
+        let mut order: Vec<usize> = (first..first + count).take_while(|&k| k < self.photos.len()).filter(|&k| pending(k)).collect();
+        for k in 0..self.photos.len() {
+            if order.len() >= want {
+                break;
+            }
+            if pending(k) && !order.contains(&k) {
+                order.push(k);
+            }
+        }
+        order.truncate(want);
+        if order.is_empty() {
+            return false;
+        }
+        let work: Vec<(usize, Result<Bytes, &'static str>)> = order.iter().map(|&i| (i, fetch(&self.photos[i].source))).collect();
+        // A decoded picture takes about 8 bytes a pixel while being made (plus the copies).
+        let estimate = |b: &Result<Bytes, &'static str>| match b {
+            Ok(bytes) => match image::peek_size(bytes) {
+                Some((w, h)) => w.saturating_mul(h).saturating_mul(8) + (16 << 20),
+                None => bytes.len().saturating_mul(12) + (16 << 20),
+            },
+            Err(_) => 0,
+        };
+        let results: Vec<spin::Mutex<Option<Result<(usize, usize, Image), &'static str>>>> = (0..work.len()).map(|_| spin::Mutex::new(None)).collect();
+        let (max_w, max_h) = (self.max_w, self.max_h);
+        let mut start = 0;
+        let mut groups = 0;
+        while start < work.len() {
+            let (mut end, mut used) = (start, 0usize);
+            while end < work.len() {
+                let est = estimate(&work[end].1);
+                if end > start && used + est > BUDGET {
+                    break;
+                }
+                used += est;
+                end += 1;
+            }
+            let group = &work[start..end];
+            let results = &results;
+            crate::smp::run(group.len(), &|j| {
+                let r = match &group[j].1 {
+                    Ok(bytes) => image::decode_preview(bytes, THUMB_W as usize).map(|(full, (w, h))| {
+                        let image = shrink_owned(full, max_w, max_h);
+                        (w, h, image.shrink_to_fit(THUMB_W as usize, THUMB_H as usize))
+                    }),
+                    Err(e) => Err(*e),
+                };
+                *results[start + j].lock() = Some(r);
+            });
+            start = end;
+            groups += 1;
+        }
+        let ms = (ticks() - t0) * 1000 / HZ;
+        for (k, (i, _)) in work.iter().enumerate() {
+            let p = &mut self.photos[*i];
+            p.state = match results[k].lock().take() {
+                Some(Ok((w, h, thumb))) => {
+                    p.src_w = w;
+                    p.src_h = h;
+                    kprintln!("solon: photo {} {}x{} loaded in {} ms", p.name, w, h, ms);
+                    State::Ready { image: None, thumb }
+                }
+                Some(Err(e)) => {
+                    kprintln!("solon: photo {} failed: {}", p.name, e);
+                    State::Failed(e)
+                }
+                None => State::Failed("not decoded"),
+            };
+        }
+        if work.len() > 1 {
+            kprintln!("solon: {} photos decoded at once on {} cores ({} group{}) in {} ms", work.len(), crate::smp::threads(), groups, if groups == 1 { "" } else { "s" }, ms);
         }
         if !self.needs_loading() {
             kprintln!("solon: all photos loaded");
