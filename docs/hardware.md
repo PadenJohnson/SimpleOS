@@ -29,6 +29,17 @@ sound (Realtek codec over Intel HD Audio).
    general-protection fault on RDMSR) into "no reading", so other machines and emulators
    simply show less.
 
+   First try on the PC (build ac00e8e): the processor, board, BIOS 3607 and both Corsair
+   16 GB DDR4-3600 modules came out right, the chip was found at 0x2e (monitor at 0x290),
+   fans read 600 to 1,500 RPM, the board 22 degrees, the processor 41 degrees at 4.85 GHz
+   and 51 W while starting up. Two fixes followed: chiplet temperatures past the last
+   chiplet are no longer read (k10temp's limit: 8 on Zen 3 desktop; the 5800X has one, and
+   registers 11 and 14 read -46 degrees), and the AUXTIN inputs are left out (two read 96
+   and 83 degrees: not connected). On ASUS boards the fan headers get names (CPU fan on
+   header 2, as on ASUS's other NCT6798D boards), and on the ROG STRIX B550-F the core
+   voltage is doubled back (the board halves it) and +5 V and +12 V are read through the
+   board's dividers (LibreHardwareMonitor's table for this board).
+
 2. **All the cores.** Start the other 15 threads (Limine's MP request already brings them
    up and parks them) and give heavy work to them: video decoding, photos, drawing.
 

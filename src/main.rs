@@ -375,6 +375,12 @@ extern "C" fn kmain() -> ! {
     let (cx, cy) = view.to_screen(mx, my, lw, lh);
     cursor.show_at(&screen, cx, cy);
     kprintln!("solon: display {}x{}, desktop {}x{} (scale {}%)", view.res.0, view.res.1, lw, lh, scale * 50);
+    // A second monitor lit by Solon's NVIDIA driver (F12, then L): after its test picture
+    // has shown for 3 seconds, the desktop, scaled to fit, with its own pointer.
+    let mut second: Option<Screen> = None;
+    let mut second_lit_at: Option<u64> = None;
+    let mut cursor2 = Cursor::new();
+    let mirror_test = EXECUTABLE_CMDLINE_REQUEST.get_response().and_then(|r| r.cmdline().to_str().ok()).is_some_and(|c| c.split_whitespace().any(|w| w == "mirrortest"));
     kprintln!("solon: desktop ready");
     kprintln!("cpu: {}", cpu::describe_sample(&cpu::sample()));
     let crash_test = EXECUTABLE_CMDLINE_REQUEST
@@ -475,19 +481,56 @@ extern "C" fn kmain() -> ! {
             None => {}
         }
 
+        if second.is_none() {
+            // Boot option "mirrortest" (for QEMU, which has no second monitor): the bottom-right
+            // third of the screen plays one, so the mirroring can be seen working.
+            let fake = mirror_test.then(|| {
+                let (w3, h3) = (screen.width / 3, screen.height / 3);
+                let base = screen.base_addr() + ((screen.height - h3 - 8) * screen.pitch() + (screen.width - w3 - 8) * 4) as u64;
+                (base, w3 as u32, h3 as u32, screen.pitch() as u32)
+            });
+            if let Some((virt, w2, h2, pitch2)) = fake.or_else(nvidia::light::second_screen) {
+                let lit = *second_lit_at.get_or_insert(now);
+                if now >= lit + 3 * HZ {
+                    let s2 = Screen::raw(virt as *mut u8, w2 as usize, h2 as usize, pitch2 as usize, (16, 8, 0));
+                    s2.clear();
+                    kprintln!("solon: second monitor {}x{}: showing the desktop", w2, h2);
+                    second = Some(s2);
+                    redraw = true;
+                }
+            }
+        }
         if redraw {
             desktop.draw(&mut canvas);
             cursor.hide(&screen);
             screen.present(&canvas, scale, view.dst);
+            if let Some(s2) = &second {
+                cursor2.hide(s2);
+                s2.present(&canvas, scale, s2.fit(lw, lh));
+            }
             if !desktop.hide_pointer() {
                 let (cx, cy) = view.to_screen(mx, my, lw, lh);
                 cursor.show_at(&screen, cx, cy);
+                if let Some(s2) = &second {
+                    let (x, y) = pointer2(s2, mx, my, lw, lh);
+                    cursor2.show_at(s2, x, y);
+                }
             }
         } else if moved && !desktop.hide_pointer() {
             let (cx, cy) = view.to_screen(mx, my, lw, lh);
             cursor.show_at(&screen, cx, cy);
+            if let Some(s2) = &second {
+                let (x, y) = pointer2(s2, mx, my, lw, lh);
+                cursor2.show_at(s2, x, y);
+            }
         }
     }
+}
+
+/// Where the pointer goes on the second monitor: the desktop is scaled to fit it.
+fn pointer2(s2: &Screen, mx: i32, my: i32, lw: usize, lh: usize) -> (usize, usize) {
+    let (x, y, w, h) = s2.fit(lw, lh);
+    (x + mx.max(0) as usize * w / lw.max(1), y + my.max(0) as usize * h / lh.max(1))
 }
 
 /// Where the desktop goes on the screen.

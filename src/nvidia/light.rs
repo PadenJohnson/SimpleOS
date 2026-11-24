@@ -61,6 +61,12 @@ pub struct Lit {
 
 pub static LIT: Mutex<Option<Lit>> = Mutex::new(None);
 
+/// The second monitor's picture, once lit: (CPU address, width, height, bytes a row). Its
+/// pixels are A8R8G8B8.
+pub fn second_screen() -> Option<(u64, u32, u32, u32)> {
+    LIT.lock().as_ref().map(|l| (l.virt, l.w, l.h, l.pitch))
+}
+
 /// A try got as far as setting the monitor's mode; the head keeps it, so another try in the
 /// same session finds no dark monitor. Say so instead.
 static MODE_SET: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
@@ -406,7 +412,20 @@ impl<'a, 'b> Light<'a, 'b> {
                 }
             }
             aux_pad_on(r, aux);
-            match super::dpcd(r, aux, 0, 16) {
+            // A monitor asleep since start can take a while to answer on AUX at all (the LG
+            // UltraGear needed a second try): keep asking a plugged-in one for a second or so.
+            let plugged = REPORT.lock().as_ref().is_some_and(|rep| rep.connectors.iter().any(|c| c.aux == Some(aux) && c.plugged == Some(true)));
+            let mut answer = super::dpcd(r, aux, 0, 16);
+            let mut tries = 1;
+            while plugged && !matches!(&answer, Ok(d) if d[0] != 0) && tries < 15 {
+                super::mdelay(100);
+                answer = super::dpcd(r, aux, 0, 16);
+                tries += 1;
+            }
+            if tries > 1 {
+                kprintln!("nvidia:   DCB output {} (AUX {}): asked {} times", o.index, aux, tries);
+            }
+            match answer {
                 Ok(d) if d[0] != 0 => {
                     kprintln!("nvidia:   DCB output {} (connector {}, AUX {}): a monitor answers (DPCD {:02x?})", o.index, o.connector, aux, &d[..]);
                     let mut dpcd = [0u8; 16];

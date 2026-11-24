@@ -66,6 +66,38 @@ impl Screen {
         })
     }
 
+    /// A picture in memory a driver set up itself (a second monitor): 32 bits a pixel,
+    /// red, green and blue at these bit positions.
+    pub fn raw(base: *mut u8, width: usize, height: usize, pitch: usize, shifts: (u8, u8, u8)) -> Self {
+        Self {
+            base,
+            width,
+            height,
+            pitch,
+            r_shift: shifts.0,
+            g_shift: shifts.1,
+            b_shift: shifts.2,
+            last: RefCell::new(None),
+            written: Cell::new(0),
+            full: Cell::new(0),
+        }
+    }
+
+    /// Where a `w` x `h` picture goes to fill this screen without changing its shape (black
+    /// bars at the sides or top and bottom if needed): (x, y, w, h).
+    pub fn fit(&self, w: usize, h: usize) -> (usize, usize, usize, usize) {
+        if w == 0 || h == 0 {
+            return (0, 0, self.width, self.height);
+        }
+        if self.width * h <= self.height * w {
+            let oh = h * self.width / w;
+            (0, (self.height - oh) / 2, self.width, oh)
+        } else {
+            let ow = w * self.height / h;
+            ((self.width - ow) / 2, 0, ow, self.height)
+        }
+    }
+
     /// The graphics card switched to another mode (Bochs VBE): new address, size and row length.
     pub fn set_mode(&mut self, base: *mut u8, width: usize, height: usize, pitch: usize) {
         self.base = base;

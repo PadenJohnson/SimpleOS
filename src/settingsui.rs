@@ -416,8 +416,8 @@ impl SettingsApp {
                 for (name, t) in &r.temps {
                     ui.info(name, &crate::cpu::celsius(*t));
                 }
-                for &(n, rpm) in &r.fans {
-                    ui.info(&format!("Fan header {}", n), &if rpm == 0 { String::from("Not turning (or nothing connected)") } else { format!("{} RPM", rpm) });
+                for (n, rpm) in &r.fans {
+                    ui.info(n, &if *rpm == 0 { String::from("Not turning (or nothing connected)") } else { format!("{} RPM", rpm) });
                 }
                 for &(name, mv) in &r.volts {
                     ui.info(name, &format!("{}.{:03} V", mv / 1000, mv % 1000));

@@ -112,11 +112,23 @@ without NVIDIA's signed firmware, so screen modes and several monitors are possi
      identity input LUT, the colour conversion stages off), then opaque without the LUT,
      clearing each rejection and logging its code; and the window's position goes in an
      update of its own first.
+     Third try (build ac00e8e): **it works.** The firmware's way (composition bypass, no
+     input LUT) was taken at once, and the LG showed Solon's test picture: 2560x1440 at
+     59.95 Hz on head 1 through output 0, DisplayPort 4 lanes at 5.4 Gbit/s, colours and
+     edges right. The first L found the LG asleep (no answer on AUX at all); a plugged-in
+     monitor that doesn't answer is now asked again for up to 1.5 seconds.
      The firmware's monitor isn't touched. The VBIOS's scripts run in Solon's port of
      nouveau's script interpreter, which logs every register they write. If a step fails,
      Solon stops the channels, switches the link off and puts the registers back.
 4. **Stage 4: more monitors.** Light the other heads and outputs (DisplayPort link training,
    HDMI); the desktop spans them.
+   - 4a (done, waiting for a try on the RTX 3080): the lit monitor shows the desktop. After
+     its test picture has shown for 3 seconds, the desktop is mirrored on it, scaled to fit
+     with its shape kept (Solon's `Screen` sends only what changed, smoothly scaled), with a
+     pointer of its own. Boot option "mirrortest" lets QEMU show the same thing in a corner
+     of its one screen.
+   - Next: extend the desktop across both monitors instead of mirroring; light the second
+     monitor at start without F12; then more connectors (HDMI).
 
 Each stage is tried on a real card before it's switched on by default.
 

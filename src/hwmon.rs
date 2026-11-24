@@ -90,29 +90,41 @@ pub struct Readings {
     pub chip: &'static str,
     /// Name and milli-degrees Celsius.
     pub temps: Vec<(String, i32)>,
-    /// Header number (from 1) and RPM.
-    pub fans: Vec<(u32, u32)>,
+    /// Header name and RPM.
+    pub fans: Vec<(String, u32)>,
     /// Name and millivolts.
     pub volts: Vec<(&'static str, u32)>,
 }
 
-/// What each temperature source is (nct6798_temp_label).
+/// What each temperature source is (nct6798_temp_label). The AUXTIN inputs are wired
+/// differently on every board, and unconnected ones read nonsense (96 and 83 degrees on an
+/// ASUS ROG STRIX B550-F), so they're left out.
 fn source_name(src: u8) -> &'static str {
     match src {
-        1 => "motherboard (SYSTIN)",
-        2 => "CPU socket (CPUTIN)",
-        3 => "AUXTIN0",
-        4 => "AUXTIN1",
-        5 => "AUXTIN2",
-        6 => "AUXTIN3",
-        7 => "AUXTIN4",
-        8 => "SMBus master 0",
-        9 => "SMBus master 1",
-        16 => "PECI agent 0",
-        17 => "PECI agent 1",
-        18..=21 => "chipset",
-        22..=25 => "memory",
+        1 => "Motherboard",
+        2 => "CPU socket",
         _ => "",
+    }
+}
+
+/// The board, for its wiring: ASUS boards put the CPU fan on header 2 and chassis fans
+/// around it; the ROG STRIX B550-F halves the core voltage before the chip and divides +5 V
+/// and +12 V (LibreHardwareMonitor's board table).
+fn board() -> (bool, bool) {
+    let b = crate::smbios::get();
+    let asus = b.is_some_and(|b| b.board_maker.to_ascii_uppercase().starts_with("ASUS"));
+    let b550f = b.is_some_and(|b| b.board_product.to_ascii_uppercase().starts_with("ROG STRIX B550-F"));
+    (asus, b550f)
+}
+
+fn fan_name(header: u32, asus: bool) -> String {
+    match (asus, header) {
+        (true, 1) => String::from("Chassis fan 1"),
+        (true, 2) => String::from("CPU fan"),
+        (true, 3) => String::from("Chassis fan 2"),
+        (true, 4) => String::from("Chassis fan 3"),
+        (true, 5) => String::from("AIO pump"),
+        _ => format!("Fan header {}", header),
     }
 }
 
@@ -143,25 +155,32 @@ pub fn read() -> Option<Readings> {
         }
     }
     // The processor's own temperature, as the chip reads it over AMD SB-TSI (8.3 format).
-    for (k, &tr) in [0x409u16, 0x40b].iter().enumerate() {
+    for &tr in &[0x409u16, 0x40b] {
         let raw = rd16(base, tr);
         if raw != 0 && raw != 0xffff {
             let mc = (raw >> 5) as i32 * 125;
-            if (0..=125_000).contains(&mc) {
-                r.temps.push((format!("CPU (SB-TSI {})", k), mc));
+            if (0..=125_000).contains(&mc) && !r.temps.iter().any(|(n, _)| n == "CPU (as the board reads it)") {
+                r.temps.push((String::from("CPU (as the board reads it)"), mc));
             }
         }
     }
+    let (asus, b550f) = board();
     // Fans: 16-bit RPM (NCT6779_REG_FAN).
     for (k, &fr) in [0x4c0u16, 0x4c2, 0x4c4, 0x4c6, 0x4c8, 0x4ca, 0x4ce].iter().enumerate() {
         let rpm = rd16(base, fr) as u32;
         if rpm != 0xffff {
-            r.fans.push((k as u32 + 1, rpm));
+            r.fans.push((fan_name(k as u32 + 1, asus), rpm));
         }
     }
-    // Voltages: 8 mV steps, some halved inside the chip (scale_in_6798). Inputs whose
-    // meaning depends on the board's resistors (+12 V, +5 V) are left out.
-    for &(name, reg, scale) in &[("CPU core", 0x480u16, 8u32), ("3.3 V", 0x483, 16), ("3.3 V standby", 0x487, 16), ("analog 3.3 V", 0x482, 16), ("battery", 0x488, 16)] {
+    // Voltages: 8 mV steps, some halved inside the chip (scale_in_6798); on boards whose
+    // resistors are known, the inputs behind them too.
+    let core = if b550f { 16 } else { 8 };
+    let mut inputs: Vec<(&'static str, u16, u32)> = Vec::from([("CPU core", 0x480u16, core), ("3.3 V", 0x483, 16), ("3.3 V standby", 0x487, 16), ("Battery", 0x488, 16)]);
+    if b550f {
+        inputs.push(("+5 V", 0x481, 40));
+        inputs.push(("+12 V", 0x484, 96));
+    }
+    for (name, reg, scale) in inputs {
         let mv = rd(base, reg) as u32 * scale;
         if mv > 0 {
             r.volts.push((name, mv));
@@ -194,7 +213,7 @@ pub fn latest() -> Option<Readings> {
 /// The readings in one line, for the log.
 pub fn describe(r: &Readings) -> String {
     let temps: Vec<String> = r.temps.iter().map(|(n, t)| format!("{} {}", n, crate::cpu::celsius(*t))).collect();
-    let fans: Vec<String> = r.fans.iter().map(|(n, rpm)| format!("{}: {}", n, rpm)).collect();
+    let fans: Vec<String> = r.fans.iter().map(|(n, rpm)| format!("{} {}", n, rpm)).collect();
     let volts: Vec<String> = r.volts.iter().map(|(n, mv)| format!("{} {}.{:03} V", n, mv / 1000, mv % 1000)).collect();
     format!("{}; fans (RPM) {}; {}", temps.join(", "), fans.join(", "), volts.join(", "))
 }

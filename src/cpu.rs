@@ -158,23 +158,28 @@ fn probe() -> Info {
     let esu = if zen { rdmsr_safe(0xc001_0299).filter(|_| rdmsr_safe(0xc001_029b).is_some()).map(|v| ((v >> 8) & 0x1f) as u32) } else { None };
     // Temperatures: the root complex must be AMD's.
     let rc_amd = crate::pci::read32(0, 0, 0, 0) & 0xffff == 0x1022;
-    let ccd_offset = match (family, model) {
-        (0x17, 0x01 | 0x08 | 0x11 | 0x18 | 0x31 | 0x47 | 0x60 | 0x68 | 0x71) => 0x154,
-        (0x17, 0xa0..=0xaf) => 0x300,
-        (0x19, 0x00..=0x01 | 0x08 | 0x21 | 0x50..=0x5f) => 0x154,
-        (0x19, 0x40..=0x4f | 0x10..=0x1f | 0xa0..=0xaf) => 0x300,
-        (0x19, 0x60..=0x7f) => 0x308,
-        (0x1a, 0x00..=0x1f) => 0x1f0,
-        (0x1a, 0x40..=0x4f) => 0x308,
-        _ => 0,
+    // Where the chiplet temperatures are, and how many chiplets there can be (k10temp:
+    // registers past the last chiplet hold other things, some with the "valid" bit set).
+    let (ccd_offset, ccd_max) = match (family, model) {
+        (0x17, 0x01 | 0x08 | 0x11 | 0x18) => (0x154, 4),
+        (0x17, 0x31 | 0x47 | 0x60 | 0x68 | 0x71) => (0x154, 8),
+        (0x17, 0xa0..=0xaf) => (0x300, 8),
+        (0x19, 0x00..=0x01 | 0x08 | 0x21 | 0x50..=0x5f) => (0x154, 8),
+        (0x19, 0x40..=0x4f) => (0x300, 8),
+        (0x19, 0x10..=0x1f | 0xa0..=0xaf) => (0x300, 12),
+        (0x19, 0x60..=0x7f) => (0x308, 8),
+        (0x1a, 0x00..=0x1f) => (0x1f0, 16),
+        (0x1a, 0x40..=0x4f) => (0x308, 8),
+        _ => (0, 0),
     };
     let zen_temps = zen && rc_amd;
     let mut ccds = Vec::new();
     if zen_temps && ccd_offset != 0 {
-        for i in 0..16 {
+        for i in 0..ccd_max {
             let v = smn(0x59800 + ccd_offset + i * 4);
-            // Valid bit, and not an all-ones error read.
-            if v != 0xffff_ffff && v & (1 << 11) != 0 {
+            // Valid bit, not an all-ones error read, and a temperature a chiplet could have.
+            let t = (v & 0x7ff) as i32 * 125 - 49000;
+            if v != 0xffff_ffff && v & (1 << 11) != 0 && (0..=125_000).contains(&t) {
                 ccds.push(i);
             }
         }

@@ -125,7 +125,9 @@ nothing to download.
   names the card (Settings > About), uses write-combining and sends only the changed parts of
   the screen to the card. Native drivers come a step at a time: see
   [docs/graphics.md](docs/graphics.md). The NVIDIA driver (GeForce RTX 20 series and newer)
-  is at stage 1: it reads the card, its display engine and which connectors have monitors.
+  reads the card, its display engine and which connectors have monitors, and on RTX 30
+  series cards lights a second DisplayPort monitor (F12, then L) and mirrors the desktop on
+  it, scaled to fit.
 - This PC (Settings): the processor (name, cores and threads; on AMD Ryzen its clock,
   temperature and package power, live), the motherboard and BIOS and each memory module (from
   the firmware's SMBIOS tables), and the board's sensors on Nuvoton NCT6798D/NCT6799D chips
