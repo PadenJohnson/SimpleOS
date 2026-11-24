@@ -1,4 +1,5 @@
-# Headless boot test: build, boot in QEMU with no window, capture serial log + a screenshot, check for expected log lines.
+# Headless boot test (Windows): build, boot in QEMU with no window, drive the mouse and keyboard,
+# take screenshots, and check the serial log for expected lines.
 # Usage:  powershell -ExecutionPolicy Bypass -File .\test.ps1 [-Seconds 8] [-Expect "solon: desktop ready"]
 # test.sh is the Linux version: keep its options and checks in step when changing this file.
 param(
