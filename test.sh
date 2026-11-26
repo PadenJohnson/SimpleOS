@@ -26,7 +26,8 @@
 #                       saved to test-out/usb-sound.wav), "disk:<image>" (read-only check: a copy is used
 #                       and compared afterwards), "rwdisk:<image>" (used in place, writable),
 #                       "hot:<id>=<image>" (ready to plug in later with "plug:<id>")
-#   --internal D...     internal disks, used in place: "nvme:<image>", "sata:<image>"
+#   --internal D...     internal disks, used in place: "nvme:<image>", "sata:<image>", "ide:<image>"
+#                       (an old IDE controller, as a laptop's SATA set to "ATA" mode looks)
 #   --no-boot-photos    boot drive without sample photos
 #   --boot-stick IMG    boot like a real PC from this image as the only USB stick (writable, in place)
 #   --legacy-bios       boot with SeaBIOS instead of UEFI
@@ -38,6 +39,8 @@
 #   --stick-on-usb2     with --boot-stick: put the stick on a USB 2 controller Solon can't use
 #   --no-esp            no development boot folder: boot from an internal disk (after installing)
 #   --sound             add an Intel HD Audio card; what it plays lands in test-out/sound.wav
+#   --acpi-table FILE   add an ACPI table (compiled AML, e.g. tools/acpitest/tests/qemu/battery.aml:
+#                       a laptop battery that runs down, for the battery icon)
 #   --expect-exit       the test ends with Solon turning the machine off or restarting
 #   --secure-boot       Secure Boot on with Microsoft's keys. Uses test-out/sb/OVMF_CODE.secboot.fd and
 #                       OVMF_VARS.secboot.fd if present, otherwise Debian's OVMF_CODE_4M.secboot.fd and
@@ -49,7 +52,7 @@ set -uo pipefail
 cd "$(dirname "$0")"
 root=$(pwd)
 
-seconds=8 wait_for="" qemu=qemu-system-x86_64 boot_stick="" cmdline="" resolution="" smp="" cpu="" music=""
+seconds=8 wait_for="" qemu=qemu-system-x86_64 boot_stick="" cmdline="" resolution="" smp="" cpu="" music="" acpi_table=""
 no_boot_photos=0 legacy_bios=0 stick_on_usb2=0 no_esp=0 sound=0 expect_exit=0 secure_boot=0 reset_sb=0
 expect=() events=() photos=() usb=() internal=() expect_set=0
 
@@ -69,6 +72,7 @@ while [ $# -gt 0 ]; do
     smp) smp=${1:?}; shift ;;
     cpu) cpu=${1:?}; shift ;;
     music) music=${1:?}; shift ;;
+    acpitable) acpi_table=${1:?}; shift ;;
     expect|events|event|photos|usb|internal)
       take "$@"; shift ${#list[@]}
       [ ${#list[@]} -gt 0 ] || die "--$opt needs a value"
@@ -162,6 +166,10 @@ fi
 # 4. Disks and devices
 [ -z "$boot_stick" ] && [ $no_esp = 0 ] && args+=(-drive format=raw,file=fat:rw:esp)
 xhci=0
+if [ -n "$acpi_table" ]; then
+  [ -f "$acpi_table" ] || die "no ACPI table $acpi_table"
+  args+=(-acpitable "file=$(q "$acpi_table")")
+fi
 if [ $sound = 1 ]; then
   rm -f test-out/sound.wav
   args+=(-audiodev wav,id=snd0,path=test-out/sound.wav -device intel-hda -device hda-output,audiodev=snd0)
@@ -177,11 +185,15 @@ elif [ -n "$boot_stick" ]; then
          -device usb-storage,bus=xhci.0,drive=bootstick,bootindex=0)
   xhci=1
 fi
-i=0
+i=0 pata=0 pata_n=0
 for d in "${internal[@]}"; do
   kind=${d%%:*} file=${d#*:}
   args+=(-drive "if=none,id=int$i,format=raw,file=$(q "$file")")
   if [ "$kind" = nvme ]; then args+=(-device "nvme,serial=SOLONTEST$i,drive=int$i")
+  elif [ "$kind" = ide ]; then
+    [ $pata = 1 ] || args+=(-device piix3-ide,id=pata)
+    args+=(-device "ide-hd,drive=int$i,bus=pata.$((pata_n / 2)),unit=$((pata_n % 2))")
+    pata=1 pata_n=$((pata_n + 1))
   else args+=(-device "ide-hd,drive=int$i,bus=ide.$((i + 2))"); fi
   i=$((i + 1))
 done
