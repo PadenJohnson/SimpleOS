@@ -10,6 +10,7 @@ param(
     # "click", "rclick" (right button), "dblclick", "wait:500" (ms), "shot:name" (extra screenshot test-out\name.png)
     [string[]]$Events = @(),
     [string[]]$Photos = @(),  # photo folders to put on the boot drive (default: .\samples)
+    [string]$Music = "",      # songs for the boot drive's "music" folder (tools\make-demo-music.sh makes them)
     # USB devices: "kbd", "mouse", "disk:<image file>" (plugged in at boot),
     # "rwdisk:<image file>" (plugged in at boot, used in place and writable),
     # "hot:<id>=<image file>" (ready to plug in later with the "plug:<id>" event; "unplug:<id>" removes it)
@@ -45,7 +46,7 @@ if ($code -ne 0) { $out | Write-Host; throw "cargo build failed" }
 $out | Where-Object { $_ -match "^(warning|error)" } | Write-Host
 
 if ($NoBootPhotos) { $Photos = @("nonexistent-folder") }
-if (-not $BootStick) { & "$PSScriptRoot\tools\make-esp.ps1" -Photos $Photos -Cmdline $Cmdline -Resolution $Resolution }
+if (-not $BootStick) { & "$PSScriptRoot\tools\make-esp.ps1" -Photos $Photos -Music $Music -Cmdline $Cmdline -Resolution $Resolution }
 
 New-Item -ItemType Directory -Force test-out | Out-Null
 $log = "test-out\serial.log"
