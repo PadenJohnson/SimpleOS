@@ -79,6 +79,9 @@ extends the desktop), with the choices in Settings for anyone who wants them.
   of their own), the processor's floating-point and vector unit, all of the computer's memory,
   Solon's own NVIDIA RTX display driver, and sound through speakers, headphones, monitor
   speakers and USB headsets.
+- **Laptops too.** The battery beside the clock (charge, time left, a warning when it runs
+  low), read by running the laptop's own firmware code as Windows does, and internal disks
+  in every SATA mode laptops ship with (AHCI, RAID and the older ATA/IDE mode).
 - **Offline by design.** No network, no accounts, no ads, nothing collected, nothing to update
   from the internet. Updates come on a USB stick.
 
@@ -145,6 +148,7 @@ options, the host tools and the release hook.
 | [`assets/`](assets) | Built-in desktop photos (CC0) and the spelling dictionary |
 | [`fonts/`](fonts) | Noto Sans and Noto Serif |
 | [`secureboot/`](secureboot) | Secure Boot: shim, MokManager and how they're used |
+| [`vendor/acpi/`](vendor/acpi) | The acpi crate (ACPI tables and the AML interpreter) with Solon's fixes ([what changed](vendor/acpi/README.solon.md)) |
 | [`samples/`](samples) | Test photos for development |
 | `run.sh`, `test.sh` | Run Solon in QEMU, and headless tests (`run.ps1`, `test.ps1` on Windows) |
 | `Cargo.toml`, `build.rs`, `linker.ld`, `limine.conf` | The crate, its build script, the kernel's memory layout, the boot menu |
@@ -165,7 +169,10 @@ SimpleOS is built on:
   (1923) and Paul Whiteman's orchestra with George Gershwin (1924); the list is in
   `tools/make-demo-music.sh` and in CREDITS.txt next to the songs.
 - Small Rust crates: limine, x86_64, spin, linked_list_allocator (for big blocks), zune-jpeg and zune-png,
-  jpeg-encoder, miniz_oxide, ttf-parser, noto-sans-mono-bitmap and libm.
+  jpeg-encoder, miniz_oxide, ttf-parser, noto-sans-mono-bitmap and libm, and Isaac Woods'
+  [acpi](https://github.com/rust-osdev/acpi) crate for running laptops' battery code.
+- Laptop ACPI tables shared through the [Linux hardware database](https://github.com/linuxhw/ACPI),
+  which the battery code is checked against.
 - Reference: the [nouveau](https://nouveau.freedesktop.org/) project's work on NVIDIA hardware,
   Linux's drivers for how hardware behaves, and FFmpeg, which every decoder is checked against.
 
