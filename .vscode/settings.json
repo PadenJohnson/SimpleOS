@@ -1,6 +1,6 @@
 // VS Code: let rust-analyzer check the kernel for its bare-metal target (and skip test
 // targets, which a no_std kernel doesn't have).
 {
-  "rust-analyzer.cargo.target": "x86_64-unknown-none",
+  "rust-analyzer.cargo.target": "x86_64-solon.json",
   "rust-analyzer.check.allTargets": false
 }
