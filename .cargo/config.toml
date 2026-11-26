@@ -1,8 +1,15 @@
-# Build for the bare machine: the x86_64-unknown-none target, as a static kernel for the high
-# address Limine loads it at.
+# Build for the bare machine: Solon's own target (x86_64-solon.json), a static kernel for the
+# high address Limine loads it at, with the processor's floating-point and vector unit (SSE2)
+# in use. The Rust standard library's core is built from source for it (build-std), which
+# needs the rust-src component (rust-toolchain.toml asks for it).
+#
+# The host tools under tools/ use the stable toolchain, which ignores [unstable]; they're built
+# with --target set to the computer they run on.
 
 [build]
-target = "x86_64-unknown-none"
+target = "x86_64-solon.json"
 
-[target.x86_64-unknown-none]
-rustflags = ["-C", "relocation-model=static", "-C", "code-model=kernel"]
+[unstable]
+json-target-spec = true
+build-std = ["core", "alloc", "compiler_builtins"]
+build-std-features = ["compiler-builtins-mem"]
