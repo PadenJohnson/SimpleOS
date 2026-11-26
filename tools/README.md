@@ -20,5 +20,6 @@ computer. The Rust tools are separate crates, built for the computer you work on
 | `doctest/` | The spreadsheet engine: formulas, number formats, dates, .xlsx and .csv round trips |
 | `printtest/` | Each printer language, encoded and decoded again, checking every pixel survives |
 | `spell/` | Builds the spelling dictionary from SCOWL's word lists |
+| `acpitest/` | Runs the battery code (`src/battery.rs` and the vendored ACPI interpreter) against laptops' ACPI tables with a pretend embedded controller; `fetch.sh` gets tables from the linuxhw/ACPI collection, `tests/basics` is a machine with known answers, `tests/qemu/battery.aml` gives QEMU a battery (`./run.sh <folders>`, needs nightly Rust) |
 
 See [docs/development.md](../docs/development.md) for how they fit together.

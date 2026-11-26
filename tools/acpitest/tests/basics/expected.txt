@@ -1,0 +1,1 @@
+\_SB_.BAT0: 50% (Some(2000) of Some(4000) mAh, design Some(5000)), charging, rate Some(1500), Some(12000) mV, "Solon" LION Maker of Solon; plugged in

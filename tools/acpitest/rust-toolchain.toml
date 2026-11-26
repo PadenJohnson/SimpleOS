@@ -1,0 +1,3 @@
+# The acpi crate needs nightly (allocator_api), like Solon itself.
+[toolchain]
+channel = "nightly"

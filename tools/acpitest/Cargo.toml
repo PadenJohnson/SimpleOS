@@ -1,0 +1,13 @@
+# acpitest: runs Solon's battery code (src/battery.rs) on the host against a laptop's ACPI
+# tables, with a pretend embedded controller. See src/main.rs.
+[package]
+name = "acpitest"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+acpi = { path = "../../vendor/acpi", default-features = false, features = ["aml"] }
+log = "0.4"
+
+[profile.release]
+debug = true
