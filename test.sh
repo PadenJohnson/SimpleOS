@@ -20,6 +20,8 @@
 #                       "wheel:down", "hold:w,1500", "wait:500" (ms), "shot:name" (test-out/name.png),
 #                       "plug:<id>", "unplug:<id>"
 #   --photos DIR...     photo folders to put on the boot drive (default: ./samples)
+#   --music DIR         songs for the boot drive's "music" folder (as the demo songs on a stick;
+#                       tools/make-demo-music.sh makes them)
 #   --usb U...          USB devices: "kbd", "mouse", "audio" (a USB sound device whose output is
 #                       saved to test-out/usb-sound.wav), "disk:<image>" (read-only check: a copy is used
 #                       and compared afterwards), "rwdisk:<image>" (used in place, writable),
@@ -47,7 +49,7 @@ set -uo pipefail
 cd "$(dirname "$0")"
 root=$(pwd)
 
-seconds=8 wait_for="" qemu=qemu-system-x86_64 boot_stick="" cmdline="" resolution="" smp="" cpu=""
+seconds=8 wait_for="" qemu=qemu-system-x86_64 boot_stick="" cmdline="" resolution="" smp="" cpu="" music=""
 no_boot_photos=0 legacy_bios=0 stick_on_usb2=0 no_esp=0 sound=0 expect_exit=0 secure_boot=0 reset_sb=0
 expect=() events=() photos=() usb=() internal=() expect_set=0
 
@@ -66,6 +68,7 @@ while [ $# -gt 0 ]; do
     resolution) resolution=${1?}; shift ;;
     smp) smp=${1:?}; shift ;;
     cpu) cpu=${1:?}; shift ;;
+    music) music=${1:?}; shift ;;
     expect|events|event|photos|usb|internal)
       take "$@"; shift ${#list[@]}
       [ ${#list[@]} -gt 0 ] || die "--$opt needs a value"
@@ -103,6 +106,7 @@ printf '%s\n' "$out" | grep -E '^(warning|error)' || true
 # 2. Boot folder
 if [ -z "$boot_stick" ]; then
   esp_args=(--cmdline "$cmdline" --resolution "$resolution")
+  [ -n "$music" ] && esp_args+=(--music "$music")
   if [ $no_boot_photos = 1 ]; then esp_args+=(--photos nonexistent-folder)
   else for p in "${photos[@]}"; do esp_args+=(--photos "$p"); done; fi
   tools/make-esp.sh "${esp_args[@]}" || exit 1
