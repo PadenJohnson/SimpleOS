@@ -1,7 +1,8 @@
 # Solon, the SimpleOS kernel: one no_std Rust crate for 64-bit PCs, built for the bare-metal
 # x86_64-unknown-none target (see .cargo/config.toml) and started by Limine. The dependencies
 # are small no_std crates: Limine's boot protocol, x86-64 structures, locks, the heap
-# allocator, JPEG/PNG and zlib codecs, maths and TrueType font parsing.
+# allocator, JPEG/PNG and zlib codecs, maths, TrueType font parsing, and the ACPI tables and
+# interpreter (vendor/acpi: the acpi crate with Solon's fixes; it logs through `log`).
 
 [package]
 name = "solon"
@@ -21,6 +22,8 @@ jpeg-encoder = { version = "0.7", default-features = false }
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 libm = "0.2"
 ttf-parser = { version = "0.25", default-features = false, features = ["glyph-names", "no-std-float"] }
+acpi = { path = "vendor/acpi", default-features = false, features = ["aml"] }
+log = "0.4"
 
 [profile.dev]
 opt-level = 2  # unoptimized pixel loops are far too slow
