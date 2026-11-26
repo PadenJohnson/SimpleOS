@@ -1012,9 +1012,10 @@ fn tree_from(dirpath: &Path) -> Vec<Node> {
     out
 }
 
-/// Bootable Solon USB image: GPT with one FAT32 EFI system partition holding `espdir`.
+/// Bootable Solon USB image: GPT with one FAT32 EFI system partition holding `espdir`
+/// (128 MiB: the kernel, room for a new one while updating, and the demo songs).
 fn usb_image(out: &Path, espdir: &Path) {
-    let esp_sectors = 64 * 1024 * 1024 / SECTOR;
+    let esp_sectors = 128 * 1024 * 1024 / SECTOR;
     let tree = tree_from(espdir);
     let vol = Fat::new(FatKind::F32, esp_sectors, 1, 0, 2048, "SOLONBOOT").build(&tree, "SOLONBOOT");
     let total = 2048 + esp_sectors + 2048; // 1 MiB slack at the end for the backup GPT

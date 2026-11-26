@@ -50,6 +50,24 @@ mod media;
 #[path = "../../../src/imgfmt/mod.rs"]
 mod imgfmt;
 
+/// Stand-ins for the kernel's other cores (decoding on another core) and clock: the tests
+/// decode on the calling thread.
+mod smp {
+    pub fn can_spawn() -> bool {
+        false
+    }
+    pub fn spawn(t: Box<dyn FnOnce() + Send>) -> Result<(), Box<dyn FnOnce() + Send>> {
+        Err(t)
+    }
+    pub fn sleep_on(_w: &core::sync::atomic::AtomicU64, _seen: u64) {}
+    pub fn threads() -> usize {
+        1
+    }
+    pub fn run(n: usize, f: &(dyn Fn(usize) + Sync)) {
+        (0..n).for_each(f)
+    }
+}
+
 /// The kernel's module layout, for `crate::video::...` paths.
 mod video {
     pub use super::{aac, avi, bits, h264d, mp4read, mp4src, tables};
@@ -94,8 +112,20 @@ fn main() {
         Some("mkpsd") => mkpsd(&args[2], &args[3]),
         Some("mkico") => mkico(&args[2], &args[3], &args[4]),
         Some("image") => image_test(&args[2], args.get(3).map(|s| s.as_str())),
+        Some("tags") => tags(&args[2]),
         _ => eprintln!("usage: mediatest info|video|audio|speed <file> ..."),
     }
+}
+
+/// What a song file says about itself (media::tags).
+fn tags(path: &str) {
+    let (mut read, size) = reader(path);
+    let t = media::tags::read(&mut read, size);
+    println!(
+        "title {:?} | artist {:?} | album {:?} | album artist {:?} | year {:?} | track {:?} | disc {:?} | genre {:?} | comment {:?} | cover {}",
+        t.title, t.artist, t.album, t.album_artist, t.year, t.track, t.disc, t.genre, t.comment,
+        t.cover.as_ref().map(|c| format!("{} bytes", c.len())).unwrap_or_else(|| String::from("none"))
+    );
 }
 
 fn info(path: &str) {
@@ -284,6 +314,11 @@ fn audio(path: &str, reference: &str) {
         pos += n as u64;
     }
     println!("decoded {:.2} s of sound in {:.2} s", total as f64 / 48000.0, t0.elapsed().as_secs_f64());
+    // MEDIATEST_DUMP=<file>: also write what Solon decoded (48 kHz stereo s16le).
+    if let Ok(out) = std::env::var("MEDIATEST_DUMP") {
+        let bytes: Vec<u8> = ours.iter().flat_map(|s| s.to_le_bytes()).collect();
+        std::fs::write(out, bytes).unwrap();
+    }
     // Signal to noise, allowing a small time offset (resampling and decoder delay differ).
     let mut best = (f64::MIN, 0i64);
     let mut shifts: Vec<i64> = (-2400i64..=2400).step_by(8).collect();

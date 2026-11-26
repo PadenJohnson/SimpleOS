@@ -43,13 +43,21 @@ Copy-Item secureboot\mmx64.efi "$stage\EFI\BOOT\mmx64.efi"
 Invoke-SolonSecureLoader "limine\BOOTX64.EFI" "$stage\EFI\BOOT\grubx64.efi" $mkimg
 Copy-Item "$stage\EFI\BOOT\grubx64.efi" "$stage\SOLON-SECURE-BOOT.efi"
 Copy-Item limine\limine-bios.sys "$stage\boot\limine-bios.sys"
-Copy-Item target\x86_64-unknown-none\release\solon "$stage\boot\kernel"
+Copy-Item target\x86_64-solon\release\solon "$stage\boot\kernel"
 # Same boot entry as development, without the test photos.
 Copy-Item limine.conf "$stage\boot\limine.conf"
+# The demo songs for the Music app (public-domain recordings): made by make-demo-music.sh,
+# which needs bash (Git for Windows has it), curl and FFmpeg.
+if ((Get-Command bash -ErrorAction SilentlyContinue) -and (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+    bash tools/make-demo-music.sh "$stage/music"
+    if ($LASTEXITCODE -ne 0) { throw "making the demo songs failed" }
+} else {
+    Write-Host "   (demo songs left out: tools/make-demo-music.sh needs bash, curl and FFmpeg)"
+}
 @"
 Solon - bootable USB files
 ==========================
-Copy everything in this folder (EFI and boot) onto a USB stick formatted as FAT32,
+Copy everything in this folder (EFI, boot and music) onto a USB stick formatted as FAT32,
 keeping the folder structure. Then boot the PC from the stick.
 
 Secure Boot can stay on. The first time, a blue screen says "Verification failed":

@@ -43,14 +43,20 @@ cp secureboot/mmx64.efi "$stage/EFI/BOOT/mmx64.efi"
 "$mkimg" add-sbat limine/BOOTX64.EFI "$stage/EFI/BOOT/grubx64.efi" secureboot/sbat.csv
 cp "$stage/EFI/BOOT/grubx64.efi" "$stage/SOLON-SECURE-BOOT.efi"
 cp limine/limine-bios.sys "$stage/boot/limine-bios.sys"
-cp target/x86_64-unknown-none/release/solon "$stage/boot/kernel"
+cp target/x86_64-solon/release/solon "$stage/boot/kernel"
 # Same boot entry as development, without the test photos.
 cp limine.conf "$stage/boot/limine.conf"
+# The demo songs for the Music app (public-domain recordings; needs curl and FFmpeg).
+if command -v ffmpeg >/dev/null && command -v curl >/dev/null; then
+  quiet tools/make-demo-music.sh "$stage/music"
+else
+  echo "   (demo songs left out: tools/make-demo-music.sh needs curl and FFmpeg)"
+fi
 # CRLF line ends, like the Windows build, so Notepad shows it properly.
 sed 's/$/\r/' > "$stage/SOLON-README.txt" <<'EOF'
 Solon - bootable USB files
 ==========================
-Copy everything in this folder (EFI and boot) onto a USB stick formatted as FAT32,
+Copy everything in this folder (EFI, boot and music) onto a USB stick formatted as FAT32,
 keeping the folder structure. Then boot the PC from the stick.
 
 Secure Boot can stay on. The first time, a blue screen says "Verification failed":

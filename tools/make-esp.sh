@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # Assemble the UEFI boot folder (./esp) with the kernel and photos (bash version of make-esp.ps1).
-# Photos are loaded into memory by the bootloader (Limine modules).
-# Usage: tools/make-esp.sh [--profile debug|release] [--photos DIR]... [--cmdline TEXT] [--resolution WxH]
+# Photos are loaded into memory by the bootloader (Limine modules); songs (--music) are copied
+# into a "music" folder, which the Music app reads like the demo songs on a real stick.
+# Usage: tools/make-esp.sh [--profile debug|release] [--photos DIR]... [--music DIR] [--cmdline TEXT] [--resolution WxH]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-profile=debug cmdline="" resolution=""
+profile=debug cmdline="" resolution="" music=""
 photos=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --profile) profile=$2; shift 2 ;;
     --photos) photos+=("$2"); shift 2 ;;
+    --music) music=$2; shift 2 ;;
     --cmdline) cmdline=$2; shift 2 ;;
     --resolution) resolution=$2; shift 2 ;;
     *) echo "make-esp.sh: unknown option $1" >&2; exit 2 ;;
@@ -26,7 +28,7 @@ fi
 rm -rf esp
 mkdir -p esp/EFI/BOOT esp/boot esp/photos
 cp limine/BOOTX64.EFI esp/EFI/BOOT/BOOTX64.EFI
-cp "target/x86_64-unknown-none/$profile/solon" esp/boot/kernel
+cp "target/x86_64-solon/$profile/solon" esp/boot/kernel
 
 conf=$(cat limine.conf)$'\n'   # $(...) trims trailing newlines, like TrimEnd()
 [ -n "$cmdline" ] && conf+="    cmdline: $cmdline"$'\n'
@@ -47,4 +49,14 @@ for dir in "${photos[@]}"; do
 done
 shopt -u nocasematch
 printf '%s' "$conf" > esp/boot/limine.conf
-echo "esp ready: kernel + $count photo(s)"
+songs=0
+if [ -n "$music" ]; then
+  if [ -d "$music" ]; then
+    mkdir -p esp/music
+    cp "$music"/* esp/music/
+    songs=$(find esp/music -type f | wc -l)
+  else
+    echo "Music folder not found: $music"
+  fi
+fi
+echo "esp ready: kernel + $count photo(s) + $songs file(s) in music"
