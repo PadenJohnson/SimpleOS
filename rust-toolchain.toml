@@ -1,5 +1,5 @@
-# The Rust toolchain: nightly (needed only for `extern "x86-interrupt"`, abi_x86_interrupt),
-# with the bare-metal x86-64 target.
+# The Rust toolchain: nightly (needed for `extern "x86-interrupt"` and for building the
+# standard library's core for Solon's own target, x86_64-solon.json), with its source.
 [toolchain]
 channel = "nightly"
-targets = ["x86_64-unknown-none"]
+components = ["rust-src"]
