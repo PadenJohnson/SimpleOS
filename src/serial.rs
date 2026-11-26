@@ -2,6 +2,7 @@
 //! can be shown on screen (F12, and on the crash screen) on real PCs without a serial port.
 
 use core::fmt::{self, Write};
+use core::sync::atomic::{AtomicBool, Ordering::{Acquire, Relaxed, Release}};
 use spin::Mutex;
 use x86_64::instructions::interrupts::without_interrupts;
 use x86_64::instructions::port::Port;
@@ -120,9 +121,9 @@ pub fn com2_write(data: &[u8]) {
 
 struct Serial;
 
-impl Write for Serial {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for b in s.bytes() {
+impl Serial {
+    fn write_bytes(&mut self, bytes: &[u8]) {
+        for &b in bytes {
             unsafe {
                 // Wait (briefly) for the transmit buffer; a PC without COM1 must not hang here.
                 for _ in 0..10_000 {
@@ -133,26 +134,58 @@ impl Write for Serial {
                 Port::<u8>::new(COM1).write(b);
             }
         }
-        Ok(())
     }
 }
 
-struct ToLog<'a>(&'a mut LogBuf);
+/// One line, formatted before anything is locked (formatting can take a while, and can
+/// panic).
+struct Line {
+    buf: [u8; 2048],
+    n: usize,
+}
 
-impl Write for ToLog<'_> {
+impl Write for Line {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        for b in s.bytes() {
-            self.0.push(b);
-        }
+        let take = s.len().min(self.buf.len() - self.n);
+        self.buf[self.n..self.n + take].copy_from_slice(&s.as_bytes()[..take]);
+        self.n += take;
         Ok(())
     }
 }
+
+/// Taken while a line goes out, so lines from different cores don't mix (a worker core logs
+/// too: the battery). Waited for only briefly: the panic handler must always get through.
+static PRINTING: AtomicBool = AtomicBool::new(false);
 
 pub fn _print(args: fmt::Arguments) {
+    let mut line = Line { buf: [0; 2048], n: 0 };
+    let _ = line.write_fmt(args);
+    if line.n == line.buf.len() {
+        line.buf[line.n - 1] = b'\n'; // cut short: still a whole line
+    }
+    let text = &line.buf[..line.n];
     without_interrupts(|| {
-        let _ = Serial.write_fmt(args);
-        if let Some(mut log) = LOG.try_lock() {
-            let _ = ToLog(&mut log).write_fmt(args);
+        let mut ours = false;
+        for _ in 0..5_000_000 {
+            if PRINTING.compare_exchange(false, true, Acquire, Relaxed).is_ok() {
+                ours = true;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        Serial.write_bytes(text);
+        // The on-screen copy: whoever is reading it (F12, saving) is quick.
+        for _ in 0..1000 {
+            if let Some(mut log) = LOG.try_lock() {
+                for &b in text {
+                    log.push(b);
+                }
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        if ours {
+            PRINTING.store(false, Release);
         }
     });
 }

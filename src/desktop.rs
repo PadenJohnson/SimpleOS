@@ -255,6 +255,8 @@ enum DockOpt {
 enum DockItem {
     Apps,
     Entry(MenuEntry),
+    /// A laptop's battery: its charge, beside the clock.
+    Battery,
     Power,
 }
 
@@ -383,6 +385,10 @@ pub struct Desktop {
     usb: Usb,
     /// Short notice in the top bar, with the tick it disappears at.
     toast: Option<(String, u64)>,
+    /// A laptop's batteries and charger (`aml.rs` reads them), and the lowest charge warned
+    /// about since it was last plugged in.
+    power: Option<crate::battery::Power>,
+    power_warned: u8,
     drive_ids: Vec<u32>,
     storage: Storage,
     /// Cached storage status for the Import window (disk scans are slow-ish).
@@ -562,6 +568,8 @@ impl Desktop {
             drive_ids: usb.drives.iter().map(|d| d.id).chain(usb.phones.iter().map(|p| p.id)).collect(),
             usb,
             toast: None,
+            power: None,
+            power_warned: 100,
             storage,
             storage_view: StorageView { library: None, options: Vec::new(), job: None },
             job: None,
@@ -2609,18 +2617,28 @@ impl Desktop {
         self.dock_layout_on(self.dock_screen())
     }
 
+    /// The battery's width in the taskbar (0 without one).
+    fn dock_battery_w(&self) -> i32 {
+        if self.power.is_some() { text_width("100%", Size::Small, false).max(34) + 8 } else { 0 }
+    }
+
     /// The taskbar on screen `m` and where everything in it is. The power button is last.
     fn dock_layout_on(&self, m: Rect) -> (Rect, Vec<(DockItem, Rect)>) {
         let items = self.dock_items();
         let n = items.len() as i32;
         let clock_w = self.dock_clock_w();
-        let fixed = 12 + 17 + clock_w + 10 + 40 + 10;
+        let battery_w = self.dock_battery_w();
+        let fixed = 12 + 17 + clock_w + 10 + 40 + 10 + if battery_w > 0 { battery_w + 6 } else { 0 };
         let step = (DOCK_ICON + DOCK_GAP).min((m.w - 24 - fixed) / n.max(1)).max(24);
         let width = 12 + n * step - DOCK_GAP + fixed;
         let dock = Rect::new(m.x + (m.w - width) / 2, m.y + m.h - DOCK_H - (BAR_H - DOCK_H) / 2, width, DOCK_H);
         let iy = dock.y + (DOCK_H - DOCK_ICON) / 2 - 1;
         let mut v: Vec<(DockItem, Rect)> = items.iter().enumerate().map(|(i, &it)| (it, Rect::new(dock.x + 12 + i as i32 * step, iy, DOCK_ICON, DOCK_ICON))).collect();
-        v.push((DockItem::Power, Rect::new(dock.x + dock.w - 10 - 40, dock.y + (DOCK_H - 40) / 2, 40, 40)));
+        let px = dock.x + dock.w - 10 - 40;
+        if battery_w > 0 {
+            v.push((DockItem::Battery, Rect::new(px - 10 - clock_w - 6 - battery_w, dock.y + 4, battery_w, DOCK_H - 8)));
+        }
+        v.push((DockItem::Power, Rect::new(px, dock.y + (DOCK_H - 40) / 2, 40, 40)));
         (dock, v)
     }
 
@@ -2737,6 +2755,11 @@ impl Desktop {
                         }
                     }
                 }
+                DockItem::Battery => {
+                    if let Some(p) = &self.power {
+                        draw_battery(c, r, p);
+                    }
+                }
                 DockItem::Power => {
                     let bg = if self.power_menu && in_use { rgb(214, 220, 230) } else { rgb(234, 237, 242) };
                     c.round_rect(r.x, r.y, r.w, r.h, 12, bg);
@@ -2748,11 +2771,12 @@ impl Desktop {
                 }
             }
         }
-        // Separator, then the clock.
+        // Separator, then the battery and the clock.
         let clock_w = self.dock_clock_w();
         let px = items.last().unwrap().1.x;
         let cx = px - 10 - clock_w;
-        c.fill_rect_alpha(cx - 9, dock.y + 12, 1, dock.h - 24, 0, 40);
+        let sep = items.iter().find(|(it, _)| *it == DockItem::Battery).map_or(cx, |(_, r)| r.x);
+        c.fill_rect_alpha(sep - 9, dock.y + 12, 1, dock.h - 24, 0, 40);
         let (clock, date) = self.clock_strings();
         if date.is_empty() {
             c.text_centered(cx + clock_w / 2, dock.y + (dock.h - 20) / 2, &clock, Size::Medium, true, INK);
@@ -3534,6 +3558,7 @@ impl Desktop {
                     self.folder = Some(f);
                     self.apps_menu = Some(0);
                 }
+                Some(DockItem::Battery) => self.open_settings(Page::ThisPc, false),
                 None => {
                     // The clock and date open the Calendar.
                     let (dock, items) = self.dock_layout();
@@ -3742,11 +3767,81 @@ impl Desktop {
         false
     }
 
+    /// A new battery reading: the taskbar shows it; unplugging and plugging in, and a low
+    /// battery, get a notice.
+    pub fn set_power(&mut self, p: Option<crate::battery::Power>, now: u64) -> bool {
+        use crate::battery::status_text;
+        let Some(p) = p.filter(|p| p.has_battery()) else {
+            let changed = self.power.is_some();
+            self.power = None;
+            return changed;
+        };
+        let pc = p.percent().unwrap_or(100);
+        if let Some(old) = &self.power {
+            if old.on_battery() && !p.on_battery() {
+                self.toast = Some((format!("Charger connected - {}", status_text(&p)), now + 5 * HZ));
+            } else if !old.on_battery() && p.on_battery() {
+                self.toast = Some((format!("Running on battery - {}", status_text(&p)), now + 5 * HZ));
+            }
+        }
+        if !p.on_battery() {
+            self.power_warned = 100;
+        } else if pc <= 5 && self.power_warned > 5 {
+            self.power_warned = 5;
+            self.toast = Some((format!("Battery very low ({}%) - plug in the charger now", pc), now + 20 * HZ));
+        } else if pc <= 10 && self.power_warned > 10 {
+            self.power_warned = 10;
+            self.toast = Some((format!("Battery low ({}%) - plug in the charger soon", pc), now + 12 * HZ));
+        }
+        let changed = self.power.as_ref() != Some(&p);
+        self.power = Some(p);
+        changed
+    }
+
     pub fn set_clock(&mut self, h: u8, m: u8) -> bool {
         let changed = self.clock != (h, m);
         self.clock = (h, m);
         changed
     }
+}
+
+/// The battery in the taskbar: how full it is (green, then amber and red as it runs low), a
+/// lightning bolt while charging, and the charge underneath.
+fn draw_battery(c: &mut Canvas, r: Rect, p: &crate::battery::Power) {
+    let pc = p.percent().unwrap_or(0) as i32;
+    let (bw, bh) = (28, 14);
+    let (x, y) = (r.x + (r.w - bw - 3) / 2, r.y + 6);
+    c.round_rect(x, y, bw, bh, 4, INK);
+    c.round_rect(x + 2, y + 2, bw - 4, bh - 4, 2, rgb(249, 250, 253));
+    c.round_rect(x + bw, y + 4, 3, bh - 8, 1, INK);
+    let fill = if p.charging() || !p.on_battery() {
+        rgb(52, 168, 83)
+    } else if pc <= 10 {
+        rgb(217, 48, 37)
+    } else if pc <= 25 {
+        rgb(240, 160, 20)
+    } else {
+        rgb(52, 168, 83)
+    };
+    let fw = ((bw - 6) * pc + 50) / 100;
+    if fw > 0 {
+        c.fill_rect(x + 3, y + 3, fw.max(2), bh - 6, fill);
+    }
+    if p.charging() {
+        // A bolt across the middle, outlined so it shows on any fill.
+        let (mx, my) = (x + bw / 2, y + bh / 2);
+        let bolt = [[(mx + 2, my - 7), (mx - 4, my + 1), (mx, my + 1)], [(mx, my - 1), (mx + 4, my - 1), (mx - 2, my + 7)]];
+        for t in bolt {
+            c.triangle(t.map(|(a, b)| (a + 1, b)), rgb(249, 250, 253));
+            c.triangle(t.map(|(a, b)| (a - 1, b)), rgb(249, 250, 253));
+        }
+        for t in bolt {
+            c.triangle(t, INK);
+        }
+    }
+    let text = p.percent().map_or(String::from("?"), |v| format!("{}%", v));
+    let ink = if p.on_battery() && pc <= 10 { rgb(217, 48, 37) } else { INK_DIM };
+    c.text_centered(r.x + r.w / 2, r.y + 26, &text, Size::Small, false, ink);
 }
 
 fn draw_frame(c: &mut Canvas, win: &Window, title: &str, focused: bool, icon: Option<&crate::image::Image>) {

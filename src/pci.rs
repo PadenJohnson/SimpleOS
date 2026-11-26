@@ -1,6 +1,7 @@
 //! PCI bus scan through the legacy configuration ports (0xCF8 / 0xCFC).
 
 use alloc::vec::Vec;
+use spin::Mutex;
 use x86_64::instructions::port::Port;
 
 #[derive(Clone, Copy, Debug)]
@@ -19,7 +20,12 @@ fn addr(bus: u8, dev: u8, func: u8, off: u8) -> u32 {
     0x8000_0000 | (bus as u32) << 16 | (dev as u32) << 11 | (func as u32) << 8 | (off as u32 & 0xFC)
 }
 
+/// The address port and the data port are one pair for the whole machine: the firmware's
+/// battery code (`aml.rs`, on another core) uses them too, so each access holds this.
+static CONFIG: Mutex<()> = Mutex::new(());
+
 pub fn read32(bus: u8, dev: u8, func: u8, off: u8) -> u32 {
+    let _g = CONFIG.lock();
     unsafe {
         Port::<u32>::new(0xCF8).write(addr(bus, dev, func, off));
         Port::<u32>::new(0xCFC).read()
@@ -27,6 +33,7 @@ pub fn read32(bus: u8, dev: u8, func: u8, off: u8) -> u32 {
 }
 
 pub fn write32(bus: u8, dev: u8, func: u8, off: u8, v: u32) {
+    let _g = CONFIG.lock();
     unsafe {
         Port::<u32>::new(0xCF8).write(addr(bus, dev, func, off));
         Port::<u32>::new(0xCFC).write(v);
@@ -35,6 +42,7 @@ pub fn write32(bus: u8, dev: u8, func: u8, off: u8, v: u32) {
 
 /// One byte of configuration space (registers that must be changed a byte at a time).
 pub fn read8(bus: u8, dev: u8, func: u8, off: u8) -> u8 {
+    let _g = CONFIG.lock();
     unsafe {
         Port::<u32>::new(0xCF8).write(addr(bus, dev, func, off));
         Port::<u8>::new(0xCFC + (off as u16 & 3)).read()
@@ -42,9 +50,27 @@ pub fn read8(bus: u8, dev: u8, func: u8, off: u8) -> u8 {
 }
 
 pub fn write8(bus: u8, dev: u8, func: u8, off: u8, v: u8) {
+    let _g = CONFIG.lock();
     unsafe {
         Port::<u32>::new(0xCF8).write(addr(bus, dev, func, off));
         Port::<u8>::new(0xCFC + (off as u16 & 3)).write(v);
+    }
+}
+
+/// Two bytes (an aligned half of a 32-bit register).
+pub fn read16(bus: u8, dev: u8, func: u8, off: u8) -> u16 {
+    let _g = CONFIG.lock();
+    unsafe {
+        Port::<u32>::new(0xCF8).write(addr(bus, dev, func, off));
+        Port::<u16>::new(0xCFC + (off as u16 & 2)).read()
+    }
+}
+
+pub fn write16(bus: u8, dev: u8, func: u8, off: u8, v: u16) {
+    let _g = CONFIG.lock();
+    unsafe {
+        Port::<u32>::new(0xCF8).write(addr(bus, dev, func, off));
+        Port::<u16>::new(0xCFC + (off as u16 & 2)).write(v);
     }
 }
 

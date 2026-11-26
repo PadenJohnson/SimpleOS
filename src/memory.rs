@@ -151,18 +151,41 @@ pub fn heap_use() -> (usize, usize) {
 
 static HHDM: AtomicU64 = AtomicU64::new(0);
 
+/// Older devices can only reach the first 4 GiB (32-bit addresses: the IDE disk controller's
+/// bus master). On a PC with lots of memory the heap lies above that, so a little of the
+/// memory below is kept aside for their buffers.
+static LOW: LockedHeap = LockedHeap::empty();
+/// Whether the whole heap is below 4 GiB anyway (then `LOW` isn't needed).
+static HEAP_LOW: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+const LOW_POOL: u64 = 4 << 20;
+const FOUR_GIB: u64 = 1 << 32;
+
 /// Returns (heap size in bytes, total usable RAM in bytes).
 pub fn init(entries: &[&Entry], hhdm_offset: u64) -> (usize, u64) {
     HHDM.store(hhdm_offset, Relaxed);
     let usable = entries.iter().filter(|e| e.entry_type == EntryType::USABLE);
     let total: u64 = usable.clone().map(|e| e.length).sum();
-    let best = usable.max_by_key(|e| e.length).expect("no usable memory");
+    let best = usable.clone().max_by_key(|e| e.length).expect("no usable memory");
     let size = best.length as usize;
     unsafe {
         ALLOCATOR.big.lock().init((best.base + hhdm_offset) as *mut u8, size);
     }
     ALLOCATOR.size.store(size, Relaxed);
+    if best.base + best.length <= FOUR_GIB {
+        HEAP_LOW.store(true, Relaxed);
+    } else if let Some(low) = usable
+        .filter(|e| e.base != best.base && e.base >= 0x10_0000 && e.base + e.length <= FOUR_GIB)
+        .max_by_key(|e| e.length)
+    {
+        let take = low.length.min(LOW_POOL) as usize;
+        unsafe { LOW.lock().init((low.base + hhdm_offset) as *mut u8, take) };
+    }
     (size, total)
+}
+
+/// Where the higher-half direct map starts (virtual = physical + this).
+pub fn hhdm() -> u64 {
+    HHDM.load(Relaxed)
 }
 
 /// Physical address of a heap (or other HHDM) pointer.
@@ -174,6 +197,8 @@ pub fn phys_of<T>(p: *const T) -> u64 {
 pub struct Dma {
     ptr: *mut u8,
     layout: Layout,
+    /// From the pool below 4 GiB (`LOW`) rather than the heap.
+    low: bool,
 }
 
 unsafe impl Send for Dma {}
@@ -185,7 +210,18 @@ impl Dma {
         let layout = Layout::from_size_align(size.max(1), align).unwrap();
         let ptr = unsafe { alloc_zeroed(layout) };
         assert!(!ptr.is_null(), "out of memory for DMA buffer");
-        Dma { ptr, layout }
+        Dma { ptr, layout, low: false }
+    }
+    /// A buffer a 32-bit device can reach (entirely below 4 GiB), if there's room.
+    pub fn below_4g(size: usize, align: usize) -> Option<Dma> {
+        let layout = Layout::from_size_align(size.max(1), align).ok()?;
+        if HEAP_LOW.load(Relaxed) {
+            return Some(Dma::new(size, align));
+        }
+        let ptr = LOW.lock().allocate_first_fit(layout).ok()?.as_ptr();
+        unsafe { core::ptr::write_bytes(ptr, 0, layout.size()) };
+        let d = Dma { ptr, layout, low: true };
+        (d.phys() + size as u64 <= FOUR_GIB).then_some(d)
     }
     pub fn phys(&self) -> u64 {
         phys_of(self.ptr)
@@ -206,7 +242,13 @@ impl Dma {
 
 impl Drop for Dma {
     fn drop(&mut self) {
-        unsafe { dealloc(self.ptr, self.layout) };
+        if self.low {
+            if let Some(p) = core::ptr::NonNull::new(self.ptr) {
+                unsafe { LOW.lock().deallocate(p, self.layout) };
+            }
+        } else {
+            unsafe { dealloc(self.ptr, self.layout) };
+        }
     }
 }
 

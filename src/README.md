@@ -17,6 +17,7 @@ summary of what it does.
 | `smp.rs` | The other processor cores: shared jobs (decoding, drawing) and background tasks (a video's pictures) |
 | `cpu.rs`, `smbios.rs`, `hwmon.rs` | The processor, the motherboard's description, and its sensor chip (Settings > This PC) |
 | `pci.rs`, `power.rs`, `rtc.rs` | The PCI bus, ACPI power off and restart, the real-time clock |
+| `aml.rs`, `battery.rs` | A laptop's battery and charger: the firmware's ACPI code run on a worker core (the embedded controller, a guard against panics), and what the batteries say |
 | `serial.rs`, `crash.rs` | The log (serial port and on screen with F12) and the crash screen |
 
 ## Screens and drawing
@@ -35,7 +36,7 @@ summary of what it does.
 | `ps2.rs`, `keys.rs`, `textfield.rs` | Keyboard and mouse, keys for the editors, one-line text boxes |
 | `hc.rs`, `xhci.rs`, `ehci.rs`, `usb.rs` | USB 3 and USB 2 controllers, devices, hubs, keyboards and mice |
 | `msc.rs`, `phone.rs`, `usbprint.rs`, `usbaudio.rs` | USB drives, phones and cameras (MTP/PTP), printers, sound devices |
-| `ahci.rs`, `nvme.rs`, `disk.rs`, `fs/` | SATA and NVMe disks, partition tables, FAT and exFAT |
+| `ahci.rs`, `ide.rs`, `nvme.rs`, `disk.rs`, `fs/` | SATA (AHCI and RAID mode, or IDE mode) and NVMe disks, partition tables, FAT and exFAT |
 | `library.rs`, `install.rs`, `update.rs`, `backup.rs` | Solon storage, installing, updating from USB, backups |
 | `hda.rs` | Sound: HD Audio controllers, the computer's jacks and the monitors |
 

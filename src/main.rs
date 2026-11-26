@@ -19,6 +19,8 @@ mod calendar;
 mod crash;
 mod cursor;
 mod ahci;
+mod aml;
+mod battery;
 mod desktop;
 mod disk;
 mod display;
@@ -41,6 +43,7 @@ mod gpu;
 mod hda;
 mod hc;
 mod icons;
+mod ide;
 mod import;
 mod image;
 mod imgfmt;
@@ -382,10 +385,16 @@ extern "C" fn kernel_main() -> ! {
     }
 
     // Power off / restart need the ACPI tables.
-    let acpi = RSDP_REQUEST.get_response().and_then(|r| {
+    let rsdp_phys = RSDP_REQUEST.get_response().map(|r| {
         let a = r.address() as u64;
-        power::init(if a >= hhdm { a - hhdm } else { a })
+        if a >= hhdm { a - hhdm } else { a }
     });
+    let acpi = rsdp_phys.and_then(power::init);
+    // A laptop's batteries: the firmware's own code reads them, on another core.
+    if let Some(rsdp) = rsdp_phys {
+        let cmdline = EXECUTABLE_CMDLINE_REQUEST.get_response().and_then(|r| r.cmdline().to_str().ok()).unwrap_or("");
+        aml::start(rsdp, cmdline);
+    }
 
     // Settings (saved in the library), then the display scale they ask for.
     bootscreen::step(&screen, 80, 86, "Opening your settings...");
@@ -507,6 +516,7 @@ extern "C" fn kernel_main() -> ! {
     let mut draw_stats = (0u64, 0u64, 0u64, 0u64, 0u64);
     let mut next_clock_check = 0u64;
     let mut next_traffic_log = TICKS.load(Relaxed) + 60 * HZ;
+    let mut power_seen = 0u64;
     loop {
         // Sleep until an interrupt (keyboard, mouse or the 100 Hz timer),
         // without losing a wakeup that arrives in between.
@@ -535,6 +545,11 @@ extern "C" fn kernel_main() -> ! {
         }
 
         redraw |= desktop.tick(now);
+        aml::poll(now);
+        if aml::version() != power_seen {
+            power_seen = aml::version();
+            redraw |= desktop.set_power(aml::latest(), now);
+        }
         if crash_test && now >= crash_at {
             // Boot option "crashtest": show the crash screen on purpose (for checking it works).
             panic!("crash test requested on the boot command line");
@@ -915,6 +930,8 @@ fn halt() -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    // The firmware's battery code running on a worker core goes back there instead.
+    aml::catch_panic(info);
     kprintln!("KERNEL PANIC: {}", info);
     crash::show(info);
     halt()

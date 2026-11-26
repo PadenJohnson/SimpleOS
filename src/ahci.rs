@@ -51,10 +51,25 @@ fn wait(ms: u64, mut f: impl FnMut() -> bool) -> bool {
     true
 }
 
+/// Whether a controller of another class (RAID) has AHCI registers behind BAR 5.
+pub fn is_ahci(dev: &pci::Device) -> bool {
+    let Some((bar, size)) = dev.bar(5) else { return false };
+    if bar == 0 || size < 0x180 {
+        return false;
+    }
+    dev.enable();
+    let hba = map_mmio(bar, size.max(0x1100));
+    let (cap, vs) = (r32(hba), r32(hba + 0x10));
+    cap != 0xFFFF_FFFF && vs >> 16 == 1
+}
+
 /// Find every SATA disk on an AHCI controller.
 pub fn init(dev: &pci::Device) -> Vec<AhciPort> {
     let mut out = Vec::new();
-    let Some((bar, size)) = dev.bar(5) else { return out };
+    let Some((bar, size)) = dev.bar(5) else {
+        kprintln!("ahci: no registers (BAR 5 isn't memory)");
+        return out;
+    };
     dev.enable();
     let hba = map_mmio(bar, size.max(0x1100));
     // BIOS/OS handoff if supported.
@@ -64,6 +79,8 @@ pub fn init(dev: &pci::Device) -> Vec<AhciPort> {
     }
     w32(hba + 0x04, r32(hba + 0x04) | 1 << 31); // AHCI mode
     let pi = r32(hba + 0x0C);
+    let vs = r32(hba + 0x10);
+    kprintln!("ahci: version {}.{}, ports {:#x}, capabilities {:#010x}", vs >> 16, (vs >> 8) & 0xFF, pi, r32(hba));
     for p in 0..32u64 {
         if pi & (1 << p) == 0 {
             continue;
@@ -82,17 +99,27 @@ pub fn init(dev: &pci::Device) -> Vec<AhciPort> {
             }
             w32(port + 0x30, 0xFFFF_FFFF); // clear errors from the reset
         }
-        if r32(port + 0x28) & 0xF != 3 {
+        let ssts = r32(port + 0x28);
+        if ssts & 0xF != 3 {
+            if ssts & 0xF != 0 {
+                kprintln!("ahci:   port {}: link not up (status {:#x})", p, ssts);
+            }
             continue; // nothing attached
         }
         // The signature arrives with the disk's first message; give it a little time.
         wait(100, || r32(port + 0x24) != 0xFFFF_FFFF);
         let sig = r32(port + 0x24);
         if sig != 0x0000_0101 && sig != 0xFFFF_FFFF {
-            continue; // not a plain SATA disk (e.g. ATAPI CD drive)
+            let what = if sig == 0xEB14_0101 { "CD/DVD drive" } else { "not a disk" };
+            kprintln!("ahci:   port {}: {} (signature {:#x}), skipped", p, what, sig);
+            continue;
         }
-        if let Some(d) = AhciPort::new(port) {
-            out.push(d);
+        match AhciPort::new(port) {
+            Some(d) => {
+                kprintln!("ahci:   port {}: {} (link gen {})", p, d.model, (ssts >> 4) & 0xF);
+                out.push(d);
+            }
+            None => kprintln!("ahci:   port {}: a device that didn't identify itself", p),
         }
     }
     out

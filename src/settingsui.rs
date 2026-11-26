@@ -73,6 +73,7 @@ impl Page {
             Page::Sound => "Speakers, headphones",
             Page::Mouse => "Pointer speed",
             Page::Spelling => "Language, your words",
+            Page::ThisPc if crate::aml::latest().is_some_and(|p| p.has_battery()) => "Battery, CPU, memory",
             Page::ThisPc => "CPU, memory, sensors",
             Page::About => "Version, screen, graphics",
         }
@@ -461,6 +462,36 @@ impl SettingsApp {
     }
 
     fn this_pc(&self, ui: &mut Ui) {
+        // A laptop's battery first: what people look for here.
+        if let Some(p) = crate::aml::latest().filter(|p| p.has_battery()) {
+            ui.card("Battery");
+            ui.info("Charge", &crate::battery::status_text(&p));
+            let present: Vec<&crate::battery::Battery> = p.batteries.iter().filter(|b| b.present).collect();
+            for (i, b) in present.iter().enumerate() {
+                let Some(info) = &b.info else { continue };
+                let label = |what: &str| if present.len() > 1 { format!("{} (battery {})", what, i + 1) } else { String::from(what) };
+                // Capacities as people see them on the box: Wh, or Ah for batteries that count charge.
+                let amount = |v: u32| format!("{}.{} {}", v / 1000, v % 1000 / 100, if info.mwh { "Wh" } else { "Ah" });
+                if present.len() > 1 {
+                    if let Some(pc) = b.percent() {
+                        ui.info(&label("Charge"), &format!("{}%", pc));
+                    }
+                }
+                match (info.full, b.health()) {
+                    (Some(f), Some(h)) => ui.info(&label("Health"), &format!("Holds {} when full: {}% of the {} it held new", amount(f), h, amount(info.design.unwrap_or(f)))),
+                    (Some(f), None) => ui.info(&label("Holds"), &format!("{} when full", amount(f))),
+                    _ => {}
+                }
+                if let Some(n) = info.cycles {
+                    ui.info(&label("Charge cycles"), &format!("{}", n));
+                }
+                let name: Vec<&str> = [info.maker.as_str(), info.model.as_str(), info.chemistry.as_str()].into_iter().filter(|t| !t.is_empty()).collect();
+                if !name.is_empty() {
+                    ui.info(&label("Model"), &name.join(" "));
+                }
+            }
+            ui.end_card();
+        }
         let ghz = |mhz: u32| format!("{}.{:02} GHz", mhz / 1000, (mhz % 1000 + 5) / 10 % 100);
         let cpu = crate::cpu::info();
         let now = crate::cpu::latest();

@@ -179,6 +179,12 @@ pub fn probe(bar0: (u64, u64), bar1: Option<(u64, u64)>, fb: u64, at: (u8, u8, u
     }
     let r = Bar0 { base: crate::memory::map_mmio(bar0.0, 0x0100_0000) };
     let boot0 = r.rd(0x000000);
+    if boot0 == 0xFFFF_FFFF || boot0 == 0 {
+        // A laptop's second graphics chip ("Optimus") is switched off until something asks
+        // for it; its registers then read all ones. Solon draws with the built-in one.
+        kprintln!("nvidia: the chip doesn't answer (switched off, as a laptop's second graphics chip usually is); left alone");
+        return;
+    }
     let chipset = (boot0 & 0x1ff0_0000) >> 20;
     let name = chip_name(chipset);
     kprintln!("nvidia: chip {} (chipset {:#x}, revision {:#x}, PMC_BOOT_0 {:#010x})", name, chipset, boot0 & 0xff, boot0);
