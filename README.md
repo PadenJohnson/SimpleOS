@@ -2,7 +2,7 @@
 
 <p align="center">
   <b>A calm, complete computer for the family.</b><br>
-  Photos, documents, videos and games, with no internet, no accounts and no passwords.<br>
+  Photos, documents, videos, music and games, with no internet, no accounts and no passwords.<br>
   An operating system written from scratch in Rust for 64-bit PCs.
 </p>
 
@@ -50,6 +50,10 @@ extends the desktop), with the choices in Settings for anyone who wants them.
     <td><img src="docs/screenshots/settings.jpg" alt="Settings, choosing a desktop background from five nature photos and five colours"><br><b>Settings</b>: plain choices, like the desktop picture</td>
     <td><img src="docs/screenshots/games.jpg" alt="Neon Grill, an original pinball table with burger, donut and pie bumpers, a milkshake ramp and a dot-matrix score display"><br><b>Games</b>: Neon Grill, an original pinball table, plus Solitaire, FreeCell, Mines, Sudoku and a shooter</td>
   </tr>
+  <tr>
+    <td><img src="docs/screenshots/music.jpg" alt="Music playing Rhapsody in Blue from the Solon Demo Songs, with the album's cover in the player bar"><br><b>Music</b>: songs, albums and covers, with seven public-domain classics to start</td>
+    <td><img src="docs/screenshots/soundedit.jpg" alt="The Sound Editor showing the waveform of Rachmaninoff's 1923 Minute Waltz with a part chosen"><br><b>Sound Editor</b>: trim, fade and even out a song, saved as a copy</td>
+  </tr>
 </table>
 
 ## Highlights
@@ -61,14 +65,20 @@ extends the desktop), with the choices in Settings for anyone who wants them.
   files, PDFs can be filled in, signed and combined, and spelling works everywhere you type.
 - **Videos from phones, cameras and DVDs.** H.264, HEVC, VP9, MPEG-2 and more, with sound, all
   decoded by Solon itself and checked against FFmpeg; and a simple video editor that makes MP4s.
+- **Music, with seven classics to start.** A music player for MP3, M4A, FLAC, Ogg, Opus, WAV
+  and AIFF with albums, covers, shuffle and repeat, and a Sound Editor to trim, fade and
+  even out songs. A new stick comes with public-domain recordings, from Joplin's The
+  Entertainer to Gershwin himself playing Rhapsody in Blue in 1924.
 - **Plug things in.** USB drives and SD cards, Android phones and iPhones, USB printers, and a
   second monitor that simply extends the desktop.
 - **Careful with your files.** USB drives are only read unless you ask; deleting goes to a
   recycle bin; backups keep older versions; other systems' partitions are never touched.
 - **Something to play.** Neon Grill Pinball and Starbase Breach (both original), Solitaire,
   FreeCell, Mines and Sudoku.
-- **Today's hardware, used fully.** Every processor core, Solon's own NVIDIA RTX display driver,
-  and sound through speakers, headphones, monitor speakers and USB headsets.
+- **Today's hardware, used fully.** Every processor core (a video's pictures decode on a core
+  of their own), the processor's floating-point and vector unit, all of the computer's memory,
+  Solon's own NVIDIA RTX display driver, and sound through speakers, headphones, monitor
+  speakers and USB headsets.
 - **Offline by design.** No network, no accounts, no ads, nothing collected, nothing to update
   from the internet. Updates come on a USB stick.
 
@@ -138,6 +148,7 @@ options, the host tools and the release hook.
 | [`samples/`](samples) | Test photos for development |
 | `run.sh`, `test.sh` | Run Solon in QEMU, and headless tests (`run.ps1`, `test.ps1` on Windows) |
 | `Cargo.toml`, `build.rs`, `linker.ld`, `limine.conf` | The crate, its build script, the kernel's memory layout, the boot menu |
+| `x86_64-solon.json` | Solon's build target: bare-metal x86-64 with the floating-point and vector unit in use |
 
 ## Credits
 
@@ -149,7 +160,11 @@ SimpleOS is built on:
   [SCOWL](http://wordlist.aspell.net/) word lists for spelling.
 - Desktop photos released as CC0 by photographers on Wikimedia Commons
   ([credits](assets/wallpapers/CREDITS.md)).
-- Small Rust crates: limine, x86_64, spin, linked_list_allocator, zune-jpeg and zune-png,
+- Demo songs in the public domain from Wikimedia Commons: the United States Marine Band and
+  Air Force Band, Musopen, James Brigham (CC0), and Victor recordings by Sergei Rachmaninoff
+  (1923) and Paul Whiteman's orchestra with George Gershwin (1924); the list is in
+  `tools/make-demo-music.sh` and in CREDITS.txt next to the songs.
+- Small Rust crates: limine, x86_64, spin, linked_list_allocator (for big blocks), zune-jpeg and zune-png,
   jpeg-encoder, miniz_oxide, ttf-parser, noto-sans-mono-bitmap and libm.
 - Reference: the [nouveau](https://nouveau.freedesktop.org/) project's work on NVIDIA hardware,
   Linux's drivers for how hardware behaves, and FFmpeg, which every decoder is checked against.
