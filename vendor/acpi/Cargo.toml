@@ -1,0 +1,33 @@
+# Vendored from github.com/rust-osdev/acpi at 65c203d2 (7.0.0-pre2 and later fixes), with
+# Solon's patches marked "Solon:" (embedded controller access, Alias search). See README.solon.md.
+[package]
+name = "acpi"
+version = "7.0.0-pre2"
+authors = ["Isaac Woods"]
+repository = "https://github.com/rust-osdev/acpi"
+description = "A pure-Rust library for interacting with ACPI"
+categories = ["hardware-support", "no-std"]
+license = "MIT/Apache-2.0"
+edition = "2024"
+
+[dependencies]
+bit_field = "0.10.2"
+bitflags = "2.5.0"
+lock_api = { version = "0.4.14", optional = true, public = true }
+log = "0.4.20"
+spinning_top = { version = "0.3.0", optional = true, public = true }
+pci_types = { version = "0.10.0", public = true }
+byteorder = { version = "1.5.0", optional = true, default-features = false }
+smallvec = { version = "1.15.2", optional = true, default-features = false, public = true }
+static_assertions = "1.1.0"
+
+[features]
+default = ["alloc", "aml"]
+alloc = []
+aml = [
+    "alloc",
+    "dep:lock_api",
+    "dep:spinning_top",
+    "dep:byteorder",
+    "dep:smallvec",
+]
