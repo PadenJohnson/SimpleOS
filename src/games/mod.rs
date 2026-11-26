@@ -207,11 +207,17 @@ impl Sfx {
 
     /// Top up the sound card (call every tick while a game has focus).
     pub fn pump(&mut self) {
+        // Music (or a video) playing: the game's sounds give way to it.
+        if crate::hda::busy_for(crate::hda::GAMES) {
+            self.voices.clear();
+            self.running = false;
+            return;
+        }
         if self.voices.is_empty() {
             if self.running {
                 self.idle += 1;
                 if self.idle > 100 {
-                    crate::hda::stop();
+                    crate::hda::stop(crate::hda::GAMES);
                     self.running = false;
                 }
             }
@@ -220,11 +226,11 @@ impl Sfx {
             }
         }
         if !self.running {
-            crate::hda::start();
+            crate::hda::start(crate::hda::GAMES);
             self.running = true;
         }
         self.idle = 0;
-        let n = crate::hda::wanted().min(4800);
+        let n = crate::hda::wanted(crate::hda::GAMES).min(4800);
         if n == 0 {
             return;
         }
@@ -262,13 +268,13 @@ impl Sfx {
                 i += 1;
             }
         }
-        crate::hda::queue(&out);
+        crate::hda::queue(crate::hda::GAMES, &out);
     }
 
     pub fn silence(&mut self) {
         self.voices.clear();
         if self.running {
-            crate::hda::stop();
+            crate::hda::stop(crate::hda::GAMES);
             self.running = false;
         }
     }

@@ -77,6 +77,7 @@ pub fn find(usb: &mut Usb) -> Vec<(Candidate, Vec<u8>)> {
 
 /// Replace the kernel in the boot partition of internal disk `disk` with `data`.
 pub fn apply(storage: &mut Storage, disk: usize, data: &[u8]) -> Result<(), String> {
+    crate::display::forget_boot_volume();
     if kernel_build(data).is_none() {
         return Err(String::from("That file isn't a Solon kernel"));
     }

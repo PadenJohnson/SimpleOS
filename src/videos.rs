@@ -43,8 +43,10 @@ struct Play {
     from: u64,
     tick: u64,
     sound: bool,
-    /// 48 kHz frames queued since `from`.
-    queued: u64,
+    /// Where `from` plays in the sound output (frames since it started): the clock for the
+    /// pictures is how far the output has played since then, and the sound queued at any
+    /// place in the output is the video's sound for that moment, so the two can't drift apart.
+    base: u64,
     /// The clock waits for the picture: at the start and after a jump, until the picture
     /// for `from` is decoded (from the key frame before it), so sound and picture start together.
     held: bool,
@@ -64,6 +66,8 @@ struct Player {
     last_bar: (u64, u64),
     /// A big pause or play sign over the picture after a click on it (playing?, until tick).
     flash: Option<(bool, u64)>,
+    /// The pictures are decoded on another core.
+    elsewhere: bool,
 }
 
 /// How playback is keeping up, logged every 10 seconds while a video plays.
@@ -126,6 +130,25 @@ fn picture(e: &mut Engine, io: &mut dyn Io, src: &Source, ms: u64, w: usize, h: 
     let mut read = |off: u64, len: usize| io.read(src, off, len);
     let (id, px) = e.picture(&mut read, ms, w, h, budget, shown)?;
     Some((id, px.map(|px| Image { w, h, px: px.iter().map(|v| v | 0xFF00_0000).collect(), opaque: true })))
+}
+
+/// Top the sound output up with the video's sound (at least `min` frames at a time, so it
+/// isn't done in tiny pieces): what's queued at each place in the output is the sound for
+/// that moment of the video, counted from `pl.base`.
+fn queue_sound(e: &mut Engine, read: &mut crate::media::Read, pl: &Play, volume: u32, min: usize) {
+    let want = crate::hda::wanted(crate::hda::VIDEOS);
+    if want == 0 || want < min {
+        return;
+    }
+    let at = crate::hda::write_pos();
+    let start = pl.from * 48 + at.saturating_sub(pl.base);
+    let mut pcm = e.sound(read, start, want);
+    // Volume, on a curve that sounds even.
+    let g = (volume * volume) as i32; // 0..10000
+    for s in pcm.iter_mut() {
+        *s = (*s as i32 * g / 10_000) as i16;
+    }
+    crate::hda::queue(crate::hda::VIDEOS, &pcm);
 }
 
 /// A raw pointer that may be shared between cores (each writes its own rows).
@@ -447,7 +470,12 @@ impl VideosApp {
                 it.dur_ms = Some(dur);
                 it.problem = f.problem.clone();
                 kprintln!("videos: playing \"{}\" ({} ms)", it.name, dur);
-                self.player = Some(Player { item: i, file: f, pos: 0, dur, play: None, picture: None, shown: None, dragging: 0, last_bar: (u64::MAX, 0), flash: None });
+                // Decode on a core of its own if there's one free (the first core stays free
+                // for the mouse, the sound and the screen).
+                let mut f = f;
+                let elsewhere = f.decode_elsewhere();
+                kprintln!("videos: decoding the pictures {}", if elsewhere { "on a core of their own" } else { "on the first core" });
+                self.player = Some(Player { item: i, file: f, pos: 0, dur, play: None, picture: None, shown: None, dragging: 0, last_bar: (u64::MAX, 0), flash: None, elsewhere });
                 self.stats = Stats { since_us: crate::cpu::now_us(), ..Stats::default() };
                 self.toggle();
             }
@@ -462,7 +490,7 @@ impl VideosApp {
         let Some(p) = self.player.as_mut() else { return };
         if let Some(pl) = p.play.take() {
             if pl.sound {
-                crate::hda::stop();
+                crate::hda::stop(crate::hda::VIDEOS);
             }
             return;
         }
@@ -474,13 +502,13 @@ impl VideosApp {
         }
         // The clock (and the sound) start once the picture for this moment is ready.
         let sound = crate::hda::available() && p.file.has_sound();
-        p.play = Some(Play { from: p.pos, tick: TICKS.load(Relaxed), sound, queued: 0, held: true });
+        p.play = Some(Play { from: p.pos, tick: TICKS.load(Relaxed), sound, base: 0, held: true });
     }
 
     fn close_player(&mut self) {
         if let Some(p) = self.player.take() {
             if p.play.is_some_and(|pl| pl.sound) {
-                crate::hda::stop();
+                crate::hda::stop(crate::hda::VIDEOS);
             }
         }
         self.fullscreen = false;
@@ -519,33 +547,26 @@ impl VideosApp {
         let volume = self.volume;
         let body = self.body;
         let mut dirty: Option<Rect> = None;
+        // Another app (Music, the Sound Editor) took the sound: pause.
+        if self.player.as_ref().and_then(|p| p.play.as_ref()).is_some_and(|pl| pl.sound && !pl.held && crate::hda::owner() != crate::hda::VIDEOS) {
+            self.toggle();
+        }
         let stats = &mut self.stats;
         if let Some(p) = self.player.as_mut() {
             let src = self.items[p.item].src.clone();
             let mut redraw = false;
             if let Some(pl) = p.play.as_mut().filter(|pl| !pl.held) {
-                let elapsed = if pl.sound { crate::hda::played() * 1000 / 48000 } else { now.saturating_sub(pl.tick) * 1000 / HZ };
+                let elapsed = if pl.sound { crate::hda::played().saturating_sub(pl.base) * 1000 / 48000 } else { now.saturating_sub(pl.tick) * 1000 / HZ };
                 if p.dragging != 1 {
                     p.pos = (pl.from + elapsed).min(p.dur);
                 }
                 if pl.sound {
-                    let want = crate::hda::wanted();
-                    if want >= 2048 {
-                        let start = pl.from * 48 + pl.queued;
-                        let mut read = |off: u64, len: usize| io.read(&src, off, len);
-                        let mut pcm = p.file.sound(&mut read, start, want);
-                        // Volume, on a curve that sounds even.
-                        let g = (volume * volume) as i32; // 0..10000
-                        for s in pcm.iter_mut() {
-                            *s = (*s as i32 * g / 10_000) as i16;
-                        }
-                        crate::hda::queue(&pcm);
-                        pl.queued += want as u64;
-                    }
+                    let mut read = |off: u64, len: usize| io.read(&src, off, len);
+                    queue_sound(&mut p.file, &mut read, pl, volume, 2048);
                 }
                 if p.pos >= p.dur {
                     if pl.sound {
-                        crate::hda::stop();
+                        crate::hda::stop(crate::hda::VIDEOS);
                     }
                     p.play = None;
                     redraw = true;
@@ -558,12 +579,13 @@ impl VideosApp {
                 // Decode towards the picture for now: a few pictures a tick while playing; at
                 // the start, after a jump or when paused, as many as fit in about 30 ms (the
                 // clock waits meanwhile, so the picture doesn't lag behind the sound).
+                // (Decoding on another core: just take what's ready, without waiting.)
                 let t0 = crate::cpu::now_us();
                 let held = p.play.as_ref().is_none_or(|pl| pl.held);
                 let mut ready;
                 {
                     let mut read = |off: u64, len: usize| io.read(&src, off, len);
-                    if held {
+                    if held && !p.elsewhere {
                         loop {
                             ready = p.file.advance(&mut read, p.pos, 1);
                             if ready || crate::cpu::now_us() - t0 > 30_000 {
@@ -571,22 +593,25 @@ impl VideosApp {
                             }
                         }
                     } else {
-                        ready = p.file.advance(&mut read, p.pos, 3);
+                        ready = p.file.advance(&mut read, p.pos, if p.elsewhere { 0 } else { 3 });
                     }
                 }
                 stats.decode_us += crate::cpu::now_us() - t0;
                 if !ready && !held {
                     stats.late += 1;
                 }
-                // The picture caught up: start the clock and the sound from here.
+                // The picture caught up: start the clock and the sound from here, with the
+                // first sound queued at once (the clock counts from where it plays).
                 if ready {
                     if let Some(pl) = p.play.as_mut().filter(|pl| pl.held) {
                         pl.held = false;
                         pl.from = p.pos;
                         pl.tick = now;
-                        pl.queued = 0;
                         if pl.sound {
-                            crate::hda::start();
+                            crate::hda::start(crate::hda::VIDEOS);
+                            pl.base = crate::hda::write_pos();
+                            let mut read = |off: u64, len: usize| io.read(&src, off, len);
+                            queue_sound(&mut p.file, &mut read, pl, volume, 0);
                         }
                     }
                 }
@@ -622,13 +647,15 @@ impl VideosApp {
             let t = crate::cpu::now_us();
             if p.play.is_some() && t >= stats.since_us + 10_000_000 {
                 let n = stats.pictures.max(1);
+                let (dec_us, dec_n) = p.file.take_decode_stats();
                 kprintln!(
-                    "videos: last 10 s: {} pictures, decoding {} ms and converting {} ms a picture, {} late ticks",
-                    stats.pictures, stats.decode_us / n / 1000, stats.convert_us / n / 1000, stats.late
+                    "videos: last 10 s: {} pictures; decoding {} ms a packet ({}), the first core spending {} ms a picture on reading and {} ms converting; {} late ticks",
+                    stats.pictures, dec_us / dec_n.max(1) / 1000, if p.elsewhere { "on a core of its own" } else { "on the first core" }, stats.decode_us / n / 1000, stats.convert_us / n / 1000, stats.late
                 );
                 *stats = Stats { since_us: t, ..Stats::default() };
             } else if p.play.is_none() {
                 stats.since_us = t;
+                let _ = p.file.take_decode_stats();
             }
             if bar_was != self.show_bar() {
                 redraw = true;

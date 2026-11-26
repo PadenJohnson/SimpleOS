@@ -209,6 +209,35 @@ impl Canvas {
         self.fill_rect(x + w - 1, y, 1, h, c);
     }
 
+    /// A straight line `w` pixels wide, with smooth (anti-aliased) edges.
+    pub fn line_thick(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, w: i32, c: u32) {
+        let (dx, dy) = ((x1 - x0) as f32, (y1 - y0) as f32);
+        let len = libm::sqrtf(dx * dx + dy * dy).max(0.001);
+        let half = w.max(1) as f32 / 2.0;
+        let (nx, ny) = (-dy / len * half, dx / len * half);
+        let pts = [(x0 as f32 + nx, y0 as f32 + ny), (x1 as f32 + nx, y1 as f32 + ny), (x1 as f32 - nx, y1 as f32 - ny), (x0 as f32 - nx, y0 as f32 - ny)];
+        let minx = pts.iter().map(|p| p.0).fold(f32::MAX, f32::min) as i32 - 1;
+        let miny = pts.iter().map(|p| p.1).fold(f32::MAX, f32::min) as i32 - 1;
+        let maxx = pts.iter().map(|p| p.0).fold(f32::MIN, f32::max) as i32 + 2;
+        let maxy = pts.iter().map(|p| p.1).fold(f32::MIN, f32::max) as i32 + 2;
+        if maxx <= minx || maxy <= miny {
+            return;
+        }
+        let mut r = crate::raster::Raster::new((maxx - minx) as usize, (maxy - miny) as usize);
+        r.move_to(pts[0].0 - minx as f32, pts[0].1 - miny as f32);
+        for p in &pts[1..] {
+            r.line_to(p.0 - minx as f32, p.1 - miny as f32);
+        }
+        r.close();
+        r.rows(false, |yy, xx, cov| {
+            for (k, &a) in cov.iter().enumerate() {
+                if a > 0 {
+                    self.blend(minx + (xx + k) as i32, miny + yy as i32, c, a as u32);
+                }
+            }
+        });
+    }
+
     pub fn circle(&mut self, cx: i32, cy: i32, r: i32, c: u32) {
         self.circle_alpha(cx, cy, r, c, 255);
     }

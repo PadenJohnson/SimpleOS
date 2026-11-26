@@ -247,6 +247,58 @@ fn on_esp<R>(dev: &mut dyn fs::BlockDev, total: u64, f: impl FnOnce(&mut fs::Vol
     f(&mut vol, dev)
 }
 
+/// The boot partition, kept mounted for reading songs from it: mounting it again for each
+/// read would work out a file's clusters again every time. Forgotten whenever Solon writes
+/// there.
+static BOOT_VOL: spin::Mutex<Option<fs::Volume>> = spin::Mutex::new(None);
+
+/// Forget the kept boot partition (something was written to it).
+pub fn forget_boot_volume() {
+    *BOOT_VOL.lock() = None;
+}
+
+/// Read from the boot partition through the kept mount (mounting it the first time).
+fn with_boot_read<R>(storage: &mut Storage, usb: &mut Usb, f: impl FnOnce(&mut fs::Volume, &mut dyn fs::BlockDev) -> Result<R, String>) -> Result<R, String> {
+    let kept = BOOT_VOL.lock().take();
+    let run = move |dev: &mut dyn fs::BlockDev, total: u64| -> Result<R, String> {
+        let mut vol = match kept {
+            Some(v) => v,
+            None => {
+                let g = part::read_gpt(dev, total).ok_or("the start-up disk's partition table can't be read")?;
+                let (_, first, last) = part::esp(&g).ok_or("the start-up disk has no boot partition")?;
+                fs::mount(dev, first, last - first + 1).ok_or("the boot partition can't be read")?
+            }
+        };
+        let r = f(&mut vol, dev);
+        *BOOT_VOL.lock() = Some(vol);
+        r
+    };
+    let id = usb.boot_disk_id().ok_or("Solon can't tell which disk it started from")?;
+    if let Some(i) = storage.boot_internal(id) {
+        let total = storage.disk_info(i).map(|d| d.1).unwrap_or(0);
+        return storage.with_disk(i, |dev| run(dev, total)).unwrap_or_else(|| Err(String::from("disk not found")));
+    }
+    let drive = usb.boot_drive().ok_or("the Solon USB stick isn't reachable")?;
+    let (mut dev, total) = usb.boot_disk(drive).ok_or("the Solon USB stick isn't reachable")?;
+    run(&mut dev, total)
+}
+
+/// The files in a folder at the top of the boot partition (the demo songs in "music").
+pub fn boot_folder(storage: &mut Storage, usb: &mut Usb, folder: &str) -> Result<Vec<fs::DirEntry>, String> {
+    with_boot_read(storage, usb, |vol, dev| {
+        let root = vol.root();
+        match vol.find(dev, &root, folder).map_err(|e| String::from(e.message()))? {
+            Some(d) if d.is_dir => vol.list(dev, &d).map_err(|e| String::from(e.message())),
+            _ => Ok(Vec::new()),
+        }
+    })
+}
+
+/// Part of a file in the boot partition (from `boot_folder`).
+pub fn boot_read_part(storage: &mut Storage, usb: &mut Usb, file: &fs::DirEntry, offset: u64, len: usize) -> Option<Vec<u8>> {
+    with_boot_read(storage, usb, |vol, dev| vol.read_part(dev, file, offset, len).map_err(|e| String::from(e.message()))).ok()
+}
+
 /// The boot loader settings, and the folder they're in ("boot" or the root).
 pub fn read_config(storage: &mut Storage, usb: &mut Usb) -> Result<String, String> {
     with_boot_esp(storage, usb, |vol, dev| {
@@ -263,6 +315,7 @@ pub fn read_config(storage: &mut Storage, usb: &mut Usb) -> Result<String, Strin
 
 /// Replace the boot loader settings safely: write a new file, check it, then switch it in.
 pub fn write_config(storage: &mut Storage, usb: &mut Usb, text: &str) -> Result<(), String> {
+    forget_boot_volume();
     let data = text.as_bytes();
     with_boot_esp(storage, usb, |vol, dev| {
         vol.enable_writes(dev).map_err(|e| String::from(e.message()))?;
@@ -285,6 +338,7 @@ pub fn write_config(storage: &mut Storage, usb: &mut Usb, text: &str) -> Result<
 /// Write files to the top of the boot partition (the Solon stick or the installed disk's),
 /// replacing ones with the same names: the diagnostics saved with F12, S.
 pub fn write_boot_files(storage: &mut Storage, usb: &mut Usb, files: &[(&str, &[u8])]) -> Result<(), String> {
+    forget_boot_volume();
     with_boot_esp(storage, usb, |vol, dev| {
         vol.enable_writes(dev).map_err(|e| String::from(e.message()))?;
         let root = vol.root();

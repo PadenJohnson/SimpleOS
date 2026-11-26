@@ -584,6 +584,8 @@ fn audio_codec(id: &str, private: &[u8], rate: u32, channels: u16, bits: u16) ->
         "A_VORBIS" => ACodec::Vorbis { headers: private.to_vec() },
         "A_OPUS" => ACodec::Opus { head: private.to_vec() },
         "A_DTS" => ACodec::Dts,
+        // CodecPrivate: "fLaC" and the metadata blocks; STREAMINFO comes first.
+        "A_FLAC" if private.len() >= 42 && private.starts_with(b"fLaC") => ACodec::Flac { info: private[8..42].to_vec() },
         "A_FLAC" => ACodec::Other(String::from("FLAC")),
         "A_TRUEHD" => ACodec::Other(String::from("Dolby TrueHD")),
         "A_MS/ACM" => ACodec::Other(String::from("Windows sound format")),

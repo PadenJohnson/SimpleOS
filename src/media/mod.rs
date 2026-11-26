@@ -13,11 +13,13 @@ use alloc::vec::Vec;
 pub mod ac3;
 pub mod ac3tab;
 pub mod amr;
+pub mod audiofile;
 pub mod avi;
 pub mod dec;
 pub mod dts;
 pub mod engine;
 pub mod es;
+pub mod flac;
 pub mod mkv;
 pub mod mp4;
 pub mod mc;
@@ -40,6 +42,7 @@ pub mod vp9;
 pub mod vorbistab;
 pub mod mpegps;
 pub mod mpegts;
+pub mod tags;
 
 pub use engine::Engine;
 
@@ -84,6 +87,8 @@ pub enum ACodec {
     Amr { wide: bool },
     /// DTS (core; DTS-HD streams play their core).
     Dts,
+    /// FLAC, with its STREAMINFO block (34 bytes).
+    Flac { info: Vec<u8> },
     Other(String),
 }
 
@@ -117,6 +122,7 @@ impl ACodec {
             ACodec::Amr { wide: false } => "AMR",
             ACodec::Amr { wide: true } => "AMR-WB",
             ACodec::Dts => "DTS",
+            ACodec::Flac { .. } => "FLAC",
             ACodec::Other(s) => return s.clone(),
         })
     }
@@ -166,6 +172,10 @@ pub trait Demux {
 /// Recognise the container from the first bytes (not the name: files are often misnamed).
 pub fn open_demux(read: &mut Read, size: u64) -> Result<Box<dyn Demux>, String> {
     let head = read(0, 64).ok_or_else(|| String::from("Can't read the file"))?;
+    // Sound files with a signature of their own (Ogg, FLAC, WAV, AIFF, AMR, an ID3 tag).
+    if let Some(r) = audiofile::open(read, size, true) {
+        return r;
+    }
     if head.len() >= 12 && &head[0..4] == b"RIFF" && &head[8..12] == b"AVI " {
         return avi::AviDemux::open(read, size).map(|d| Box::new(d) as Box<dyn Demux>);
     }
@@ -185,7 +195,11 @@ pub fn open_demux(read: &mut Read, size: u64) -> Result<Box<dyn Demux>, String> 
     if head.len() >= 4 && head[0..4] == [0, 0, 1, 0xBA] {
         return mpegps::PsDemux::open(read, size).map(|d| Box::new(d) as Box<dyn Demux>);
     }
-    Err(format!("Solon can't read this kind of video file yet"))
+    // MP3 and AAC files without a tag: frame after frame from the start.
+    if let Some(r) = audiofile::open(read, size, false) {
+        return r;
+    }
+    Err(format!("Solon can't read this kind of file yet"))
 }
 
 pub(crate) fn be16(b: &[u8], o: usize) -> u16 {

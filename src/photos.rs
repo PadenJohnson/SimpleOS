@@ -38,6 +38,8 @@ pub enum Source {
     Usb { drive: u32, vol: usize, entry: DirEntry },
     /// A file in Solon's library on the internal disk (and the folder it's in).
     Library { dir: DirEntry, entry: DirEntry },
+    /// A file in the boot partition Solon started from (the demo songs).
+    Boot { entry: DirEntry },
 }
 
 /// Something the Photos app needs the desktop to do (it owns storage).

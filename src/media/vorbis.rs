@@ -797,7 +797,9 @@ impl VorbisDec {
         // previous window to the centre of this one).
         let imdct = self.imdct[block].as_ref()?;
         let bs0 = self.bs[0];
-        let pn = self.bs[prev as usize];
+        // The previous block's size: a long block says it (its flag); a short one doesn't, so
+        // it's the block actually decoded last.
+        let pn = if m.block { self.bs[prev as usize] } else { self.bs[self.prev.unwrap_or(false) as usize] };
         let out_len = (n + pn) / 4;
         let mut outs = vec![vec![0f32; out_len]; ch];
         let mut full = vec![0f32; n];

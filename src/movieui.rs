@@ -64,6 +64,10 @@ impl Io for LibIo<'_> {
                     self.usb.drive_read_part(*drive, *vol, entry, off, len).ok()
                 }
             }
+            Source::Boot { entry } => {
+                let len = (len as u64).min(entry.size.saturating_sub(off)) as usize;
+                crate::display::boot_read_part(self.storage, self.usb, entry, off, len)
+            }
         }
     }
     fn read_all(&mut self, src: &Source) -> Option<Vec<u8>> {
@@ -71,6 +75,7 @@ impl Io for LibIo<'_> {
             Source::Memory(b) => Some(b.to_vec()),
             Source::Library { entry, .. } => self.storage.read_file(self.usb, entry).ok(),
             Source::Usb { drive, vol, entry } => self.usb.read_file(*drive, *vol, entry).ok(),
+            Source::Boot { entry } => crate::display::boot_read_part(self.storage, self.usb, entry, 0, entry.size as usize),
         }
     }
 }
@@ -112,8 +117,8 @@ struct Play {
     /// Timeline position when playing started, and the tick it started at.
     from: u64,
     tick: u64,
-    /// Sound: 48 kHz frames of the movie queued so far (from `from`).
-    queued: u64,
+    /// Sound: where `from` plays in the sound output (frames since it started).
+    base: u64,
     sound: bool,
 }
 
@@ -516,16 +521,18 @@ impl MovieApp {
             self.playhead = 0;
         }
         let sound = crate::hda::available();
+        let mut base = 0;
         if sound {
-            crate::hda::start();
+            crate::hda::start(crate::hda::VIDEO_EDITOR);
+            base = crate::hda::write_pos();
         }
-        self.play = Some(Play { from: self.playhead, tick: TICKS.load(Relaxed), queued: 0, sound });
+        self.play = Some(Play { from: self.playhead, tick: TICKS.load(Relaxed), base, sound });
     }
 
     fn stop(&mut self) {
         if let Some(p) = self.play.take() {
             if p.sound {
-                crate::hda::stop();
+                crate::hda::stop(crate::hda::VIDEO_EDITOR);
             }
         }
         self.preview_t = None;
@@ -556,16 +563,21 @@ impl MovieApp {
         }
         let mut redraw = false;
         // Playing: follow the sound card's clock (or the timer), keep the sound topped up.
+        // Another app took the sound: stop.
+        if self.play.as_ref().is_some_and(|p| p.sound && crate::hda::owner() != crate::hda::VIDEO_EDITOR) {
+            self.stop();
+        }
         if let Some(p) = self.play.as_mut() {
-            let elapsed = if p.sound { crate::hda::played() * 1000 / movie::RATE as u64 } else { (now - p.tick) * 1000 / HZ };
+            // The clock counts from where the first sound plays; the sound queued at each
+            // place in the output is the project's sound for that moment.
+            let elapsed = if p.sound { crate::hda::played().saturating_sub(p.base) * 1000 / movie::RATE as u64 } else { (now - p.tick) * 1000 / HZ };
             let t = p.from + elapsed;
             if p.sound {
-                let want = crate::hda::wanted();
-                if want >= 2048 {
-                    let start = p.from * movie::RATE as u64 / 1000 + p.queued;
+                let want = crate::hda::wanted(crate::hda::VIDEO_EDITOR);
+                if want >= 2048 || (want > 0 && crate::hda::write_pos() == p.base) {
+                    let start = p.from * movie::RATE as u64 / 1000 + crate::hda::write_pos().saturating_sub(p.base);
                     let pcm = movie::mix(&mut self.project, start, want, &mut io);
-                    crate::hda::queue(&pcm);
-                    p.queued += want as u64;
+                    crate::hda::queue(crate::hda::VIDEO_EDITOR, &pcm);
                 }
             }
             if t >= self.project.duration() {

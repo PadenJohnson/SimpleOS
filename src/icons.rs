@@ -10,6 +10,8 @@ pub fn tile_color(app: App) -> u32 {
         App::Photos => rgb(46, 134, 222),
         App::PhotoFrame => rgb(196, 120, 64),
         App::Videos => rgb(231, 76, 60),
+        App::Music => rgb(208, 46, 106),
+        App::SoundEditor => rgb(32, 120, 210),
         App::Movie => rgb(211, 84, 0),
         App::Documents => rgb(39, 174, 96),
         App::Printers => rgb(142, 68, 173),
@@ -87,6 +89,15 @@ pub fn draw(c: &mut Canvas, app: App, x: i32, y: i32) {
             c.circle(x + 32, y + 32, 19, WHITE);
             c.circle(x + 32, y + 32, 16, bg);
             c.triangle([(x + 27, y + 22), (x + 27, y + 42), (x + 43, y + 32)], WHITE);
+        }
+        App::Music => crate::music::note(c, x + 34, y + 32, 64),
+        App::SoundEditor => {
+            // A waveform with a part of it chosen.
+            c.round_rect(x + 30, y + 12, 16, 40, 3, rgb(90, 160, 235));
+            let bars = [6, 14, 24, 34, 20, 30, 38, 26, 12, 22, 8];
+            for (k, &h) in bars.iter().enumerate() {
+                c.fill_rect(x + 9 + k as i32 * 4 + (k as i32 / 2) * 0, y + 32 - h / 2, 3, h, WHITE);
+            }
         }
         App::Mines => {
             // A mine and a flag.

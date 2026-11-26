@@ -458,6 +458,7 @@ impl SettingsApp {
         if let Some(mw) = now.mw {
             ui.info("Power", &format!("{}.{} W for the whole package", mw / 1000, mw % 1000 / 100));
         }
+        ui.info("Vector unit", &crate::cpu::simd_text());
         ui.end_card();
         if let Some(b) = crate::smbios::get() {
             let join = |parts: &[&str]| parts.iter().filter(|p| !p.is_empty()).copied().collect::<Vec<_>>().join(" ");
@@ -477,6 +478,8 @@ impl SettingsApp {
                 let total: u64 = fitted.iter().map(|d| d.mib).sum();
                 let slots = b.dimms.len();
                 ui.info("Installed", &format!("{} GB in {} of {} {}", total / 1024, fitted.len(), slots, if slots == 1 { "slot" } else { "slots" }));
+                let (heap, used) = crate::memory::heap_use();
+                ui.info("Solon's use", &format!("{} for photos, songs, videos and documents; {} of it in use now", crate::disk::human(heap as u64), crate::disk::human(used as u64)));
                 for d in fitted {
                     let mut v = format!("{} GB", d.mib / 1024);
                     if !d.kind.is_empty() {

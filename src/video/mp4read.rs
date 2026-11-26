@@ -43,6 +43,9 @@ pub struct Track {
     /// for formats this reader doesn't decode itself.
     pub fourcc: [u8; 4],
     pub kids: Vec<u8>,
+    /// Where the track's edit list starts playing it (its timescale): sound tracks skip the
+    /// encoder's priming samples this way (AAC: usually 1024).
+    pub edit_start: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -135,6 +138,25 @@ fn esds_asc(d: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+/// The media time of the first edit that plays something (empty edits, -1, are skipped).
+fn edit_start(t: &[u8]) -> Option<i64> {
+    let elst = find(find(t, b"edts")?, b"elst")?;
+    let v1 = *elst.first()? == 1;
+    let n = be32(elst, 4) as usize;
+    let size = if v1 { 20 } else { 12 };
+    for k in 0..n.min(16) {
+        let o = 8 + k * size;
+        let media = if v1 { be64(elst, o + 8) as i64 } else { be32(elst, o + 4) as i32 as i64 };
+        if elst.len() < o + size {
+            return None;
+        }
+        if media >= 0 {
+            return Some(media);
+        }
+    }
+    None
+}
+
 fn parse_trak(t: &[u8]) -> Option<Track> {
     let mdia = find(t, b"mdia")?;
     let hdlr = find(mdia, b"hdlr")?;
@@ -163,7 +185,7 @@ fn parse_trak(t: &[u8]) -> Option<Track> {
     let entry = boxes(stsd.get(8..)?).into_iter().next()?;
     let e = &stsd[8 + entry.1..8 + entry.2];
     let fourcc = entry.0;
-    let mut tr = Track { video, codec: Codec::Other(String::from_utf8_lossy(&fourcc).into_owned()), timescale: timescale.max(1), duration, width: 0, height: 0, channels: 0, rate: 0, rotation, samples: Vec::new(), fourcc, kids: Vec::new() };
+    let mut tr = Track { video, codec: Codec::Other(String::from_utf8_lossy(&fourcc).into_owned()), timescale: timescale.max(1), duration, width: 0, height: 0, channels: 0, rate: 0, rotation, samples: Vec::new(), fourcc, kids: Vec::new(), edit_start: edit_start(t) };
     if video {
         if e.len() >= 78 {
             tr.width = be16(e, 24) as u32;

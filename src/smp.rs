@@ -1,15 +1,23 @@
 //! The other processor cores (threads). Limine starts them (the MP request) and hands each
-//! one over here; they wait nearly asleep (MONITOR/MWAIT on the job counter, interrupts off)
-//! until there's work. `run(n, f)` calls `f(0)` .. `f(n - 1)` spread over every core, the
-//! caller's included, and returns when all of them are done.
+//! one over here; they wait nearly asleep (MONITOR/MWAIT on the bell, interrupts off) until
+//! there's work. Two kinds of work:
+//!
+//! - `run(n, f)` calls `f(0)` .. `f(n - 1)` spread over every free core, the caller's
+//!   included, and returns when all of them are done. Several can run at once (the desktop's
+//!   and a background task's), so one never waits for another.
+//! - `spawn(task)` gives a long job a core of its own: decoding a video while it plays, so the
+//!   first core stays free for the mouse, the sound and the screen. A task may use `run`, and
+//!   waits for more work with `sleep_on` instead of spinning.
 //!
 //! Only self-contained work goes to the other cores: decoding and scaling pictures and the
 //! like. Drivers, disks, the screen and input stay on the first core, which also gets every
 //! interrupt.
 //!
 //! A processor without MONITOR/MWAIT can't be woken without interrupts, so its other cores
-//! are put to sleep for good (halted with interrupts off) and `run` uses the first core only.
+//! are put to sleep for good (halted with interrupts off) and everything runs on the first.
 
+use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::arch::x86_64::__cpuid;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::SeqCst};
@@ -22,25 +30,51 @@ static WORKERS: AtomicUsize = AtomicUsize::new(0);
 static STARTED: AtomicUsize = AtomicUsize::new(0);
 static MWAIT: AtomicBool = AtomicBool::new(false);
 
-/// Bumped for each new job: what the waiting cores watch.
-static SEQ: AtomicU64 = AtomicU64::new(0);
-/// The job: open while its parts are being handed out.
-static OPEN: AtomicBool = AtomicBool::new(false);
-/// Cores inside a job (they may be holding its function).
-static ACTIVE: AtomicUsize = AtomicUsize::new(0);
-static NEXT: AtomicUsize = AtomicUsize::new(0);
-static COUNT: AtomicUsize = AtomicUsize::new(0);
-static DONE: AtomicUsize = AtomicUsize::new(0);
-static JOB: Mutex<Option<Job>> = Mutex::new(None);
+/// Bumped for each new job or task: what the waiting cores watch.
+static BELL: AtomicU64 = AtomicU64::new(0);
 /// How many parts of the last job the calling core did itself (for the benchmark).
 static LAST_OWN: AtomicUsize = AtomicUsize::new(0);
-/// One job at a time (a job that starts another runs it on its own core).
-static RUNNING: Mutex<()> = Mutex::new(());
+
+/// Background tasks waiting for a core, and how many cores are running one.
+pub type Task = Box<dyn FnOnce() + Send>;
+static TASKS: Mutex<VecDeque<Task>> = Mutex::new(VecDeque::new());
+static IN_TASKS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy)]
 struct Job(*const (dyn Fn(usize) + Sync));
 // The function is Sync, and `run` doesn't return while any core can still reach it.
 unsafe impl Send for Job {}
+
+/// One `run` in progress. Several can be (a background task's and the desktop's).
+struct Slot {
+    /// Taken by a `run` (from start to finish).
+    claimed: AtomicBool,
+    /// Open while its parts are being handed out.
+    open: AtomicBool,
+    job: Mutex<Option<Job>>,
+    count: AtomicUsize,
+    next: AtomicUsize,
+    done: AtomicUsize,
+    /// Cores inside the job (they may be holding its function).
+    active: AtomicUsize,
+}
+
+impl Slot {
+    const fn new() -> Slot {
+        Slot {
+            claimed: AtomicBool::new(false),
+            open: AtomicBool::new(false),
+            job: Mutex::new(None),
+            count: AtomicUsize::new(0),
+            next: AtomicUsize::new(0),
+            done: AtomicUsize::new(0),
+            active: AtomicUsize::new(0),
+        }
+    }
+}
+
+const SLOTS: usize = 4;
+static SLOT: [Slot; SLOTS] = [const { Slot::new() }; SLOTS];
 
 /// How many cores take part in `run` (the first one included).
 pub fn threads() -> usize {
@@ -54,7 +88,7 @@ pub fn init(mp: &MpResponse) -> usize {
     let bsp = mp.bsp_lapic_id();
     let others: Vec<&&Cpu> = mp.cpus().iter().filter(|c| c.lapic_id != bsp).collect();
     for c in &others {
-        c.goto_address.write(if mwait { ap_main } else { ap_sleep });
+        c.goto_address.write(if mwait { ap_entry } else { ap_sleep });
     }
     if others.is_empty() {
         kprintln!("smp: one core");
@@ -92,52 +126,116 @@ unsafe extern "C" fn ap_sleep(_cpu: &Cpu) -> ! {
     }
 }
 
-/// A worker core: set up, then wait for jobs and help with each one.
-unsafe extern "C" fn ap_main(_cpu: &Cpu) -> ! {
+/// Where a worker core starts: SSE on and the stack lined up (as for the first core in
+/// main.rs), then `ap_main`.
+#[unsafe(naked)]
+unsafe extern "C" fn ap_entry(_cpu: &Cpu) -> ! {
+    core::arch::naked_asm!(
+        "mov rax, cr0",
+        "and rax, -13",
+        "or rax, 2",
+        "mov cr0, rax",
+        "mov rax, cr4",
+        "or rax, 0x600",
+        "mov cr4, rax",
+        "and rsp, -16",
+        "call {main}",
+        "ud2",
+        main = sym ap_main,
+    )
+}
+
+/// A worker core: set up, then wait for jobs and tasks and do them.
+extern "C" fn ap_main(_cpu: &Cpu) -> ! {
+    crate::cpu::enable_simd();
     crate::interrupts::init_ap();
-    // Note the job counter before saying "ready": the first job can only come after that, so
-    // it can't be missed.
-    let mut seen = SEQ.load(SeqCst);
     STARTED.fetch_add(1, SeqCst);
     loop {
-        while SEQ.load(SeqCst) == seen {
-            unsafe {
-                // Sleep until the job counter's cache line is written.
-                core::arch::asm!("monitor", in("rax") &SEQ as *const AtomicU64 as usize, in("ecx") 0, in("edx") 0, options(nostack));
-                if SEQ.load(SeqCst) != seen {
-                    break;
-                }
-                core::arch::asm!("mwait", in("eax") 0, in("ecx") 0, options(nostack));
+        // Note the bell before looking for work: anything added after the look rings it,
+        // so the sleep below can't miss it.
+        let seen = BELL.load(SeqCst);
+        let mut worked = false;
+        for s in SLOT.iter() {
+            if s.open.load(SeqCst) {
+                worked |= help(s) > 0;
             }
         }
-        seen = SEQ.load(SeqCst);
-        help();
+        let task = TASKS.lock().pop_front();
+        if let Some(task) = task {
+            IN_TASKS.fetch_add(1, SeqCst);
+            task();
+            IN_TASKS.fetch_sub(1, SeqCst);
+            worked = true;
+        }
+        if !worked {
+            sleep_on(&BELL, seen);
+        }
     }
 }
 
-/// Take parts of the open job until there are none left. Returns how many this core did.
-fn help() -> usize {
+/// On a worker core: sleep until `word` is no longer `seen` (or a little longer than needed:
+/// callers check again and may sleep again). Spins briefly without MONITOR/MWAIT.
+pub fn sleep_on(word: &AtomicU64, seen: u64) {
+    if !MWAIT.load(SeqCst) {
+        for _ in 0..64 {
+            core::hint::spin_loop();
+        }
+        return;
+    }
+    unsafe {
+        // Sleep until the word's cache line is written.
+        core::arch::asm!("monitor", in("rax") word as *const AtomicU64 as usize, in("ecx") 0, in("edx") 0, options(nostack));
+        if word.load(SeqCst) != seen {
+            return;
+        }
+        core::arch::asm!("mwait", in("eax") 0, in("ecx") 0, options(nostack));
+    }
+}
+
+/// A core is free for a background task (`spawn` would take it).
+pub fn can_spawn() -> bool {
+    let workers = WORKERS.load(SeqCst);
+    workers > 0 && IN_TASKS.load(SeqCst) + TASKS.lock().len() < workers
+}
+
+/// Run `task` on a core of its own (it may take as long as it likes). Gives it back if no
+/// core is free for it (one core, or all of them running tasks already): the caller then
+/// does the work itself.
+pub fn spawn(task: Task) -> Result<(), Task> {
+    let workers = WORKERS.load(SeqCst);
+    let mut q = TASKS.lock();
+    if workers == 0 || IN_TASKS.load(SeqCst) + q.len() >= workers {
+        return Err(task);
+    }
+    q.push_back(task);
+    drop(q);
+    BELL.fetch_add(1, SeqCst);
+    Ok(())
+}
+
+/// Take parts of a job until there are none left. Returns how many this core did.
+fn help(s: &Slot) -> usize {
     let mut did = 0;
-    ACTIVE.fetch_add(1, SeqCst);
-    if OPEN.load(SeqCst) {
+    s.active.fetch_add(1, SeqCst);
+    if s.open.load(SeqCst) {
         // Copy the job out: a lock held in the `if let` would last through the whole job and
         // keep the other cores out.
-        let job = *JOB.lock();
+        let job = *s.job.lock();
         if let Some(job) = job {
             let f = unsafe { &*job.0 };
-            let n = COUNT.load(SeqCst);
+            let n = s.count.load(SeqCst);
             loop {
-                let i = NEXT.fetch_add(1, SeqCst);
+                let i = s.next.fetch_add(1, SeqCst);
                 if i >= n {
                     break;
                 }
                 f(i);
                 did += 1;
-                DONE.fetch_add(1, SeqCst);
+                s.done.fetch_add(1, SeqCst);
             }
         }
     }
-    ACTIVE.fetch_sub(1, SeqCst);
+    s.active.fetch_sub(1, SeqCst);
     did
 }
 
@@ -170,30 +268,31 @@ pub fn bench() {
     );
 }
 
-/// Call `f(0)` .. `f(n - 1)`, spread over every core; returns when all are done.
+/// Call `f(0)` .. `f(n - 1)`, spread over every free core; returns when all are done.
 pub fn run(n: usize, f: &(dyn Fn(usize) + Sync)) {
-    let lock = if n > 1 && WORKERS.load(SeqCst) > 0 { RUNNING.try_lock() } else { None };
-    let Some(_running) = lock else {
+    let slot = if n > 1 && WORKERS.load(SeqCst) > 0 { SLOT.iter().find(|s| s.claimed.compare_exchange(false, true, SeqCst, SeqCst).is_ok()) } else { None };
+    let Some(s) = slot else {
         (0..n).for_each(f);
         LAST_OWN.store(n, SeqCst);
         return;
     };
     // The workers only use `f` while `run` waits for them below.
     let f: &'static (dyn Fn(usize) + Sync) = unsafe { core::mem::transmute::<&(dyn Fn(usize) + Sync), &'static (dyn Fn(usize) + Sync)>(f) };
-    *JOB.lock() = Some(Job(f as *const _));
-    COUNT.store(n, SeqCst);
-    NEXT.store(0, SeqCst);
-    DONE.store(0, SeqCst);
-    OPEN.store(true, SeqCst);
-    SEQ.fetch_add(1, SeqCst);
-    LAST_OWN.store(help(), SeqCst);
-    while DONE.load(SeqCst) < n {
+    *s.job.lock() = Some(Job(f as *const _));
+    s.count.store(n, SeqCst);
+    s.next.store(0, SeqCst);
+    s.done.store(0, SeqCst);
+    s.open.store(true, SeqCst);
+    BELL.fetch_add(1, SeqCst);
+    LAST_OWN.store(help(s), SeqCst);
+    while s.done.load(SeqCst) < n {
         core::hint::spin_loop();
     }
     // Close the job, then wait until no core can still be holding `f`.
-    OPEN.store(false, SeqCst);
-    while ACTIVE.load(SeqCst) != 0 {
+    s.open.store(false, SeqCst);
+    while s.active.load(SeqCst) != 0 {
         core::hint::spin_loop();
     }
-    *JOB.lock() = None;
+    *s.job.lock() = None;
+    s.claimed.store(false, SeqCst);
 }

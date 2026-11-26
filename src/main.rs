@@ -50,6 +50,8 @@ mod library;
 mod memory;
 mod movieui;
 mod movie;
+mod music;
+mod soundedit;
 mod msc;
 mod cpu;
 mod hwmon;
@@ -179,8 +181,29 @@ static _REQUESTS_END: RequestsEndMarker = RequestsEndMarker::new();
 
 // ---- Kernel entry ---------------------------------------------------------
 
+/// Where Limine starts the kernel: switch on the floating-point and vector unit (SSE) before
+/// any compiled code can use it, line the stack up the way compiled code expects, then go on
+/// in `kernel_main`. (AVX is switched on later, by `cpu::enable_simd`.)
+#[unsafe(naked)]
 #[no_mangle]
 extern "C" fn kmain() -> ! {
+    core::arch::naked_asm!(
+        "mov rax, cr0",
+        "and rax, -13", // EM and TS off
+        "or rax, 2",    // MP on
+        "mov cr0, rax",
+        "mov rax, cr4",
+        "or rax, 0x600", // OSFXSR, OSXMMEXCPT
+        "mov cr4, rax",
+        "and rsp, -16",
+        "call {main}",
+        "ud2",
+        main = sym kernel_main,
+    )
+}
+
+extern "C" fn kernel_main() -> ! {
+    cpu::enable_simd();
     serial::init();
     kprintln!("solon: kernel entered (build {})", env!("SOLON_BUILD"));
 
@@ -190,6 +213,7 @@ extern "C" fn kmain() -> ! {
     let hhdm = HHDM_REQUEST.get_response().expect("no HHDM").offset();
     let (heap, total) = memory::init(mmap.entries(), hhdm);
     kprintln!("solon: heap {} MiB (of {} MiB usable RAM)", heap >> 20, total >> 20);
+    kprintln!("cpu: floating-point and vector unit {}", cpu::simd_text());
 
     let screen = FRAMEBUFFER_REQUEST
         .get_response()

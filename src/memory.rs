@@ -1,11 +1,18 @@
 //! Memory: the kernel heap, DMA buffers, and mapping device registers (MMIO).
 //!
-//! The heap is the largest usable RAM region, reached through Limine's higher-half
-//! direct map (HHDM: virtual = physical + offset). Because of that, any heap pointer
-//! can be turned back into a physical address for devices that do DMA.
+//! The heap is the largest usable RAM region (on a PC with lots of memory, nearly all of it),
+//! reached through Limine's higher-half direct map (HHDM: virtual = physical + offset).
+//! Because of that, any heap pointer can be turned back into a physical address for devices
+//! that do DMA.
+//!
+//! Small blocks (up to 4 KiB: most of what Rust code allocates) come from free lists, one per
+//! size, carved out of 64 KiB pieces: taking or giving one back is a few instructions, each
+//! size has its own lock (so cores rarely wait for each other), and they don't break up the
+//! space big blocks need. Bigger blocks (pictures, sound, files) come from a first-fit list
+//! over the rest.
 
-use core::alloc::Layout;
-use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use core::alloc::{GlobalAlloc, Layout};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 
 use alloc::alloc::{alloc_zeroed, dealloc};
 use limine::memory_map::{Entry, EntryType};
@@ -18,10 +25,129 @@ use x86_64::structures::paging::{
 use x86_64::{PhysAddr, VirtAddr};
 
 #[global_allocator]
-static ALLOCATOR: LockedHeap = LockedHeap::empty();
+static ALLOCATOR: Heap = Heap::new();
 
-/// Full-resolution photo editing needs a few hundred MB; use what the machine has, up to 2 GiB.
-const MAX_HEAP: u64 = 2 * 1024 * 1024 * 1024;
+/// The heap's sizes of small blocks (bytes). The powers of two among them also serve blocks
+/// that need lining up to more than 16 bytes.
+const CLASSES: [usize; 28] = [16, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096];
+const SMALL_MAX: usize = 4096;
+/// Small blocks are carved out of pieces this big (and lined up to it).
+const PIECE: usize = 64 * 1024;
+
+/// Free small blocks of one size: a list threaded through the blocks themselves, and the
+/// rest of the piece being carved up.
+struct FreeList {
+    head: usize,
+    bump: usize,
+    end: usize,
+}
+
+struct Heap {
+    big: LockedHeap,
+    small: [Mutex<FreeList>; CLASSES.len()],
+    /// Bytes handed out (small blocks count their whole size), for Settings > This PC.
+    used: AtomicUsize,
+    size: AtomicUsize,
+}
+
+impl Heap {
+    const fn new() -> Heap {
+        Heap {
+            big: LockedHeap::empty(),
+            small: [const { Mutex::new(FreeList { head: 0, bump: 0, end: 0 }) }; CLASSES.len()],
+            used: AtomicUsize::new(0),
+            size: AtomicUsize::new(0),
+        }
+    }
+}
+
+/// Which small size serves `layout` (None: a big block).
+fn class_of(layout: Layout) -> Option<usize> {
+    let (size, align) = (layout.size().max(1), layout.align());
+    let need = if align <= 16 { size } else { size.max(align).next_power_of_two() };
+    if need > SMALL_MAX || align > SMALL_MAX {
+        return None;
+    }
+    // Every size up to 128 is a multiple of 16; then four steps per doubling.
+    let i = if need <= 128 {
+        need.div_ceil(16) - 1
+    } else {
+        let p = usize::BITS - 1 - (need - 1).leading_zeros(); // 2^p < need <= 2^(p+1)
+        let step = 1usize << (p - 2);
+        let k = (need - (1 << p)).div_ceil(step); // 1..=4
+        7 + (p as usize - 7) * 4 + k
+    };
+    debug_assert!(CLASSES[i] >= need && (i == 0 || CLASSES[i - 1] < need));
+    Some(i)
+}
+
+unsafe impl GlobalAlloc for Heap {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let Some(c) = class_of(layout) else {
+            let p = unsafe { self.big.alloc(layout) };
+            if !p.is_null() {
+                self.used.fetch_add(layout.size(), Relaxed);
+            }
+            return p;
+        };
+        let size = CLASSES[c];
+        let mut fl = self.small[c].lock();
+        if fl.head != 0 {
+            let p = fl.head;
+            fl.head = unsafe { *(p as *const usize) };
+            self.used.fetch_add(size, Relaxed);
+            return p as *mut u8;
+        }
+        if fl.bump + size > fl.end {
+            let piece = unsafe { self.big.alloc(Layout::from_size_align_unchecked(PIECE, PIECE)) };
+            if piece.is_null() {
+                return piece;
+            }
+            fl.bump = piece as usize;
+            fl.end = piece as usize + PIECE;
+        }
+        let p = fl.bump;
+        fl.bump += size;
+        self.used.fetch_add(size, Relaxed);
+        p as *mut u8
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        match class_of(layout) {
+            None => {
+                self.used.fetch_sub(layout.size(), Relaxed);
+                unsafe { self.big.dealloc(ptr, layout) }
+            }
+            Some(c) => {
+                let mut fl = self.small[c].lock();
+                unsafe { *(ptr as *mut usize) = fl.head };
+                fl.head = ptr as usize;
+                self.used.fetch_sub(CLASSES[c], Relaxed);
+            }
+        }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // Still the same small size: nothing to move.
+        let new = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
+        if let (Some(a), Some(b)) = (class_of(layout), class_of(new)) {
+            if a == b {
+                return ptr;
+            }
+        }
+        let p = unsafe { self.alloc(new) };
+        if !p.is_null() {
+            unsafe { core::ptr::copy_nonoverlapping(ptr, p, layout.size().min(new_size)) };
+            unsafe { self.dealloc(ptr, layout) };
+        }
+        p
+    }
+}
+
+/// The heap's size and how much of it is in use (bytes).
+pub fn heap_use() -> (usize, usize) {
+    (ALLOCATOR.size.load(Relaxed), ALLOCATOR.used.load(Relaxed))
+}
 
 static HHDM: AtomicU64 = AtomicU64::new(0);
 
@@ -31,10 +157,11 @@ pub fn init(entries: &[&Entry], hhdm_offset: u64) -> (usize, u64) {
     let usable = entries.iter().filter(|e| e.entry_type == EntryType::USABLE);
     let total: u64 = usable.clone().map(|e| e.length).sum();
     let best = usable.max_by_key(|e| e.length).expect("no usable memory");
-    let size = best.length.min(MAX_HEAP) as usize;
+    let size = best.length as usize;
     unsafe {
-        ALLOCATOR.lock().init((best.base + hhdm_offset) as *mut u8, size);
+        ALLOCATOR.big.lock().init((best.base + hhdm_offset) as *mut u8, size);
     }
+    ALLOCATOR.size.store(size, Relaxed);
     (size, total)
 }
 

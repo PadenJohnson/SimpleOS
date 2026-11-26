@@ -22,6 +22,8 @@ use crate::diskmgr::{DiskAction, DiskMgr};
 use crate::documents::{DocSrc, DocsAction, DocsApp};
 use crate::movieui::{MovieAction, MovieApp};
 use crate::videos::{VideosAction, VideosApp};
+use crate::music::{MusicAction, MusicApp};
+use crate::soundedit::{EditAction, SoundEditor};
 use crate::usb::Usb;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -29,6 +31,8 @@ pub enum App {
     Photos,
     PhotoFrame,
     Videos,
+    Music,
+    SoundEditor,
     Movie,
     Documents,
     Printers,
@@ -57,6 +61,8 @@ impl App {
             App::Photos => "Photos",
             App::PhotoFrame => "Photo Frame",
             App::Videos => "Videos",
+            App::Music => "Music",
+            App::SoundEditor => "Sound Editor",
             App::Movie => "Video Editor",
             App::Documents => "Spreadsheets",
             App::Writer => "Writer",
@@ -121,13 +127,15 @@ const INK_DIM: u32 = rgb(96, 104, 116);
 const WIN_BG: u32 = rgb(251, 251, 253);
 
 /// The Applications menu, in order (folders open in place).
-const APPS: [MenuEntry; 15] = [
+const APPS: [MenuEntry; 17] = [
     MenuEntry::App(App::Photos),
     MenuEntry::App(App::PhotoFrame),
     MenuEntry::Folder(Folder::Documents),
     MenuEntry::App(App::Files),
     MenuEntry::App(App::Import),
     MenuEntry::App(App::Videos),
+    MenuEntry::App(App::Music),
+    MenuEntry::App(App::SoundEditor),
     MenuEntry::App(App::Movie),
     MenuEntry::App(App::Paint),
     MenuEntry::Folder(Folder::Games),
@@ -140,9 +148,10 @@ const APPS: [MenuEntry; 15] = [
 ];
 
 /// Always in the dock (after the Applications button).
-const PINNED: [MenuEntry; 8] = [
+const PINNED: [MenuEntry; 9] = [
     MenuEntry::App(App::Photos),
     MenuEntry::App(App::Videos),
+    MenuEntry::App(App::Music),
     MenuEntry::Folder(Folder::Documents),
     MenuEntry::App(App::Files),
     MenuEntry::Folder(Folder::Games),
@@ -363,6 +372,8 @@ pub struct Desktop {
     pointer: (i32, i32),
     calendar: crate::calendar::CalendarApp,
     videos: VideosApp,
+    music: MusicApp,
+    sound_edit: SoundEditor,
     /// Spreadsheet pages waiting to be printed (on the next tick, after the notice shows).
     pending_sheet_print: Option<(Vec<Canvas>, Layout, PrinterInfo)>,
     /// A phone import to start on the next tick (after the "looking" notice shows).
@@ -519,6 +530,8 @@ impl Desktop {
             pointer: (-1, -1),
             calendar: crate::calendar::CalendarApp::new(),
             videos: VideosApp::new(),
+            music: MusicApp::new(),
+            sound_edit: SoundEditor::new(),
             pending_sheet_print: None,
             pending_phone_import: None,
             pending_save: None,
@@ -1101,6 +1114,17 @@ impl Desktop {
             let a = self.movie.tick(now, &mut self.storage, &mut self.usb, visible);
             redraw |= self.movie_action(a, now);
         }
+        // Music plays on with its window minimized or behind others.
+        if let Some(win) = self.windows.iter().find(|w| w.app == App::Music) {
+            let visible = !win.minimized;
+            let a = self.music.tick(now, &mut self.storage, &mut self.usb, visible);
+            redraw |= self.music_action(a, now) && visible;
+        }
+        if let Some(win) = self.windows.iter().find(|w| w.app == App::SoundEditor) {
+            let visible = !win.minimized;
+            let a = self.sound_edit.tick(now, &mut self.storage, &mut self.usb, visible);
+            redraw |= self.edit_action(a);
+        }
         // (Videos ticks on its own: `tick_videos`.)
         // Started in a resolution being tried? Ask whether to keep it; go back if nobody answers.
         // Load the calendar once Solon storage is there (for today's events on the desktop).
@@ -1234,6 +1258,7 @@ impl Desktop {
                     usb.read_file(*drive, *vol, entry).map(Bytes::Owned).map_err(|e| e.message())
                 }
                 Source::Library { entry, .. } => storage.read_file(usb, entry).map(Bytes::Owned).map_err(|e| e.message()),
+                Source::Boot { entry } => crate::display::boot_read_part(storage, usb, entry, 0, entry.size as usize).map(Bytes::Owned).ok_or("can't read the boot drive"),
             });
         }
         redraw
@@ -1319,6 +1344,7 @@ impl Desktop {
             Source::Memory(b) => Ok(Bytes::Static(b)),
             Source::Usb { drive, vol, entry } => self.usb.read_file(*drive, *vol, entry).map(Bytes::Owned).map_err(|e| e.message()),
             Source::Library { entry, .. } => self.storage.read_file(&mut self.usb, entry).map(Bytes::Owned).map_err(|e| e.message()),
+            Source::Boot { entry } => crate::display::boot_read_part(&mut self.storage, &mut self.usb, entry, 0, entry.size as usize).map(Bytes::Owned).ok_or("can't read the boot drive"),
         }
     }
 
@@ -1413,6 +1439,7 @@ impl Desktop {
                     Source::Memory(b) => Ok(Bytes::Static(b)),
                     Source::Usb { drive, vol, entry } => usb.read_file(*drive, *vol, entry).map(Bytes::Owned).map_err(|e| e.message()),
                     Source::Library { entry, .. } => storage.read_file(usb, entry).map(Bytes::Owned).map_err(|e| e.message()),
+                    Source::Boot { entry } => crate::display::boot_read_part(storage, usb, entry, 0, entry.size as usize).map(Bytes::Owned).ok_or("can't read the boot drive"),
                 };
                 // A photo that can't be read leaves its spot blank instead of failing the job.
                 let img = match bytes.and_then(|bytes| crate::image::decode(&bytes)) {
@@ -1637,6 +1664,7 @@ impl Desktop {
             Some(Source::Memory(b)) => Ok(b.to_vec()),
             Some(Source::Usb { drive, vol, entry }) => self.usb.read_file(drive, vol, &entry),
             Some(Source::Library { entry, .. }) => self.storage.read_file(&mut self.usb, &entry),
+            Some(Source::Boot { entry }) => crate::display::boot_read_part(&mut self.storage, &mut self.usb, &entry, 0, entry.size as usize).ok_or(crate::fs::FsError::Corrupt),
             None => return,
         };
         let Ok(bytes) = bytes else {
@@ -2311,7 +2339,7 @@ impl Desktop {
         self.windows.push(Window { app, x, y, w, h, minimized: false, restore: None });
         self.order.push(app);
         // The editors want all the room they can get.
-        if matches!(app, App::Photos | App::Documents | App::Movie | App::Videos | App::Pinball | App::Shooter | App::Writer | App::Pdf | App::TextEdit | App::Calendar | App::Paint) {
+        if matches!(app, App::Photos | App::Documents | App::Movie | App::Videos | App::Music | App::SoundEditor | App::Pinball | App::Shooter | App::Writer | App::Pdf | App::TextEdit | App::Calendar | App::Paint) {
             self.set_maximized(app, true);
         }
         kprintln!("solon: open {}", app.name());
@@ -2354,6 +2382,13 @@ impl Desktop {
         if app == App::Videos {
             self.videos.opened(&mut self.storage, &mut self.usb);
         }
+        if app == App::Music {
+            self.music.opened(&mut self.storage, &mut self.usb);
+        }
+        if app == App::SoundEditor {
+            let a = self.sound_edit.opened();
+            self.edit_action(a);
+        }
         if app.game().is_some() && !self.games.loaded {
             let t = self.storage.read_root_file(&mut self.usb, "Games.txt");
             self.games.load(t.as_deref().and_then(|b| core::str::from_utf8(b).ok()));
@@ -2370,6 +2405,12 @@ impl Desktop {
         }
         if app == App::Videos {
             self.videos.closed();
+        }
+        if app == App::Music {
+            self.music.closed();
+        }
+        if app == App::SoundEditor {
+            self.sound_edit.closed();
         }
         if app == App::Backup && self.backup.busy() {
             self.toast = Some((String::from("Still working - press Stop first if you want to close Backup"), Self::now() + 4 * HZ));
@@ -2679,7 +2720,15 @@ impl Desktop {
             if win.minimized {
                 continue;
             }
-            let title = if win.app == App::Documents { self.docs.title() } else { self.doc_index(win.app).and_then(|k| self.doc_apps[k].1.title()) };
+            let title = if win.app == App::Documents {
+                self.docs.title()
+            } else if win.app == App::Music {
+                self.music.title()
+            } else if win.app == App::SoundEditor {
+                self.sound_edit.title()
+            } else {
+                self.doc_index(win.app).and_then(|k| self.doc_apps[k].1.title())
+            };
             let icon = Self::icon_img(&self.title_icons, icons::Icon::App(win.app));
             draw_frame(c, win, title.as_deref().unwrap_or(win.app.name()), focus == Some(i), icon);
             let body = win.body();
@@ -2698,6 +2747,8 @@ impl Desktop {
                 }
                 App::Movie => self.movie.draw(c, body),
                 App::Videos => self.videos.draw(c, body),
+                App::Music => self.music.draw(c, body),
+                App::SoundEditor => self.sound_edit.draw(c, body),
                 App::Calculator => self.calculator.draw(c, body),
                 App::Printers => {
                     let v = self.printer_views();
@@ -2756,6 +2807,8 @@ impl Desktop {
             }
             App::Movie => self.movie.on_wheel(wheel, x, y, body),
             App::Videos => self.videos.on_wheel(wheel, body),
+            App::Music => self.music.on_wheel(wheel, body),
+            App::SoundEditor => self.sound_edit.on_wheel(wheel, x, body),
             App::Calendar => self.calendar.on_wheel(wheel),
             App::Settings => self.settings_app.on_wheel(wheel, body, &self.settings, self.screen),
             _ => false,
@@ -2772,6 +2825,8 @@ impl Desktop {
             App::Disks => self.disks.scroll_info(body),
             App::Documents => self.docs.scroll_info(body),
             App::Videos => self.videos.scroll_info(body),
+            App::Music => self.music.scroll_info(body),
+            App::SoundEditor => self.sound_edit.scroll_info(body),
             App::Settings => self.settings_app.scroll_info(body, &self.settings, self.screen),
             app => self.doc_index(app).and_then(|k| self.doc_apps[k].1.scroll_info(body)),
         }
@@ -2785,11 +2840,44 @@ impl Desktop {
             App::Disks => self.disks.set_scroll(v),
             App::Documents => self.docs.set_scroll(v),
             App::Videos => self.videos.set_scroll(v),
+            App::Music => self.music.set_scroll(v),
+            App::SoundEditor => self.sound_edit.set_scroll(v),
             App::Settings => self.settings_app.set_scroll(v),
             app => {
                 if let Some(k) = self.doc_index(app) {
                     self.doc_apps[k].1.set_scroll(v, body);
                 }
+            }
+        }
+    }
+
+    /// What the Music app asked for. True = redraw.
+    fn music_action(&mut self, a: MusicAction, now: u64) -> bool {
+        match a {
+            MusicAction::None => false,
+            MusicAction::Redraw => true,
+            MusicAction::Edit(src, name) => {
+                let _ = now;
+                self.open(App::SoundEditor);
+                let mut io = crate::movieui::LibIo { storage: &mut self.storage, usb: &mut self.usb };
+                self.sound_edit.open(src, name, &mut io);
+                true
+            }
+        }
+    }
+
+    /// What the Sound Editor asked for. True = redraw.
+    fn edit_action(&mut self, a: EditAction) -> bool {
+        match a {
+            EditAction::None => false,
+            EditAction::Redraw => true,
+            EditAction::WantSongs => {
+                // The Music app's list of songs (looked for now if it hasn't been yet).
+                if !self.music.scanned() {
+                    self.music.opened(&mut self.storage, &mut self.usb);
+                }
+                self.sound_edit.choose_from(self.music.song_list());
+                true
             }
         }
     }
@@ -2842,6 +2930,16 @@ impl Desktop {
                 let a = self.videos.on_press(x, y, body, now, &mut self.storage, &mut self.usb);
                 self.capture = true;
                 redraw |= matches!(a, VideosAction::Redraw);
+            }
+            App::Music => {
+                let a = self.music.on_press(x, y, body, now, &mut self.storage, &mut self.usb);
+                self.capture = true;
+                redraw |= self.music_action(a, now);
+            }
+            App::SoundEditor => {
+                let a = self.sound_edit.on_press(x, y, body, now, &mut self.storage, &mut self.usb);
+                self.capture = true;
+                redraw |= self.edit_action(a);
             }
             App::Printers => {
                 let v = self.printer_views();
@@ -2958,6 +3056,11 @@ impl Desktop {
             }
             App::Movie => self.movie.on_key(sc).map(|a| self.movie_action(a, Self::now())),
             App::Videos => self.videos.on_key(sc).map(|a| matches!(a, VideosAction::Redraw)),
+            App::Music => Some(self.music.on_key(sc, &mut self.storage, &mut self.usb)),
+            App::SoundEditor => {
+                let a = self.sound_edit.on_key(sc, &mut self.storage, &mut self.usb);
+                Some(self.edit_action(a))
+            }
             App::Calculator => self.calculator.on_key(sc),
             App::Printers => {
                 let n = self.printer_views().len();
@@ -3118,6 +3221,8 @@ impl Desktop {
                         }
                         App::Movie => self.movie.on_release(),
                         App::Videos => self.videos.on_release(),
+                        App::Music => self.music.on_release(&mut self.storage, &mut self.usb),
+                        App::SoundEditor => self.sound_edit.on_release(),
                         App::Calculator => self.calculator.on_release(),
                         app if app.game().is_some() => self.games.release(app.game().unwrap(), body),
                         _ => self.photos.on_release(),
@@ -3132,6 +3237,8 @@ impl Desktop {
                         }
                         App::Movie => self.movie.on_drag(x, y, body),
                         App::Videos => self.videos.on_drag(x, y, body),
+                        App::Music => self.music.on_drag(x, y, body),
+                        App::SoundEditor => self.sound_edit.on_drag(x, y, body),
                         app if app.game().is_some() => self.games.drag(app.game().unwrap(), x, y),
                         _ => self.photos.on_drag(x, y, body),
                     };

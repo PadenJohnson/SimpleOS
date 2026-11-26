@@ -536,11 +536,13 @@ impl Storage {
 
     fn collect_photos(&mut self, usb: &mut Usb, dir: &DirEntry, depth: u32, out: &mut Vec<(DirEntry, DirEntry)>) {
         let Ok(entries) = self.list(usb, dir) else { return };
+        // Album covers beside songs (folder.jpg, AlbumArt...jpg) aren't photos.
+        let songs_here = entries.iter().any(|e| !e.is_dir && crate::music::is_music(&e.name));
         let mut subdirs = Vec::new();
         for e in entries {
             if e.is_dir {
                 subdirs.push(e);
-            } else if crate::import::is_photo(&e.name) {
+            } else if crate::import::is_photo(&e.name) && !(songs_here && crate::music::is_cover_name(&e.name)) {
                 out.push((dir.clone(), e));
             }
         }

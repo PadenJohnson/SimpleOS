@@ -18,6 +18,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ptr::{read_volatile, write_volatile};
+use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use spin::Mutex;
 
 pub const RATE: u32 = 48_000;
@@ -1065,8 +1066,29 @@ pub fn poll(now: u64) {
 /// How far ahead of the speakers the player should keep the buffer filled.
 pub const LEAD: usize = RATE as usize * 3 / 10;
 
-/// Start playing (silence until sound is queued).
-pub fn start() {
+/// The apps that play sound, each with its own number: one starting takes the sound from
+/// another (which notices, through `owner`, and pauses).
+pub const VIDEOS: u32 = 1;
+pub const MUSIC: u32 = 2;
+pub const VIDEO_EDITOR: u32 = 3;
+pub const SOUND_EDITOR: u32 = 4;
+pub const GAMES: u32 = 5;
+static OWNER: AtomicU32 = AtomicU32::new(0);
+
+/// The app playing now (or that played last).
+pub fn owner() -> u32 {
+    OWNER.load(Relaxed)
+}
+
+/// Another app than `owner` is playing right now (games then stay quiet rather than stop
+/// the music).
+pub fn busy_for(owner: u32) -> bool {
+    OWNER.load(Relaxed) != owner && SOUND.lock().as_mut().is_some_and(|s| s.clock().0)
+}
+
+/// Start playing for `owner` (silence until sound is queued). Whatever another app was
+/// playing stops.
+pub fn start(owner: u32) {
     if let Some(s) = SOUND.lock().as_mut() {
         if s.test_end.take().is_some() {
             s.stop_out();
@@ -1074,13 +1096,21 @@ pub fn start() {
                 s.route(t);
             }
         }
+        let was = OWNER.swap(owner, Relaxed);
+        if s.clock().0 && was != owner {
+            s.stop_out();
+        }
         if !s.clock().0 {
             s.start_out(0, 0);
         }
     }
 }
 
-pub fn stop() {
+/// Stop playing, if `owner` is the one playing.
+pub fn stop(owner: u32) {
+    if OWNER.load(Relaxed) != owner {
+        return;
+    }
     if let Some(s) = SOUND.lock().as_mut() {
         if s.test_end.is_none() {
             s.stop_out();
@@ -1096,8 +1126,12 @@ pub fn played() -> u64 {
     }
 }
 
-/// How many frames the player may queue now (to stay `LEAD` ahead).
-pub fn wanted() -> usize {
+/// How many frames `owner` may queue now (to stay `LEAD` ahead; none if another app has
+/// the sound).
+pub fn wanted(owner: u32) -> usize {
+    if OWNER.load(Relaxed) != owner {
+        return 0;
+    }
     let mut g = SOUND.lock();
     let Some(s) = g.as_mut() else { return 0 };
     if s.test_end.is_some() {
@@ -1121,8 +1155,20 @@ pub fn wanted() -> usize {
     LEAD.saturating_sub((written - played) as usize)
 }
 
-/// Queue interleaved stereo frames after what's already queued.
-pub fn queue(pcm: &[i16]) {
+/// Where the next queued frame will play (frames since `start`): after what's queued, or
+/// where the output is now if it ran dry.
+pub fn write_pos() -> u64 {
+    let mut g = SOUND.lock();
+    let Some(s) = g.as_mut() else { return 0 };
+    let (_, played, written) = s.clock();
+    written.max(played)
+}
+
+/// Queue interleaved stereo frames after what's already queued (if `owner` has the sound).
+pub fn queue(owner: u32, pcm: &[i16]) {
+    if OWNER.load(Relaxed) != owner {
+        return;
+    }
     if let Some(s) = SOUND.lock().as_mut() {
         if s.test_end.is_some() || !s.clock().0 {
             return;
@@ -1138,13 +1184,13 @@ pub fn self_test(pump: &mut dyn FnMut()) {
         kprintln!("hda: sound test: no sound device");
         return;
     }
-    start();
+    start(0);
     let mut t = 0u64;
     let total = RATE as u64 * 8 / 10;
     let give_up = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed) + 5 * crate::interrupts::HZ;
     while t < total && crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed) < give_up {
         pump();
-        let n = wanted().min((total - t) as usize);
+        let n = wanted(0).min((total - t) as usize);
         if n > 0 {
             let mut buf = Vec::with_capacity(n * 2);
             for i in 0..n as u64 {
@@ -1154,7 +1200,7 @@ pub fn self_test(pump: &mut dyn FnMut()) {
                 buf.push(v);
                 buf.push(v);
             }
-            queue(&buf);
+            queue(0, &buf);
             t += n as u64;
         }
         sleep_ms(20);
@@ -1166,13 +1212,13 @@ pub fn self_test(pump: &mut dyn FnMut()) {
         if played() >= end {
             break;
         }
-        let n = wanted();
+        let n = wanted(0);
         if n > 0 {
-            queue(&alloc::vec![0i16; n * 2]);
+            queue(0, &alloc::vec![0i16; n * 2]);
         }
         sleep_ms(10);
     }
     let p = played();
-    stop();
+    stop(0);
     kprintln!("hda: sound test played {} frames", p);
 }

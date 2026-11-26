@@ -83,6 +83,7 @@ pub fn audio(info: &AudioInfo) -> Result<Box<dyn AudioDec>, String> {
         ACodec::Opus { head } => Ok(Box::new(super::opus::OpusDec::new(head))),
         &ACodec::Amr { wide } => Ok(Box::new(super::amr::AmrDec::new(wide))),
         ACodec::Dts => Ok(Box::new(super::dts::DtsDec::new())),
+        ACodec::Flac { info } => Ok(Box::new(super::flac::FlacDec::new(info))),
         &ACodec::Pcm { bits, big_endian, float } => Ok(Box::new(PcmDec { bits, big_endian, float, channels: info.channels.max(1), rate: info.rate.max(1) })),
         other => Err(format!("The sound is {}, which Solon can't play yet", other.name())),
     }
@@ -224,6 +225,8 @@ impl AudioDec for PcmDec {
         let sample = |s: &[u8]| -> i16 {
             let get = |i: usize| if self.big_endian { s[i] } else { s[bytes - 1 - i] }; // most significant first
             match (bytes, self.float) {
+                // 8 bits: unsigned in WAV files, signed in AIFF (the big-endian ones).
+                (1, _) if self.big_endian => (s[0] as i8 as i16) << 8,
                 (1, _) => ((s[0] as i16) - 128) << 8,
                 (4, true) => {
                     let v = if self.big_endian { u32::from_be_bytes([s[0], s[1], s[2], s[3]]) } else { u32::from_le_bytes([s[0], s[1], s[2], s[3]]) };

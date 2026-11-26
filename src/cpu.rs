@@ -73,6 +73,72 @@ pub fn tsc_per_us() -> u64 {
     per_us
 }
 
+/// Vector instructions this processor has and Solon switched on (see `enable_simd`).
+static SIMD: AtomicU64 = AtomicU64::new(0);
+const HAS_SSE41: u64 = 1;
+const HAS_AVX2: u64 = 2;
+
+/// Switch on the processor's floating-point and vector units on this core (every core calls
+/// this first thing): SSE (CR0, CR4) always, and AVX/AVX2 where the processor has them (the
+/// XSAVE state they need, in CR4 and XCR0). Solon has no processes to switch between, so no
+/// register state needs saving; interrupt handlers save the vector registers they use.
+pub fn enable_simd() {
+    unsafe {
+        let mut cr0: u64;
+        core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack));
+        cr0 = (cr0 & !(1 << 2 | 1 << 3)) | 1 << 1; // EM off, TS off, MP on
+        core::arch::asm!("mov cr0, {}", in(reg) cr0, options(nomem, nostack));
+        let mut cr4: u64;
+        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack));
+        cr4 |= 1 << 9 | 1 << 10; // OSFXSR, OSXMMEXCPT
+        let (_, _, ecx1, _) = cpuid(1);
+        let xsave = ecx1 & (1 << 26) != 0;
+        let avx = ecx1 & (1 << 28) != 0;
+        if xsave {
+            cr4 |= 1 << 18; // OSXSAVE
+        }
+        core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack));
+        let mut have = 0;
+        if ecx1 & (1 << 19) != 0 {
+            have |= HAS_SSE41;
+        }
+        if xsave && avx {
+            // XCR0: x87, SSE and AVX state.
+            let (lo, hi): (u32, u32);
+            core::arch::asm!("xgetbv", in("ecx") 0, out("eax") lo, out("edx") hi, options(nomem, nostack));
+            let xcr0 = (hi as u64) << 32 | lo as u64 | 0b111;
+            core::arch::asm!("xsetbv", in("ecx") 0, in("eax") xcr0 as u32, in("edx") (xcr0 >> 32) as u32, options(nomem, nostack));
+            let (_, ebx7, _, _) = cpuid_sub(7, 0);
+            if cpuid(0).0 >= 7 && ebx7 & (1 << 5) != 0 {
+                have |= HAS_AVX2;
+            }
+        }
+        SIMD.store(have, Relaxed);
+    }
+}
+
+/// The processor has AVX2 (and Solon switched it on).
+pub fn avx2() -> bool {
+    SIMD.load(Relaxed) & HAS_AVX2 != 0
+}
+
+/// The processor has SSE4.1.
+pub fn sse41() -> bool {
+    SIMD.load(Relaxed) & HAS_SSE41 != 0
+}
+
+/// What the floating-point and vector unit has, for the log and Settings > This PC.
+pub fn simd_text() -> String {
+    let mut v = String::from("On: SSE2");
+    if sse41() {
+        v.push_str(", SSE4.1");
+    }
+    if avx2() {
+        v.push_str(", AVX2");
+    }
+    v
+}
+
 /// Microseconds since start (from the time-stamp counter), for timing work.
 pub fn now_us() -> u64 {
     (unsafe { _rdtsc() }) / tsc_per_us()

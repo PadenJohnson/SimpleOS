@@ -21,7 +21,10 @@ struct Cursor {
 impl Cursor {
     fn new(t: &Track) -> Cursor {
         let ts = t.timescale.max(1) as i64;
-        let t0 = if t.video { t.samples.iter().map(|s| s.dts as i64 + s.cts as i64).min().unwrap_or(0) } else { t.samples.first().map(|s| s.dts as i64).unwrap_or(0) };
+        // Pictures: time zero is the first one shown. Sound: where its edit list starts it
+        // (past the encoder's priming samples), else its first sample.
+        let first = t.samples.first().map(|s| s.dts as i64).unwrap_or(0);
+        let t0 = if t.video { t.samples.iter().map(|s| s.dts as i64 + s.cts as i64).min().unwrap_or(0) } else { first + t.edit_start.unwrap_or(0) };
         let mut c = Cursor { samples: t.samples.clone(), timescale: ts, t0, next: 0, keys: Vec::new(), video: t.video };
         c.keys = (0..c.samples.len()).filter(|&i| c.samples[i].key).map(|i| (c.pts(i), i)).collect();
         if c.keys.is_empty() && !c.samples.is_empty() {
@@ -206,6 +209,11 @@ fn audio_codec(t: &Track) -> ACodec {
         b"dtsc" | b"dtsh" | b"dtsl" | b"dtse" => ACodec::Dts,
         b"samr" => ACodec::Amr { wide: false },
         b"sawb" => ACodec::Amr { wide: true },
+        // "dfLa": a full box (version, flags), then the metadata blocks; STREAMINFO first.
+        b"fLaC" => match find(k, b"dfLa") {
+            Some(d) if d.len() >= 42 => ACodec::Flac { info: d[8..42].to_vec() },
+            _ => ACodec::Other(String::from("FLAC")),
+        },
         b"alac" => ACodec::Other(String::from("Apple Lossless")),
         f => ACodec::Other(String::from_utf8_lossy(f).into_owned()),
     }
