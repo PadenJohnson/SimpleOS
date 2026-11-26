@@ -328,7 +328,7 @@ impl SettingsApp {
         let mut items: Vec<(Rect, It)> = Vec::new();
         // Sidebar.
         for (k, p) in Page::ALL.iter().enumerate() {
-            items.push((Rect::new(r.x + 12, r.y + 70 + k as i32 * 58, SIDEBAR - 24, 52), It::Side { page: *p, on: *p == self.page }));
+            items.push((Self::side_item(r, k), It::Side { page: *p, on: *p == self.page }));
         }
         let cr = Self::content(r);
         let w = (cr.w - 64).clamp(300, 780);
@@ -371,7 +371,35 @@ impl SettingsApp {
                 ui.end_card();
             }
         }
-        ui.items
+        // In a narrow window a row's words stop short of its buttons (shortened with "...").
+        let mut items = ui.items;
+        let controls: Vec<Rect> = items
+            .iter()
+            .filter(|(_, it)| matches!(it, It::Button { .. } | It::Seg { .. } | It::Drop { .. } | It::Toggle { .. } | It::Radio { .. } | It::Monitor { .. }))
+            .map(|(b, _)| *b)
+            .collect();
+        for (b, it) in items.iter_mut() {
+            let It::Text { s, size, bold, .. } = it else { continue };
+            if s.is_empty() {
+                continue;
+            }
+            let limit = controls.iter().filter(|c| c.x > b.x && c.y < b.y + b.h && b.y < c.y + c.h).map(|c| c.x - 12).min();
+            if let Some(lim) = limit {
+                if b.x + b.w > lim {
+                    *s = crate::photos::ellipsize(s, (lim - b.x).max(24), *size, *bold);
+                    b.w = text_width(s, *size, *bold);
+                }
+            }
+        }
+        items
+    }
+
+    /// Where the sidebar's item `k` is: roomy (a name and a line under it), or closer
+    /// together and names only when the window is short.
+    fn side_item(r: Rect, k: usize) -> Rect {
+        let n = Page::ALL.len() as i32;
+        let pitch = ((r.h - 70 - 56) / n).clamp(30, 58);
+        Rect::new(r.x + 12, r.y + 70 + k as i32 * pitch, SIDEBAR - 24, pitch - 6)
     }
 
     /// The page shows readings that change (the desktop redraws it every second).
@@ -856,7 +884,11 @@ impl SettingsApp {
         for (b, it) in items.iter().filter(|(_, it)| matches!(it, It::Side { .. })) {
             Self::draw_item(self, c, *b, it, s);
         }
-        c.text(r.x + 24, r.y + r.h - 34, if saved { "Changes are saved" } else { "Changes last until turned off" }, Size::Small, false, DIM);
+        // (Where there's room under the sidebar.)
+        let last = Self::side_item(r, Page::ALL.len() - 1);
+        if r.y + r.h - 34 > last.y + last.h + 8 {
+            c.text(r.x + 24, r.y + r.h - 34, if saved { "Changes are saved" } else { "Changes last until turned off" }, Size::Small, false, DIM);
+        }
         let body = Rect::new(cr.x, cr.y + 64, cr.w, cr.h - 64);
         c.set_clip(body);
         for (b, it) in items.iter().filter(|(_, it)| !matches!(it, It::Side { .. })) {
@@ -894,7 +926,7 @@ impl SettingsApp {
 
     fn draw_sidebar_only(&self, c: &mut Canvas, r: Rect, s: &Settings) {
         for (k, p) in Page::ALL.iter().enumerate() {
-            let b = Rect::new(r.x + 12, r.y + 70 + k as i32 * 58, SIDEBAR - 24, 52);
+            let b = Self::side_item(r, k);
             self.draw_item(c, b, &It::Side { page: *p, on: *p == self.page }, s);
         }
     }
@@ -1006,10 +1038,15 @@ impl SettingsApp {
             It::Side { page, on } => {
                 if *on {
                     c.round_rect(b.x, b.y, b.w, b.h, 10, rgb(255, 255, 255));
-                    c.round_rect(b.x + 4, b.y + 12, 4, b.h - 24, 2, ON);
+                    c.round_rect(b.x + 4, b.y + b.h / 4, 4, b.h / 2, 2, ON);
                 }
-                c.text(b.x + 18, b.y + 6, page.name(), Size::Small, true, if *on { ON } else { INK });
-                c.text(b.x + 18, b.y + 27, page.blurb(), Size::Small, false, DIM);
+                if b.h >= 46 {
+                    c.text(b.x + 18, b.y + 6, page.name(), Size::Small, true, if *on { ON } else { INK });
+                    c.text(b.x + 18, b.y + 27, page.blurb(), Size::Small, false, DIM);
+                } else {
+                    // A short window: the names only.
+                    c.text(b.x + 18, b.y + (b.h - 18) / 2, page.name(), Size::Small, true, if *on { ON } else { INK });
+                }
             }
         }
     }
@@ -1026,7 +1063,7 @@ impl SettingsApp {
         let cr = Self::content(r);
         if self.bg_picker {
             for (k, p) in Page::ALL.iter().enumerate() {
-                if Rect::new(r.x + 12, r.y + 70 + k as i32 * 58, SIDEBAR - 24, 52).contains(x, y) {
+                if Self::side_item(r, k).contains(x, y) {
                     self.show(*p, false);
                     return SettingsAction::Redraw;
                 }

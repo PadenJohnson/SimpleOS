@@ -13,6 +13,7 @@ extern crate alloc;
 #[macro_use]
 mod serial; // must come first so kprintln! is visible to later modules
 mod backup;
+mod bootscreen;
 mod calculator;
 mod calendar;
 mod crash;
@@ -236,6 +237,9 @@ extern "C" fn kernel_main() -> ! {
     let (w, h) = (screen.width, screen.height);
     screen.register_for_crashes();
     kprintln!("solon: framebuffer {}x{}", w, h);
+    // The boot screen, until the desktop is ready.
+    bootscreen::show(&screen);
+    bootscreen::step(&screen, 3, 18, "Getting the screens ready...");
     kprintln!("display: framebuffer memory is cached {:?}, PAT {:#018x}", memory::caching_of(screen.base_addr()), unsafe { x86_64::registers::model_specific::Msr::new(0x277).read() });
     // The screen modes the firmware offers, and what the monitor says about itself.
     if let Some(fb) = FRAMEBUFFER_REQUEST.get_response().and_then(|resp| resp.framebuffers().next()) {
@@ -279,6 +283,7 @@ extern "C" fn kernel_main() -> ! {
         None => kprintln!("solon: boot disk has no GPT id"),
     }
 
+    bootscreen::step(&screen, 18, 26, "Getting the keyboard and mouse ready...");
     interrupts::init();
     ps2::set_bounds(w, h);
     let mouse_ok = ps2::init();
@@ -314,6 +319,7 @@ extern "C" fn kernel_main() -> ! {
     }
 
     // The processor, the motherboard and its sensors (Settings, This PC, and the log).
+    bootscreen::step(&screen, 26, 32, "Waking up the processor's cores...");
     kprintln!("cpu: {}", cpu::describe());
     // Boot option "msrtest": a register no processor has must read as "not there", not crash.
     if EXECUTABLE_CMDLINE_REQUEST.get_response().and_then(|r| r.cmdline().to_str().ok()).is_some_and(|c| c.split_whitespace().any(|w| w == "msrtest")) {
@@ -338,12 +344,15 @@ extern "C" fn kernel_main() -> ! {
         }
     }
     smp::bench();
+    // From here another core keeps the boot screen's bar moving.
+    bootscreen::animate();
     cpu::sample(); // starts the clock and power counters
     if let Some(r) = hwmon::read() {
         kprintln!("hwmon: {}", hwmon::describe(&r));
     }
 
     // USB: controllers, keyboards/mice, and drives already plugged in.
+    bootscreen::step(&screen, 32, 72, "Looking for disks, USB drives and the keyboard and mouse...");
     let t0 = TICKS.load(Relaxed);
     // Internal disks first: if Solon started from one, it isn't waiting for a USB stick.
     let mut disks = disk::scan();
@@ -360,8 +369,11 @@ extern "C" fn kernel_main() -> ! {
     }
     let mut storage = Storage::init(&mut usb, disks);
     kprintln!("solon: usb ready in {} ms, {} drive(s)", (TICKS.load(Relaxed) - t0) * 1000 / HZ, usb.drives.len());
+    // Installs from before the boot screen: the boot loader stays quiet from the next start.
+    display::ensure_quiet_boot(&mut storage, &mut usb);
 
     // Sound card (Intel HD Audio).
+    bootscreen::step(&screen, 72, 80, "Getting the sound ready...");
     hda::init(&pci::scan());
     if EXECUTABLE_CMDLINE_REQUEST.get_response().and_then(|r| r.cmdline().to_str().ok()).is_some_and(|c| c.split_whitespace().any(|w| w == "soundtest")) {
         hda::self_test(&mut || {
@@ -376,6 +388,7 @@ extern "C" fn kernel_main() -> ! {
     });
 
     // Settings (saved in the library), then the display scale they ask for.
+    bootscreen::step(&screen, 80, 86, "Opening your settings...");
     let mut settings = match storage.read_root_file(&mut usb, "Settings.txt") {
         Some(t) => Settings::from_text(core::str::from_utf8(&t).unwrap_or(""), w, h),
         None => Settings::defaults(w, h),
@@ -388,8 +401,16 @@ extern "C" fn kernel_main() -> ! {
     if let Some(t) = storage.read_root_file(&mut usb, "Dictionary.txt") {
         spell::load_user(core::str::from_utf8(&t).unwrap_or(""));
     }
-    // The resolution to show the desktop at (switching the card, or scaled up).
+    // The resolution to show the desktop at (switching the card, or scaled up). The boot
+    // screen is drawn again if the picture changed size.
+    let before = (screen.width, screen.height, screen.base_addr());
+    bootscreen::pause();
     let mut view = apply_view(&mut screen, (w, h), settings.resolution);
+    if (screen.width, screen.height, screen.base_addr()) != before {
+        bootscreen::show(&screen);
+        bootscreen::step(&screen, 86, 90, "Opening your settings...");
+    }
+    bootscreen::animate();
     if !settings.size_fits(settings.size, view.res.0, view.res.1) {
         settings.size = 0;
     }
@@ -430,6 +451,7 @@ extern "C" fn kernel_main() -> ! {
     // Tries so far (a monitor that doesn't answer gets one more, when Settings change).
     let mut light_tries = 0;
     if !no_light && settings.screens != 2 && nvidia::light::waiting().is_some() {
+        bootscreen::step(&screen, 88, 96, "Switching on the second monitor...");
         light_tries += 1;
         kprintln!("solon: {}", nvidia::light::light_second());
         second = nvidia::light::second_screen().map(|found| use_second(found, false));
@@ -437,9 +459,11 @@ extern "C" fn kernel_main() -> ! {
         hda::choose(settings.sound_out);
     }
 
+    bootscreen::step(&screen, 96, 100, "Almost ready...");
     let mut canvas = Canvas::new(lw, lh);
     let mut desktop = Desktop::new(lw, lh, photos, usb, storage, settings, view.res);
     let mut lay = spread(&mut desktop, &mut canvas, (lw, lh), second.as_ref(), scale);
+    bootscreen::finish(&screen);
     blank_unused(&lay, &screen, view.dst, second.as_ref());
     let (cx, cy) = lay.main_centre();
     ps2::warp(cx, cy);
@@ -641,6 +665,10 @@ extern "C" fn kernel_main() -> ! {
             }
         }
         if (redraw || moved) && !desktop.hide_pointer() {
+            // A double arrow over a window's edge or corner (drag it to change the size).
+            let shape = desktop.pointer_shape(mx, my);
+            cursor.set_shape(shape);
+            cursor2.set_shape(shape);
             place_pointer(&mut cursor, &screen, &lay, 0, mx, my, view.dst);
             if let Some(s2) = &second {
                 place_pointer(&mut cursor2, s2, &lay, 1, mx, my, full_of(s2));

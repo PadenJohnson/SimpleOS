@@ -133,6 +133,11 @@ impl Screen {
         self.pitch
     }
 
+    /// Where red, green and blue are in a pixel (bit positions).
+    pub fn shifts(&self) -> (u8, u8, u8) {
+        (self.r_shift, self.g_shift, self.b_shift)
+    }
+
     /// Something else drew on the screen: the next `present` sends everything.
     pub fn invalidate(&self) {
         *self.last.borrow_mut() = None;

@@ -313,6 +313,33 @@ pub fn read_config(storage: &mut Storage, usb: &mut Usb) -> Result<String, Strin
     })
 }
 
+/// Keep the boot loader's own words ("Loading executable...") off the screen before the boot
+/// screen: add "quiet: yes" to an older install's limine.conf, once (after its global
+/// settings' first line, before the boot entry).
+pub fn ensure_quiet_boot(storage: &mut Storage, usb: &mut Usb) {
+    let Ok(text) = read_config(storage, usb) else { return };
+    if text.lines().any(|l| l.trim().to_ascii_lowercase().starts_with("quiet:")) {
+        return;
+    }
+    let mut out = String::new();
+    let mut added = false;
+    for l in text.lines() {
+        out.push_str(l);
+        out.push('\n');
+        if !added && l.trim().to_ascii_lowercase().starts_with("timeout:") {
+            out.push_str("quiet: yes\n");
+            added = true;
+        }
+    }
+    if !added {
+        out.insert_str(0, "quiet: yes\n");
+    }
+    match write_config(storage, usb, &out) {
+        Ok(()) => kprintln!("display: the boot loader now starts quietly (quiet: yes in limine.conf)"),
+        Err(e) => kprintln!("display: couldn't make the boot loader quiet: {}", e),
+    }
+}
+
 /// Replace the boot loader settings safely: write a new file, check it, then switch it in.
 pub fn write_config(storage: &mut Storage, usb: &mut Usb, text: &str) -> Result<(), String> {
     forget_boot_volume();

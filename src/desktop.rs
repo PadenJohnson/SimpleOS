@@ -100,6 +100,25 @@ impl App {
             _ => return None,
         })
     }
+    /// The smallest its window can be made (what's in it still fits and makes sense).
+    fn min_size(self) -> (i32, i32) {
+        match self {
+            App::Calculator => (360, 480),
+            App::Settings => (760, 460),
+            App::Mines | App::Sudoku | App::Solitaire | App::FreeCell => (520, 440),
+            App::Pinball | App::Shooter => (480, 400),
+            // Long toolbars.
+            App::Writer | App::Pdf | App::TextEdit | App::Documents => (820, 520),
+            App::Movie => (960, 600),
+            App::SoundEditor => (920, 560),
+            App::Photos | App::Paint => (760, 500),
+            App::Videos => (560, 380),
+            App::Calendar => (640, 480),
+            App::PhotoFrame | App::Backup | App::Printers | App::Import | App::Disks | App::Files => (640, 440),
+            _ => (600, 400),
+        }
+    }
+
     fn placeholder(self) -> [&'static str; 2] {
         match self {
             App::Photos => ["No photos yet.", "Plug in a USB drive or SD card, then open Import."],
@@ -120,6 +139,16 @@ const DOCK_H: i32 = 56;
 const DOCK_ICON: i32 = 42;
 const DOCK_GAP: i32 = 8;
 const TITLE_H: i32 = 38;
+/// A window's edges, as bits (dragging them changes its size).
+const EDGE_L: u8 = 1;
+const EDGE_R: u8 = 2;
+const EDGE_T: u8 = 4;
+const EDGE_B: u8 = 8;
+/// How far outside and inside an edge it can be grabbed, and how far along an edge a corner
+/// reaches.
+const GRAB_OUT: i32 = 8;
+const GRAB_IN: i32 = 4;
+const GRAB_CORNER: i32 = 22;
 const DOUBLE_CLICK_TICKS: u64 = 50; // 0.5 s at 100 Hz
 
 const INK: u32 = rgb(28, 32, 40);
@@ -229,6 +258,16 @@ enum DockItem {
     Power,
 }
 
+/// A window being made bigger or smaller by dragging one of its edges or corners: which,
+/// the window as it was, and where the drag started.
+#[derive(Clone, Copy)]
+struct Resize {
+    app: App,
+    edges: u8,
+    start: Rect,
+    from: (i32, i32),
+}
+
 struct Window {
     app: App,
     x: i32,
@@ -260,6 +299,37 @@ impl Window {
     fn body(&self) -> Rect {
         Rect::new(self.x, self.y + TITLE_H + 1, self.w, self.h - TITLE_H - 1)
     }
+    /// Which of its edges (EDGE_* bits) the point grabs for resizing: within a few pixels of
+    /// one, inside or out; near a corner, both of its edges. Maximized windows have none, and
+    /// inside the title bar only the very top does (its buttons are at the right end).
+    fn edges_at(&self, x: i32, y: i32) -> u8 {
+        if self.minimized || self.restore.is_some() {
+            return 0;
+        }
+        let r = self.rect();
+        if x < r.x - GRAB_OUT || x >= r.x + r.w + GRAB_OUT || y < r.y - GRAB_OUT || y >= r.y + r.h + GRAB_OUT {
+            return 0;
+        }
+        let in_title = y >= r.y && y < r.y + TITLE_H;
+        let side_in = if in_title { 0 } else { GRAB_IN };
+        let buttons = Rect::new(r.x + r.w - 3 * TITLE_H, r.y, 3 * TITLE_H, TITLE_H);
+        let near_l = x < r.x + side_in;
+        let near_r = x >= r.x + r.w - side_in;
+        let near_t = y < r.y || (y < r.y + 3 && !buttons.contains(x, y));
+        let near_b = y >= r.y + r.h - GRAB_IN;
+        let (cl, cr) = (x < r.x + GRAB_CORNER, x >= r.x + r.w - GRAB_CORNER);
+        let (ct, cb) = (y < r.y + GRAB_CORNER, y >= r.y + r.h - GRAB_CORNER);
+        let mut e = 0;
+        if near_l || near_r {
+            e |= if near_l { EDGE_L } else { EDGE_R };
+            e |= if ct { EDGE_T } else if cb { EDGE_B } else { 0 };
+        }
+        if near_t || near_b {
+            e |= if near_t { EDGE_T } else { EDGE_B };
+            e |= if cl { EDGE_L } else if cr { EDGE_R } else { 0 };
+        }
+        e
+    }
 }
 
 /// A phone's newest document, offered to continue on this computer.
@@ -282,6 +352,8 @@ pub struct Desktop {
     order: Vec<App>,
     /// Moving a window: (app, offset of the pointer from its corner).
     drag: Option<(App, i32, i32)>,
+    /// Changing a window's size (dragging an edge or corner).
+    resize: Option<Resize>,
     clock: (u8, u8),
     /// Last click on a title bar (double-click maximizes).
     last_title: Option<(App, u64)>,
@@ -470,6 +542,7 @@ impl Desktop {
             windows: Vec::new(),
             order: Vec::new(),
             drag: None,
+            resize: None,
             clock: (0, 0),
             last_title: None,
             apps_menu: None,
@@ -778,6 +851,80 @@ impl Desktop {
     /// Stop USB controllers before the computer is switched off.
     pub fn prepare_power_off(&mut self) {
         self.usb.shutdown();
+    }
+
+    /// The window whose edge or corner is at (x, y), if any (the topmost one there; a window
+    /// in front covers the edges of those behind it), and which edges.
+    fn resize_target(&self, x: i32, y: i32) -> Option<(App, u8)> {
+        if self.dock_strip_at(x, y).is_some() {
+            return None;
+        }
+        for w in self.windows.iter().rev() {
+            if w.minimized {
+                continue;
+            }
+            let e = w.edges_at(x, y);
+            if e != 0 {
+                return Some((w.app, e));
+            }
+            if w.rect().contains(x, y) {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// The pointer's picture at (x, y): a double arrow over a window's edge or corner (and
+    /// while dragging one), else the arrow.
+    pub fn pointer_shape(&self, x: i32, y: i32) -> crate::cursor::Shape {
+        use crate::cursor::Shape;
+        let edges = match &self.resize {
+            Some(r) => r.edges,
+            None => {
+                let busy = self.apps_menu.is_some() || self.dock_menu.is_some() || self.desk_menu.is_some() || self.power_menu || self.install_notice || self.display_trial.is_some();
+                if busy || self.drag.is_some() || self.capture || self.sb_drag.is_some() || self.videos.fullscreen() {
+                    return Shape::Arrow;
+                }
+                self.resize_target(x, y).map(|t| t.1).unwrap_or(0)
+            }
+        };
+        let (h, v) = (edges & (EDGE_L | EDGE_R) != 0, edges & (EDGE_T | EDGE_B) != 0);
+        match (h, v) {
+            (true, false) => Shape::ResizeH,
+            (false, true) => Shape::ResizeV,
+            (true, true) if (edges & EDGE_L != 0) == (edges & EDGE_T != 0) => Shape::ResizeNwse,
+            (true, true) => Shape::ResizeNesw,
+            _ => Shape::Arrow,
+        }
+    }
+
+    /// Follow the pointer while resizing: the dragged edges move with it, the window no smaller
+    /// than its app needs, within the desktop across and above the taskbar.
+    fn apply_resize(&mut self, rz: Resize, x: i32, y: i32) {
+        let Some(i) = self.index_of(rz.app) else { return };
+        let s = rz.start;
+        let (min_w, min_h) = rz.app.min_size();
+        // (A window opened smaller than that, on a small screen, can't be made smaller still.)
+        let (mw, mh) = (min_w.min(s.w), min_h.min(s.h));
+        let work = self.work_on(self.screen_at(s.x + s.w / 2, s.y + TITLE_H / 2));
+        let (left, right) = (0.min(s.x), self.w.max(s.x + s.w));
+        let (top, bottom) = (work.y.min(s.y), (work.y + work.h).max(s.y + s.h));
+        let (dx, dy) = (x - rz.from.0, y - rz.from.1);
+        let (mut x0, mut y0, mut x1, mut y1) = (s.x, s.y, s.x + s.w, s.y + s.h);
+        if rz.edges & EDGE_L != 0 {
+            x0 = (s.x + dx).clamp(left, x1 - mw);
+        }
+        if rz.edges & EDGE_R != 0 {
+            x1 = (s.x + s.w + dx).clamp(x0 + mw, right);
+        }
+        if rz.edges & EDGE_T != 0 {
+            y0 = (s.y + dy).clamp(top, y1 - mh);
+        }
+        if rz.edges & EDGE_B != 0 {
+            y1 = (s.y + s.h + dy).clamp(y0 + mh, bottom);
+        }
+        let w = &mut self.windows[i];
+        (w.x, w.y, w.w, w.h) = (x0, y0, x1 - x0, y1 - y0);
     }
 
     /// No mouse pointer: the screen is off or the photo frame is showing.
@@ -2424,6 +2571,9 @@ impl Desktop {
         if matches!(self.drag, Some((a, ..)) if a == app) {
             self.drag = None;
         }
+        if self.resize.is_some_and(|r| r.app == app) {
+            self.resize = None;
+        }
         self.capture = false;
         kprintln!("solon: close {}", app.name());
     }
@@ -3247,6 +3397,19 @@ impl Desktop {
             self.capture = false;
         }
 
+        // Resizing a window: its edges follow the pointer until the button comes up.
+        if let Some(rz) = self.resize {
+            if released || buttons & 1 == 0 {
+                self.resize = None;
+                kprintln!("solon: {} resized to {}x{}", rz.app.name(), self.index_of(rz.app).map(|i| self.windows[i].w).unwrap_or(0), self.index_of(rz.app).map(|i| self.windows[i].h).unwrap_or(0));
+                return true;
+            }
+            if moved {
+                self.apply_resize(rz, x, y);
+                return true;
+            }
+            return redraw;
+        }
         if let Some((app, ox, oy)) = self.drag {
             if released {
                 self.drag = None;
@@ -3393,6 +3556,16 @@ impl Desktop {
             }
         }
 
+        // A window's edge or corner: drag it to change the window's size.
+        if let Some((app, edges)) = self.resize_target(x, y) {
+            if self.focused_app() != Some(app) {
+                self.raise(app);
+            }
+            if let Some(i) = self.index_of(app) {
+                self.resize = Some(Resize { app, edges, start: self.windows[i].rect(), from: (x, y) });
+            }
+            return true;
+        }
         // Windows, top first.
         let Some(i) = self.windows.iter().rposition(|w| !w.minimized && w.rect().contains(x, y)) else { return redraw };
         let app = self.windows[i].app;

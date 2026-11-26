@@ -11,6 +11,7 @@ summary of what it does.
 | File | What it is |
 |---|---|
 | `main.rs` | The entry point: memory, interrupts, screens, drivers and settings, then the desktop's main loop |
+| `bootscreen.rs` | The screen while Solon starts: a sunrise, the progress bar (kept moving by another core) and what's happening |
 | `memory.rs` | The kernel heap (all of the largest memory region, with quick lists for small blocks), DMA buffers, and mapping device registers |
 | `interrupts.rs` | GDT, IDT, the interrupt controller and the 100 Hz timer |
 | `smp.rs` | The other processor cores: shared jobs (decoding, drawing) and background tasks (a video's pictures) |
@@ -25,7 +26,7 @@ summary of what it does.
 | `screen.rs`, `display.rs` | Putting the desktop on each screen (only what changed), resolutions and monitors |
 | `gpu.rs`, `nvidia/` | Graphics cards; the NVIDIA driver that lights a second monitor and sends sound to monitors |
 | `gfx.rs`, `font.rs`, `raster.rs` | The drawing surface, Noto text and anti-aliased outlines |
-| `icons.rs`, `cursor.rs`, `wallpaper.rs`, `scrollbar.rs` | App icons, the pointer, desktop pictures, scroll bars |
+| `icons.rs`, `cursor.rs`, `wallpaper.rs`, `scrollbar.rs` | App icons, the pointer (the arrow, and the double arrows for resizing windows), desktop pictures, scroll bars |
 
 ## Input, USB and disks
 
@@ -42,7 +43,7 @@ summary of what it does.
 
 | File | What it is |
 |---|---|
-| `desktop.rs` | Windows, the taskbar on every screen, menus, the clock and wallpaper |
+| `desktop.rs` | Windows (moved, resized by any edge or corner, maximized), the taskbar on every screen, menus, the clock and wallpaper |
 | `settings.rs`, `settingsui.rs` | Saved settings and the Settings window |
 | `photos.rs`, `editor.rs`, `edit.rs`, `frame.rs`, `import.rs` | Photos, the photo editor, Photo Frame and the screensaver, Import |
 | `files.rs`, `diskmgr.rs` | Files and Disks |

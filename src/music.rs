@@ -888,9 +888,16 @@ impl MusicApp {
         let prev = Rect::new(play.x - 60, b.y + 16, 44, 40);
         let next = Rect::new(play.x + play.w + 16, b.y + 16, 44, 40);
         let seek = Rect::new(cx - (b.w / 4).min(300), b.y + 74, (b.w / 2).min(600), 8);
-        let vol = Rect::new(b.x + b.w - 20 - 120, b.y + 34, 120, 10);
-        let repeat = Rect::new(vol.x - 50 - 44, b.y + 20, 44, 40);
-        let shuffle = Rect::new(repeat.x - 52, b.y + 20, 44, 40);
+        // A narrow window: a shorter volume bar, and shuffle and repeat move to the left of
+        // the song's buttons when they'd run into "next".
+        let vw = if b.w >= 780 { 120 } else { 70 };
+        let vol = Rect::new(b.x + b.w - 20 - vw, b.y + 34, vw, 10);
+        let mut repeat = Rect::new(vol.x - 50 - 44, b.y + 20, 44, 40);
+        let mut shuffle = Rect::new(repeat.x - 52, b.y + 20, 44, 40);
+        if shuffle.x < next.x + next.w + 12 {
+            repeat = Rect::new(prev.x - 12 - 44, b.y + 20, 44, 40);
+            shuffle = Rect::new(repeat.x - 52, b.y + 20, 44, 40);
+        }
         (prev, play, next, seek, shuffle, repeat, vol)
     }
     /// Columns of the song list: (x of title, artist, album, time).
@@ -1146,9 +1153,13 @@ impl MusicApp {
         if let Some(i) = shown {
             let (title, artist, cover) = (self.songs[i].title.clone(), String::from(self.songs[i].artist_or_unknown()), self.songs[i].cover);
             self.cover_or_note(c, cover, b.x + 16, b.y + 14, 68, &title);
-            let maxw = (prev.x - (b.x + 100) - 20).max(40);
-            c.text(b.x + 100, b.y + 24, &ellipsize(&title, maxw, Size::Small, true), Size::Small, true, INK);
-            c.text(b.x + 100, b.y + 48, &ellipsize(&artist, maxw, Size::Small, false), Size::Small, false, DIM);
+            // (In a very narrow window there's only room for the cover; the window's title
+            // still says what's playing.)
+            let maxw = prev.x.min(shuffle.x) - (b.x + 100) - 20;
+            if maxw >= 60 {
+                c.text(b.x + 100, b.y + 24, &ellipsize(&title, maxw, Size::Small, true), Size::Small, true, INK);
+                c.text(b.x + 100, b.y + 48, &ellipsize(&artist, maxw, Size::Small, false), Size::Small, false, DIM);
+            }
         }
         // Previous, play/pause, next.
         let (px, py) = (prev.x + prev.w / 2, prev.y + prev.h / 2);
