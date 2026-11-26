@@ -1,12 +1,21 @@
 # Developing SimpleOS
 
-SimpleOS (Solon) is a single Rust crate built for the bare-metal `x86_64-unknown-none` target
-and booted by [Limine](https://github.com/limine-bootloader/limine). Everything runs in the
-kernel: drivers, the desktop and the apps.
+SimpleOS (Solon) is a single Rust crate built for its own bare-metal target,
+[`x86_64-solon.json`](../x86_64-solon.json), and booted by
+[Limine](https://github.com/limine-bootloader/limine). Everything runs in the kernel: drivers,
+the desktop and the apps.
+
+The target is Rust's `x86_64-unknown-none` with the processor's floating-point and vector unit
+(SSE2) in use instead of software floating point: decoding sound, pictures and fonts runs many
+times faster. Every core switches the unit on first thing (`kmain` and `ap_entry`), and AVX2 as
+well where the processor has it (`cpu::enable_simd`); interrupt handlers save the registers
+they use. The standard library's `core` is built for it from source (`build-std` in
+`.cargo/config.toml`, which is why `rust-toolchain.toml` asks for `rust-src`).
 
 ## What you need
 
-- Rust: the nightly toolchain is picked automatically from `rust-toolchain.toml`.
+- Rust: the nightly toolchain (with its source, for `build-std`) is picked automatically
+  from `rust-toolchain.toml`. The first build compiles `core` too and takes a few minutes.
 - QEMU with OVMF (UEFI firmware), and python3 for the test scripts.
   - Linux (including a Raspberry Pi): `qemu-system-x86`, `ovmf`, `python3`. On a Pi, QEMU
     emulates the PC in software, so booting takes about 25 seconds.
@@ -26,6 +35,7 @@ kernel: drivers, the desktop and the apps.
 | `tools/make-usb.sh` / `.\tools\make-usb.ps1` | Build the real-PC USB files and disk image into `dist/` |
 | `tools/publish-usb.sh` | Upload `dist/` to the GitHub release `latest` (run by the pre-push hook) |
 | `tools/get-steamboat-willie.sh` | Download a public-domain test video and copy it onto a Solon stick |
+| `tools/make-demo-music.sh` | Make the seven public-domain demo songs (one in each format Music plays) that `make-usb` puts on the stick; needs curl and FFmpeg |
 | `.\tools\make-samples.ps1` | Regenerate the sample photos |
 
 Host tools (each its own crate under `tools/`, built for the computer you work on, e.g.
@@ -34,7 +44,7 @@ Host tools (each its own crate under `tools/`, built for the computer you work o
 | Tool | What it checks or makes |
 |---|---|
 | `tools/mkimg` | Builds FAT/exFAT/GPT test disks and the USB image, checks partition tables, decodes print jobs, copies files out of disk images (`exfat-get`), looks up crash addresses (`sym`) |
-| `tools/mediatest` | The video player's decoders, frame by frame and sample by sample against FFmpeg; decoding speed |
+| `tools/mediatest` | The players' decoders, frame by frame and sample by sample against FFmpeg (`audio`, `video`), song tags (`tags`), decoding speed |
 | `tools/videotest` | The H.264 encoder and decoder, AAC, FLAC, MP4 and AVI code against Windows' own codecs |
 | `tools/pdftest`, `tools/doctest`, `tools/printtest` | PDF reading and writing, Word/Excel files, printer languages |
 | `tools/spell` | Builds the spelling dictionary from SCOWL's word lists |
@@ -53,6 +63,9 @@ Host tools (each its own crate under `tools/`, built for the computer you work o
 - `--boot-stick <image>` / `--legacy-bios`: boot from a USB image like a real PC.
 - `--sound`: a sound card whose output is saved to `test-out/sound.wav`.
 - `--usb audio`: a USB sound device whose output is saved to `test-out/usb-sound.wav`.
+- `--music DIR`: songs for the boot drive's `music` folder (like the demo songs; the
+  development boot folder isn't a GPT disk, so to see them in Music boot a USB image with
+  `--boot-stick`, or put songs in Solon storage with `mkimg library`).
 - `--resolution WxH`, `--smp N`, `--cpu MODEL`.
 - `--cmdline "..."`: boot options, below.
 

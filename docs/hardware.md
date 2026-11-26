@@ -5,7 +5,7 @@ the first PC Solon was tried on: an AMD Ryzen 7 5800X (Zen 3, 8 cores and 16 thr
 ASUS ROG STRIX B550-F GAMING WIFI II.
 
 What that board had working already: USB (both of its xHCI controllers), SATA and NVMe. Its
-sound was found but silent on the first try (see stage 3).
+sound was found but silent on the first try (see stage 5).
 
 Solon has no network on purpose (no internet, nothing to download: see the README), so the
 board's Ethernet and Wi-Fi stay unused.
@@ -54,9 +54,35 @@ board's Ethernet and Wi-Fi stay unused.
    second monitor when mirrored, lower resolutions). A processor without MONITOR/MWAIT has its
    other cores put to sleep, as does boot option "onecore". A benchmark at start logs the
    speed-up (QEMU with 4 cores: 80 ms on one core, 20 ms on four; the sample photos load in
-   5.3 s instead of 7.2 s, the slowest single photo being the limit). Next: video decoding.
+   5.3 s instead of 7.2 s, the slowest single photo being the limit).
+   Third step (build after 2026-11-25): several jobs can share the cores at once (four job
+   slots instead of one lock, so a background task's job and the desktop's never wait for each
+   other), and long background tasks get a core of their own (`smp::spawn`, sleeping in
+   MONITOR/MWAIT on their own word with `sleep_on`). A playing video's pictures are decoded
+   that way: the PC's log showed VP9 taking 25 ms of every 41 ms frame on the first core,
+   between mouse moves and sound top-ups, which is where the mouse lag and the late sound came
+   from; now the first core only reads the file and shows finished pictures.
 
-3. **Sound (works).** The board's Realtek codec (10ec:1168, the ALC1220 that
+3. **The floating-point and vector unit (done).** The kernel was built for Rust's
+   `x86_64-unknown-none`, which leaves the unit off and does every float operation in software
+   (each one a library call of tens of cycles): MP3, AAC, Vorbis and Opus decoding, fonts and
+   PDF drawing all paid for it. Solon now has its own target (`x86_64-solon.json`, SSE2 on),
+   and the standard library's core is built for it from source. Every core switches the unit
+   on before running any compiled code (`kmain` and `ap_entry` are small assembly entries that
+   set CR0.MP, clear CR0.EM/TS, set CR4.OSFXSR/OSXMMEXCPT and line the stack up to 16 bytes),
+   then `cpu::enable_simd` turns on XSAVE and AVX/AVX2 where the processor has them (CR4.OSXSAVE,
+   XCR0 x87|SSE|AVX), shown in Settings > This PC. Interrupt handlers save the vector registers
+   they use (the x86-interrupt calling convention does it with SSE on). There are no processes,
+   so nothing else needs saving.
+
+4. **Memory (done).** The heap was the largest usable RAM region capped at 2 GiB; it's now
+   the whole region (about 30 GB on the 32 GB PC). Blocks up to 4 KiB, most of what Rust code
+   asks for, come from free lists of 28 sizes carved from 64 KiB pieces, each size with its own
+   lock, so taking or freeing one is a few instructions and cores rarely wait for each other;
+   bigger ones (pictures, sound, files) still come from the first-fit list. Settings > This PC
+   shows the size and what's in use.
+
+5. **Sound (works).** The board's Realtek codec (10ec:1168, the ALC1220 that
    ASUS calls SupremeFX S1220A) behind AMD's HD Audio controller (1022:1487) was found and
    set up, and Steamboat Willie's sound was sent to all four of its outputs, but nothing could
    be heard. AMD's controller reads memory without snooping the processor's caches unless told
@@ -74,6 +100,6 @@ board's Ethernet and Wi-Fi stay unused.
    USB sound devices (USB Audio Class 1 and 2) play too, through a new isochronous endpoint
    in the xHCI driver (`usbaudio.rs`): checked with QEMU's USB sound device.
 
-4. **Smaller things.** Four of the chipset controller's USB 3 ports report a connection but
+6. **Smaller things.** Four of the chipset controller's USB 3 ports report a connection but
    never finish link training (front-panel cabling, probably); Solon gives up on them after a
    warm reset each, which costs boot time. The board's RGB lights (an ASUS Aura USB device).

@@ -79,10 +79,12 @@ A folder in the Applications menu.
   phone, camera, computer, DVD/TV and web videos with sound: click the picture to pause or play
   (a big sign shows which; double-click for full screen), drag along the bar to jump, arrow
   keys for 10 seconds, volume.
-- Smooth playback: while a video plays only its picture is drawn again and sent to the screen,
-  each picture is converted and scaled on every processor core, and after a jump the sound
-  waits for the picture so they start together. How it's keeping up goes to the log every 10
-  seconds.
+- Smooth playback: the pictures are decoded on a processor core of their own, a few ahead of
+  time, so the mouse and the sound never wait for them; only the picture is drawn again and
+  sent to the screen, converted and scaled on every other core. Sound and picture keep to the
+  same clock: the picture follows exactly what the speakers have played, and after a jump the
+  sound waits for the picture so they start together. How it's keeping up goes to the log
+  every 10 seconds.
 - Files: MP4/MOV/3GP, MKV, WebM, AVI, MPEG-TS (.ts/.m2ts/.mts) and MPEG-PS (.mpg/.vob).
 - Pictures: H.264, HEVC/H.265 (iPhone "High Efficiency", 8 and 10-bit), MPEG-1/2, MPEG-4 Part 2
   (Xvid, DivX 4/5), DivX 3 (Microsoft MPEG-4 v3), H.263, VP8, VP9 (8, 10 and 12-bit) and
@@ -97,6 +99,39 @@ A folder in the Applications menu.
   `tools/get-steamboat-willie.sh` downloads the 1080p VP9 version from Wikimedia Commons and
   can copy it into a stick's Solon storage (Videos folder). Solon's decoder plays it frame for
   frame the same as FFmpeg.
+
+## Music
+
+- Every song in Solon storage, on USB drives and on phones, plus seven demo songs on a new
+  Solon stick (they stay with the PC after installing): The Entertainer, The Stars and Stripes
+  Forever, Canon in D, Morning Mood, In the Hall of the Mountain King, Rachmaninoff playing the
+  Minute Waltz (1923) and Gershwin playing Rhapsody in Blue (1924), all public domain; see
+  `tools/make-demo-music.sh` for where they come from.
+- Songs by title, artist, album or length (click a heading to sort); albums with their
+  covers; artists. Titles, artists, albums, years, track numbers and covers come from the
+  files' own tags (ID3 in MP3s, MP4 tags in M4As from iTunes and phones, Vorbis comments in
+  FLAC, Ogg and Opus, WAV and AIFF tags), or a folder.jpg beside the songs (as Windows Media
+  Player left them).
+- A player bar: previous, play/pause, next, the position (drag to jump), shuffle, repeat (all
+  or one song) and volume; double-click a song to play it and the ones after it. One song runs
+  straight into the next, and it keeps playing with other windows in front. Space plays and
+  pauses; the arrow keys choose a song or jump 10 seconds.
+- Plays MP3 (and MP2), AAC/M4A, FLAC (up to 24-bit and 192 kHz), Ogg Vorbis, Opus, WAV, AIFF,
+  AMR, AC-3 and DTS, all with Solon's own decoders, checked against FFmpeg sample by sample.
+  Sound at other rates is changed to 48 kHz with a 64-tap windowed-sinc filter. Not yet:
+  Windows Media (WMA), Apple Lossless (ALAC) and HE-AAC's high band.
+- Starting a video or the Sound Editor pauses the music, and the other way round; game sounds
+  stay quiet while music plays.
+
+## Sound Editor
+
+A song (any file Music plays) as its waveform: drag across it to choose a part, then Cut, Copy,
+Paste, Delete or "Keep only this"; Fade in, Fade out, Louder, Quieter (3 dB at a time), "Even
+out" (the loudest part brought up to just below full) or Silence. Undo and redo (Ctrl+Z,
+Ctrl+Y), play from the cursor or just the chosen part, zoom with the mouse wheel and move
+around in the overview below. "Save a copy" writes FLAC (lossless) or WAV into the Music folder
+in Solon storage; the original is never changed. Open it from the Applications menu or with
+"Open in Sound Editor" in Music.
 
 ## Video Editor
 
@@ -212,8 +247,12 @@ click.
 
 ## Processor and motherboard
 
-- Every processor core is used: photo thumbnails are decoded together and the screen is scaled
-  on all cores.
+- Every processor core is used: photo thumbnails are decoded together, the screen is scaled
+  on all cores, and a playing video's pictures are decoded on a core of their own.
+- The processor's floating-point and vector unit is used everywhere (SSE2, and AVX2 switched
+  on where the processor has it), instead of floating point done in software.
+- All of the computer's memory is used for the heap (it stopped at 2 GB), with quick lists for
+  small blocks; Settings > This PC shows how much is in use.
 - Settings > This PC: the processor (name, cores and threads; on AMD Ryzen its clock,
   temperature and package power, live), the motherboard, BIOS and each memory module (from the
   firmware's SMBIOS tables), and the board's sensors on Nuvoton NCT6798D/NCT6799D chips (fans,
