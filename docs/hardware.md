@@ -103,3 +103,74 @@ board's Ethernet and Wi-Fi stay unused.
 6. **Smaller things.** Four of the chipset controller's USB 3 ports report a connection but
    never finish link training (front-panel cabling, probably); Solon gives up on them after a
    warm reset each, which costs boot time. The board's RGB lights (an ASUS Aura USB device).
+
+# Laptops
+
+The first laptop tried (2026-11-26) was a Dell Latitude E6530: Intel Core i7-3740QM (Ivy
+Bridge), Intel HD 4000 graphics plus an NVIDIA "NVC1" (Fermi, 10de:0dfc) in Optimus mode,
+16 GB, a T-FORCE 256 GB SATA SSD and a DVD drive. Solon started from its stick there (USB,
+sound, keyboard, touchpad and the screen worked), but found no internal disk and showed no
+battery.
+
+## The internal disk
+
+Solon drove SATA controllers in AHCI mode only (PCI class 01:06). Laptops ship with their
+controller set to one of three modes in the firmware ("SATA Operation" on Dells), and only
+AHCI looked like a disk to Solon:
+
+- **RAID On** (class 01:04). Intel's Rapid Storage and AMD's RAID are AHCI underneath (the
+  registers behind BAR 5), so `ahci.rs` drives them once the AHCI version register reads
+  1.x. Dell's Latitudes ship this way. A disk holding Intel RAID metadata ("Intel Raid ISM
+  Cfg Sig." near its end) is part of a striped or mirrored volume and is left alone.
+- **ATA / IDE** (class 01:01), `ide.rs`: two channels of up to two devices each, at the old
+  fixed ports (0x1F0 / 0x170) or at BARs 0-3 in "native" mode. Disks are identified, CD/DVD
+  drives (ATAPI) skipped, and data moves by bus-master DMA (BAR 4: a one-entry table and a
+  64 KiB buffer, both below 4 GiB, from a small pool kept aside there because the heap on a
+  16 GB machine lies above it) when the first block reads the same as through the data
+  port; otherwise through the data port (PIO). 48-bit commands where the disk has them.
+  Checked in QEMU with its PIIX IDE controller (`./test.sh --internal ide:<image>`): both
+  disks found, using DMA, their partitions read in Disks.
+- **AHCI**: as before, now with a log line for each port (link down, CD/DVD, disk).
+
+Every storage controller found is logged (`disk: controller 8086:282a ... (RAID)`), so a disk
+that doesn't appear can be explained from the log.
+
+## The battery
+
+Laptop batteries have no standard registers: each firmware supplies ACPI methods (`_BIF` or
+`_BIX` for what the battery is, `_BST` for its state, `_PSR` for the charger) written in
+AML, and those mostly talk to the embedded controller (EC), a small processor on its own I/O
+ports. On the E6530 the EC sits at 0x930/0x934, not the usual 0x62/0x66, and its battery
+methods read EC registers through an `EmbeddedControl` operation region.
+
+So Solon runs the firmware's AML, as Windows and Linux do (`aml.rs`, `battery.rs`), with the
+interpreter from the [acpi](https://github.com/rust-osdev/acpi) crate (vendored in
+`vendor/acpi`):
+
+1. At start, if the DSDT or an SSDT mentions a battery (PNP0C0A), a worker core loads them,
+   initializes the namespace (`_STA`, `_INI`), finds the battery bays, chargers (ACPI0003)
+   and the EC (PNP0C09, its ports from `_CRS`), connects the EC (an EmbeddedControl region
+   handler doing the EC's read and write commands, then `_REG`) and reads everything.
+2. Every 5 seconds a worker core reads `_STA`, `_BST` and `_PSR` again (`_BIF`/`_BIX` every
+   5 minutes), and the taskbar and Settings show the result.
+3. The interpreter never runs on the first core (it may wait on slow hardware). A panic
+   inside it is caught (the panic handler jumps back to where `aml.rs` called it, with the
+   registers saved there) and Solon carries on without the battery icon; boot option
+   "batterycrashtest" checks that, and "nobattery" leaves the firmware's code alone.
+
+`tools/acpitest` runs `battery.rs` on the Pi or a PC against other laptops' tables (from the
+[linuxhw/ACPI](https://github.com/linuxhw/ACPI) collection of dumps people shared), with a
+pretend EC. The crate's first try on 90 laptops of 18 makes: 35 worked. The problems found
+were fixed in the vendored copy (listed in `vendor/acpi/README.solon.md`): EC regions never
+reached their handler; `Not` and four other operations always failed; `Acquire` gave no
+value; a method without `Return` threw its caller off; `ToString`, `Mid` and `Alias` failed
+on real tables; and several panics. Now 86 of the 90 get through (the other four wait on
+hardware the pretend one doesn't imitate, such as AMD's SMU mailbox), and a test machine
+(`tools/acpitest/tests/basics`) checks the answers are right. In QEMU, which has no battery,
+`./test.sh --acpi-table tools/acpitest/tests/qemu/battery.aml` adds one that runs down.
+
+## The NVIDIA chip
+
+With Optimus the NVIDIA chip is powered off until something asks for it, and its registers
+then read all ones; Solon logged nonsense from them (a "Blackwell" with 4294967295 MiB). It
+now sees the all-ones and leaves the chip alone.

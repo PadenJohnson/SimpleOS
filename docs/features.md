@@ -182,6 +182,10 @@ click.
 
 - **Storage**: a "Solon Library" partition on the SimpleOS USB stick itself or in free space
   on an internal NVMe/SATA disk. Windows and other partitions are never touched.
+- **Internal disks** in every mode a SATA controller can be set to in the firmware: AHCI,
+  "RAID On" (Intel Rapid Storage and AMD RAID, which many laptops ship with; a disk that is
+  part of a RAID volume is left alone) and the older "ATA"/"IDE" mode (with DMA where the
+  controller has it), as well as NVMe. CD/DVD drives are skipped.
 - **Files**: browse Solon storage and USB drives; new folder, rename, move; Delete goes to a
   Recycle bin (restore, delete forever, empty); copy folders and files from USB drives into
   Solon and from Solon onto USB drives.
@@ -262,6 +266,20 @@ click.
   temperature and package power, live), the motherboard, BIOS and each memory module (from the
   firmware's SMBIOS tables), and the board's sensors on Nuvoton NCT6798D/NCT6799D chips (fans,
   temperatures, voltages). See [hardware.md](hardware.md).
+
+## Laptops
+
+- **Battery**: on a laptop the taskbar shows the battery beside the clock: how full it is, a
+  lightning bolt while charging, and the charge in per cent. Click it for Settings > This PC,
+  which shows the charge with the time left (or until full), the battery's health (what it
+  holds now against what it held new), its charge cycles and its model.
+- Notices when the charger is plugged in or pulled out, and when the battery runs low (10%)
+  and very low (5%).
+- The battery is read the way Windows and Linux read it, by running the laptop firmware's own
+  ACPI code for it (an AML interpreter, on a core of its own), so it works on laptops of any
+  make; checked against 90 laptops' firmware tables. See [hardware.md](hardware.md).
+- The touchpad works as a mouse (PS/2), and a laptop's second graphics chip ("Optimus"),
+  switched off while Solon draws with the built-in one, is left alone.
 
 ## Settings
 
