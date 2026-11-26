@@ -9,6 +9,10 @@ hardware, but haven't been confirmed on a real PC yet.
 
 ## Desktop
 
+- Starting up: a sunrise over calm water with "SimpleOS", a progress bar and, in plain words,
+  what's happening ("Looking for disks, USB drives and the keyboard and mouse..."). Once the
+  processor's other cores are awake one of them keeps the bar moving smoothly (it creeps on
+  through long steps), so the PC never looks stuck.
 - A nature photo (five built in: autumn, sunset, forest, field, snow; free CC0 photos, see
   [assets/wallpapers/CREDITS.md](../assets/wallpapers/CREDITS.md)), a soft colour, or one of
   your own photos ("Desktop picture" in Photos) behind a big clock whose colour adapts to the
@@ -18,8 +22,9 @@ hardware, but haven't been confirmed on a real PC yet.
   the taskbar on every screen, the date, the 24-hour clock, and the way to the sound and
   screen settings.
 - A centred Applications launcher with folders (Documents, Games).
-- Several apps open at once in rounded windows that move, minimize and maximize. Smooth Noto
-  Sans and Noto Serif fonts throughout.
+- Several apps open at once in rounded windows that move, minimize and maximize, and change
+  size by dragging any side or corner (the pointer turns into a double arrow there; each app
+  has a smallest size it still fits in). Smooth Noto Sans and Noto Serif fonts throughout.
 - Right-click the desktop for quick ways to the background, screens, sound, screensaver, date
   and time, text size and spelling settings.
 - The power button: turn off the screen, restart, shut down (ACPI, with a confirmation).
